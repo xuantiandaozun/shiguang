@@ -1,82 +1,98 @@
-# 拾光（ShiGuang）— AI 桌面助手（一期）
+# ShiGuang (拾光) — AI Desktop Assistant for Windows
 
-一个常驻 Windows 托盘的 AI 桌面助手：悬浮球 + 聊天小窗与 AI 对话，帮你**整理桌面文件**、**管理待办并准时提醒**。
+**English | [简体中文](README.zh-CN.md)**
 
-## 功能一览
+A tray-resident AI desktop assistant: a floating ball + chat window backed by an LLM that **organizes your desktop**, **reminds you of todos on time**, and **operates your browser**.
 
-| 模块 | 说明 |
+## Features
+
+| Module | Description |
 | --- | --- |
-| AI 桌面整理 | 对 AI 说「帮我整理一下桌面」→ 生成分类方案 → 你在聊天卡片里确认后执行；全程只移动不删除，支持按批次一键撤销 |
-| 自动化规则 | 方案确认后对 AI 说「以后都按这个规则来」，或在主窗口手动建规则；之后桌面新文件命中规则自动归类（仅已审核规则生效，可全局暂停） |
-| 待办事项 | 自然语言创建：「明天下午三点提醒我交周报」；支持重复（每天/每周）、优先级、延后提醒；到点弹 Windows 通知 |
-| 悬浮球 | 桌面常驻小圆球，可拖动，单击展开/收起聊天窗；聊天窗、主窗口关闭后程序仍在托盘运行 |
-| 主窗口 | 待办管理 / 整理规则 / 操作记录（撤销）/ 设置 |
+| AI Desktop Organizer | Say "organize my desktop" → get a classification plan → confirm in the chat card to execute. Moves only, never deletes; one-click undo per batch |
+| Automation Rules | After confirming a plan, tell the AI "use this rule from now on", or create rules manually; new desktop files matching a rule are filed automatically (only approved rules run; global pause available) |
+| Todos | Natural-language creation ("remind me to submit the weekly report at 3pm tomorrow"); daily/weekly repeats, priorities, snooze; reminder via Windows notification or popup — the input popup lets you reply to the AI right from the reminder |
+| Browser Control | Read article bodies (Readability), snapshot and click/type on pages through the companion extension (your real browser, with your logins), with automatic failover to a standalone CDP instance |
+| Background Commands | The AI can run shell commands in the background (builds, watchers) and check on them later; can be disabled in Settings |
+| Agent Skills | Built-in read-only skills + external skills the AI can create and refine; syncs with Claude / Codex / Cursor skill folders |
+| File & Vision Tools | Read files (text / PDF), OCR, image understanding, safe writes with automatic backups, read-only subagents |
+| Floating Ball | Always-on draggable orb; click to toggle the chat window; closing windows keeps the app running in the tray |
+| Main Window | Todos / Rules / History (undo) / Background Tasks / Skills / Settings |
 
-## 安全设计
+## Safety by Design
 
-- 任何整理执行前必须人工确认（聊天面板里的方案卡片）
-- 只移动文件、绝不删除；重名自动加 `(n)` 序号
-- 快捷方式 `.lnk/.url`、`desktop.ini`、隐藏文件默认不动
-- 所有移动记入 SQLite `operation_logs`，撤销 = 反向移动
+- Every organizing execution requires manual confirmation (plan card in the chat panel)
+- Moves only, never deletes (delete = recycle bin); name clashes get a `(n)` suffix
+- Shortcuts `.lnk/.url`, `desktop.ini`, and hidden files are untouched by default
+- Every move is logged to SQLite `operation_logs`; undo = reverse move
+- File writes are auto-backed up; destructive shell commands require explicit consent
 
-## 技术栈
+## Tech Stack
 
-Tauri 2（Rust）+ React 18 + TypeScript + Vite + TailwindCSS + Zustand + SQLite（rusqlite bundled）
-LLM 走 OpenAI 兼容接口（DeepSeek / 通义千问 / OpenAI 等），Function Calling + SSE 流式。
+Tauri 2 (Rust) + React 18 + TypeScript + Vite + TailwindCSS + Zustand + SQLite (rusqlite bundled).
+LLM via OpenAI-compatible APIs (DeepSeek / Qwen / OpenAI …), Function Calling + SSE streaming.
 
-## 开发环境要求
+## Requirements
 
 - Node.js 18+
-- Rust（rustup，msvc 工具链）+ Microsoft C++ 生成工具（编译 bundled SQLite 需要）
-- Windows 10/11（自带 WebView2）
+- Rust (rustup, MSVC toolchain) + Microsoft C++ Build Tools (required to compile bundled SQLite)
+- Windows 10/11 (WebView2 built in)
 
-## 本地运行
+## Run Locally
 
 ```bash
 npm install
 npm run tauri:dev
 ```
 
-首次运行后：托盘图标右键 → 打开主窗口 →「设置」页填写大模型 API（有 DeepSeek / 通义 / OpenAI 预设），保存后即可在聊天窗使用。
+First run: right-click the tray icon → open the main window → Settings → fill in your LLM API (DeepSeek / Qwen / OpenAI presets), save, then chat.
 
-## 打包
+## Build
 
 ```bash
 npm run tauri:build
 ```
 
-产物：`src-tauri/target/release/bundle/nsis/` 下的 NSIS 安装包。
+Output: NSIS installer under `src-tauri/target/release/bundle/nsis/`.
 
-> 注意：Windows 通知仅在**安装后**的应用上显示应用名和图标；开发模式下通知会显示为 PowerShell 发起，这是系统限制。
+> Note: Windows notifications show the app name and icon only for the **installed** app; otherwise they appear as coming from PowerShell — a system limitation.
 
-## 数据位置
+## Data Location
 
-`%APPDATA%/com.deskhelper.win/deskhelper.db`（SQLite：待办、规则、操作记录、设置、聊天记录）。
-API Key 仅保存在本机此文件中，不会上传。
+`%APPDATA%/com.deskhelper.win/`:
 
-## 目录结构
+- `deskhelper.db` — SQLite: todos, rules, operation logs, settings, chat history
+- `tasks/`, `skills/`, `screenshots/`, `temp/` (AI scratch files), `file_backups/`
+
+API keys live only in this local database and are never uploaded.
+
+## Directory Layout
 
 ```
-src/                    React 前端
-  windows/              FloatBall / ChatPanel / MainWindow 三个窗口页面
-  components/           主窗口四个标签页
-  lib/ipc.ts            前端 invoke/事件封装
-  stores/chat.ts        聊天状态（zustand）
+src/                    React frontend
+  windows/              FloatBall / ChatPanel / Reminder / MainWindow pages
+  components/           Main window tabs (Todos / Rules / History / Tasks / Skills / Settings)
+  lib/ipc.ts            Sole declaration of the invoke/event IPC surface
+  stores/chat.ts        Chat state (zustand)
 src-tauri/src/
-  lib.rs                应用装配：插件、托盘、后台任务
-  commands.rs           IPC 命令层
-  db.rs                 SQLite（rusqlite）
-  llm/                  OpenAI 兼容客户端（SSE + Function Calling）、Agent 循环、工具集、提示词
-  organizer/            桌面扫描、方案执行/撤销、规则引擎、文件监听
-  todo/scheduler.rs     待办提醒调度
-scripts/gen-icon.cjs    应用图标生成脚本（node scripts/gen-icon.cjs）
+  lib.rs                Assembly: plugins, tray, background tasks
+  commands.rs           IPC command layer (settings stored in SQLite)
+  db.rs                 All SQLite reads/writes
+  llm/                  OpenAI-compatible client (SSE + Function Calling), agent loop,
+                        tool set, subagent, prompts, profile, vision
+  organizer/            Desktop scanner, plan executor/undo, rule engine, file watcher
+  browser/              Extension bridge + CDP; page-api + Readability (browser_read)
+  todo/scheduler.rs     Todo reminder scheduler (notify / popup / popup-with-input)
+  tasks.rs              Background commands;  skills.rs + builtin_skills.rs  Agent Skills
+  reader.rs / writer.rs / ocr.rs / machine.rs / tempfs.rs
+src-tauri/builtin-skills/  Built-in skill sources (compiled into the app)
+browser-extension/      Companion browser extension (WebSocket bridge to the app)
+scripts/gen-icon.cjs    Icon generator (node scripts/gen-icon.cjs)
 ```
 
-## 二期规划（架构已预留，未实现）
+## Roadmap
 
-- 微信桌面端聊天记录监控（需评估 UIA / OCR 路线与合规风险）
-- 浏览器操作（CDP 或浏览器扩展），作为新工具注册进 LLM 工具集即可
+- WeChat desktop chat-history monitoring (UIA / OCR route and compliance risks under evaluation)
 
-## 开源协议
+## License
 
 [MIT](LICENSE)
