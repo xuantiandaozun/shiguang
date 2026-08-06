@@ -1,0 +1,54 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: transparent;
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+body[data-window="main"] {
+  background: #0b1220;
+}
+
+@keyframes floatPulse {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 8px 30px rgba(99, 102, 241, 0.45);
+  }
+  50% {
+    transform: scale(1.06);
+    box-shadow: 0 8px 42px rgba(56, 189, 248, 0.6);
+  }
+}
+
+.animate-float-pulse {
+  animation: floatPulse 3s ease-in-out infinite;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 3px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}

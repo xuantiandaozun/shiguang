@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "拾光浏览器桥",
+  "version": "0.1.1",
+  "description": "连接本机拾光桌面助手，让 AI 可以读取和操作当前浏览器的标签页",
+  "permissions": ["tabs", "scripting", "alarms", "debugger"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" }
+}

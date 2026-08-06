@@ -1,0 +1,45 @@
+[package]
+name = "shiguang"
+version = "0.1.0"
+description = "ShiGuang - AI desktop assistant for Windows"
+edition = "2021"
+rust-version = "1.85"
+
+[lib]
+name = "shiguang_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
+tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures-util = { version = "0.3", features = ["sink"] }
+notify = "6.1"
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+dirs = "5"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+encoding_rs = "0.8"
+chromiumoxide = "0.9"
+tokio-tungstenite = "0.26"
+tokio-util = "0.7"
+base64 = "0.22"
+pdf-extract = "0.12.0"
+tauri-plugin-dialog = "2.7.2"
+rapidocr-core = "0.2.2"
+trash = "5"
+sysinfo = "0.36.1"
