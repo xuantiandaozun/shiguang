@@ -61,13 +61,13 @@ impl OcrEngine {
         match ext.as_str() {
             "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tif" | "tiff" => {}
             "" => bail!("无法识别图片格式（无扩展名）"),
-            other => bail!("不支持的图片格式: .{}（支持 png/jpg/jpeg/gif/bmp/webp/tif）", other),
+            other => bail!(
+                "不支持的图片格式: .{}（支持 png/jpg/jpeg/gif/bmp/webp/tif）",
+                other
+            ),
         }
 
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow!("OCR 引擎锁异常"))?;
+        let mut guard = self.inner.lock().map_err(|_| anyhow!("OCR 引擎锁异常"))?;
         if guard.is_none() {
             log::info!("初始化本地 OCR（模型目录: {:?}）…", self.model_dir);
             *guard = Some(Self::load(&self.model_dir)?);
@@ -93,7 +93,10 @@ impl OcrEngine {
             .collect::<Vec<_>>()
             .join("\n");
         let hint = if text.is_empty() {
-            Some("未识别到文字。若图片模糊/倾斜可换更清晰截图；需要理解画面内容请改用 read_image。".into())
+            Some(
+                "未识别到文字。若图片模糊/倾斜可换更清晰截图；需要理解画面内容请改用 read_image。"
+                    .into(),
+            )
         } else {
             None
         };

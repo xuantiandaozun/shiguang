@@ -35,9 +35,10 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
                 let state = app.state::<crate::AppState>();
                 let new_val = !state.auto_paused.load(Ordering::Relaxed);
                 state.auto_paused.store(new_val, Ordering::Relaxed);
-                let _ = state
-                    .db
-                    .set_setting("auto_organize_paused", if new_val { "true" } else { "false" });
+                let _ = state.db.set_setting(
+                    "auto_organize_paused",
+                    if new_val { "true" } else { "false" },
+                );
             }
             "quit" => {
                 app.exit(0);

@@ -90,7 +90,10 @@ impl CdpClient {
                 let info = self.info().await.unwrap_or(Value::Null);
                 if let Some(obj) = article.as_object_mut() {
                     if !obj.contains_key("url") {
-                        obj.insert("url".into(), info.get("url").cloned().unwrap_or(Value::Null));
+                        obj.insert(
+                            "url".into(),
+                            info.get("url").cloned().unwrap_or(Value::Null),
+                        );
                     }
                     if obj
                         .get("title")
@@ -124,10 +127,7 @@ impl CdpClient {
                     .get("direction")
                     .and_then(|v| v.as_str())
                     .unwrap_or("down");
-                let amount = params
-                    .get("amount")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(600);
+                let amount = params.get("amount").and_then(|v| v.as_u64()).unwrap_or(600);
                 let ref_ = params.get("ref").cloned().unwrap_or(Value::Null);
                 self.dh("scroll", json!([dir, amount, ref_])).await
             }
@@ -186,9 +186,23 @@ impl CdpClient {
                     .get("expression")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow!("缺少 expression"))?;
+                let ref_ = params.get("ref").and_then(|v| v.as_u64());
+                let dynamic_args = params.get("args").cloned().unwrap_or(Value::Null);
                 let page = self.current_page().await?;
+                let expression = if let Some(ref_) = ref_ {
+                    format!(
+                        "{}\n;(async()=>{{const $el=window.__dh.ref({});if(!$el)throw new Error('元素 [{}] 不存在或已失效，请重新获取快照');const $args={};return await ({});}})()",
+                        page_inject_js(),
+                        ref_,
+                        ref_,
+                        serde_json::to_string(&dynamic_args)?,
+                        expr
+                    )
+                } else {
+                    expr.to_string()
+                };
                 let v = page
-                    .evaluate(expr)
+                    .evaluate(expression)
                     .await
                     .map_err(|e| anyhow!("JS 执行失败: {}", e))?
                     .into_value::<Value>()
@@ -309,15 +323,11 @@ async fn port_up(port: u16) -> bool {
 async fn connect_port(port: u16, origin: &str) -> Result<CdpClient> {
     let http = format!("http://127.0.0.1:{}/json/version", port);
     let ws = match reqwest::get(&http).await {
-        Ok(resp) if resp.status().is_success() => resp
-            .json::<Value>()
-            .await
-            .ok()
-            .and_then(|v| {
-                v.get("webSocketDebuggerUrl")
-                    .and_then(|u| u.as_str())
-                    .map(str::to_string)
-            }),
+        Ok(resp) if resp.status().is_success() => resp.json::<Value>().await.ok().and_then(|v| {
+            v.get("webSocketDebuggerUrl")
+                .and_then(|u| u.as_str())
+                .map(str::to_string)
+        }),
         _ => None,
     };
     let ws = match ws {
@@ -349,9 +359,7 @@ async fn connect_ws(ws: &str, origin: &str) -> Result<CdpClient> {
     let (browser, mut handler) = Browser::connect(ws)
         .await
         .map_err(|e| anyhow!("连接 CDP 失败: {}", e))?;
-    let driver = tokio::spawn(async move {
-        while let Some(_ev) = handler.next().await {}
-    });
+    let driver = tokio::spawn(async move { while let Some(_ev) = handler.next().await {} });
     Ok(CdpClient {
         browser,
         _driver: driver,
@@ -362,7 +370,9 @@ async fn connect_ws(ws: &str, origin: &str) -> Result<CdpClient> {
 
 async fn launch_managed() -> Result<CdpClient> {
     let exe = find_browser_exe().ok_or_else(|| {
-        anyhow!("未找到 Chrome/Edge。请安装浏览器，或在浏览器中加载拾光扩展（browser-extension 目录）")
+        anyhow!(
+            "未找到 Chrome/Edge。请安装浏览器，或在浏览器中加载拾光扩展（browser-extension 目录）"
+        )
     })?;
     let dir = profile_dir()?;
     std::fs::create_dir_all(&dir)?;
@@ -390,12 +400,8 @@ fn find_browser_exe() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     for var in ["ProgramFiles", "ProgramFiles(x86)", "LocalAppData"] {
         if let Ok(base) = std::env::var(var) {
-            candidates.push(
-                PathBuf::from(&base).join(r"Google\Chrome\Application\chrome.exe"),
-            );
-            candidates.push(
-                PathBuf::from(&base).join(r"Microsoft\Edge\Application\msedge.exe"),
-            );
+            candidates.push(PathBuf::from(&base).join(r"Google\Chrome\Application\chrome.exe"));
+            candidates.push(PathBuf::from(&base).join(r"Microsoft\Edge\Application\msedge.exe"));
         }
     }
     candidates.into_iter().find(|p| p.exists())

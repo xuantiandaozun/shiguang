@@ -194,8 +194,34 @@ async function runInTabAuto(tabId, action, args) {
   }
 }
 
-// 在主世界执行用户 JS（可访问页面变量）
-async function evalInPage(tabId, expression) {
+// 执行动态 JS：带 ref 时复用快照所在隔离世界；不带 ref 时进入页面主世界。
+async function evalInPage(tabId, expression, ref, suppliedArgs) {
+  // 带 ref 时必须与 snapshot 在同一隔离世界执行，才能安全复用元素引用。
+  if (ref != null) {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["readability.js", "page-api.js"],
+    });
+    const [r] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: async (expr, elementRef, dynamicArgs) => {
+        try {
+          const $el = window.__dh && window.__dh.ref(elementRef);
+          if (!$el) return { ok: false, error: `元素 [${elementRef}] 不存在或已失效，请重新获取快照` };
+          const $args = dynamicArgs;
+          const v = await eval(expr);
+          return { ok: true, value: v === undefined ? null : v };
+        } catch (e) {
+          return { ok: false, error: String(e) };
+        }
+      },
+      args: [expression, ref, suppliedArgs ?? null],
+    });
+    if (r && r.error) throw new Error(r.error.message || String(r.error));
+    const res = r ? r.result : null;
+    if (res && res.ok === false) throw new Error(res.error);
+    return res ? res.value : null;
+  }
   const [r] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
@@ -288,15 +314,25 @@ async function handle(action, p) {
     case "evaluate": {
       const t = await activeTab();
       const expr = p.expression || "";
+      const ref = p.ref ?? null;
+      const suppliedArgs = p.args ?? null;
       const ch = p.channel || "auto";
       // channel=debugger：跳过 scripting 直接走 CDP；channel=extension：禁止降级
       if (ch === "debugger") {
+        if (ref != null) {
+          const src = await getPageApiSrc();
+          const wrapped = `${src}\n;(async()=>{const $el=window.__dh.ref(${JSON.stringify(ref)});if(!$el)throw new Error(${JSON.stringify(`元素 [${ref}] 不存在或已失效，请在当前通道重新获取快照`)});const $args=${JSON.stringify(suppliedArgs)};return await (${expr});})()`;
+          return { result: await debuggerEval(t.id, wrapped), via: "debugger" };
+        }
         return { result: await debuggerEval(t.id, expr), via: "debugger" };
       }
       try {
-        return { result: await evalInPage(t.id, expr) };
+        return { result: await evalInPage(t.id, expr, ref, suppliedArgs) };
       } catch (e) {
         if (ch === "extension" || !isChannelError(e)) throw e;
+        if (ref != null) {
+          throw new Error(`基于 ref 的动态脚本在当前扩展通道失败，且切换通道后编号会失效。请重新获取快照后再执行。原错误：${String((e && e.message) || e)}`);
+        }
         return { result: await debuggerEval(t.id, expr), via: "debugger" };
       }
     }

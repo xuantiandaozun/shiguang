@@ -29,8 +29,14 @@
 // v5 变更：
 // - read：用 Mozilla Readability 抽取正文纯文本（导航/广告/侧栏剥离），供读文章/
 //   总结；与 snapshot（操作页）职责分离。依赖同世界先注入的 Readability 构造函数。
+// v6 变更：
+// - snapshot 补充展开状态、弹层关系、可搜索性、禁用/必填等交互语义，并优先输出
+//   当前可见的 dialog/listbox/menu/tree/grid 等浮层，覆盖 portal 和虚拟列表。
+// - type 可从触发器/组合控件通用解析到实际可编辑后代、关联控件或新打开浮层中的
+//   输入框；原生 select 支持唯一模糊匹配，歧义时返回候选而非猜测。
+// - scroll 会沿 aria-controls/aria-owns 等控件关系寻找浮层中的真实滚动容器。
 (() => {
-  const DH_VER = 5;
+  const DH_VER = 6;
   if (window.__dh && window.__dhVer === DH_VER) return;
 
   const INTERACTIVE_SEL = [
@@ -44,6 +50,31 @@
     "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "PATH",
     "META", "LINK", "HEAD", "BR", "HR",
   ]);
+  const POPUP_SEL = [
+    '[role="dialog"]', '[aria-modal="true"]', 'dialog[open]',
+    '[role="listbox"]', '[role="menu"]', '[role="tree"]', '[role="grid"]',
+  ].join(',');
+
+  const isEditable = (el) => !!el && (
+    el.isContentEditable || el.matches('input:not([type="hidden"]), textarea, select')
+  );
+
+  function controlledElements(el) {
+    if (!el) return [];
+    const ids = `${el.getAttribute('aria-controls') || ''} ${el.getAttribute('aria-owns') || ''}`
+      .trim().split(/\s+/).filter(Boolean);
+    return ids.map((id) => document.getElementById(id)).filter(Boolean);
+  }
+
+  function visibleMatches(root, selector) {
+    if (!root) return [];
+    const found = [];
+    if (root.matches && root.matches(selector) && visibleStyle(root)) found.push(root);
+    root.querySelectorAll(selector).forEach((el) => {
+      if (visibleStyle(el)) found.push(el);
+    });
+    return found;
+  }
 
   // 返回 false（不可见）或计算样式（供后续 cursor 判断复用，避免重复取值）
   const visibleStyle = (el) => {
@@ -52,6 +83,26 @@
     const r = el.getBoundingClientRect();
     return r.width > 0 || r.height > 0 ? st : false;
   };
+
+  function isPopupLayer(el) {
+    const st = visibleStyle(el);
+    if (!st) return false;
+    const role = el.getAttribute('role');
+    if (role === 'dialog' || role === 'listbox' || role === 'menu' || el.matches('[aria-modal="true"], dialog[open]')) {
+      return true;
+    }
+    // tree/grid 既可能是弹出选择器，也可能是页面主体。只有定位成浮层，或被当前
+    // 展开的控件通过 aria-controls/owns 关联时，才按浮层优先处理。
+    if (role === 'tree' || role === 'grid') {
+      if (st.position === 'fixed' || st.position === 'absolute') return true;
+      return Array.from(document.querySelectorAll('[aria-expanded="true"]'))
+        .some((control) => controlledElements(control).includes(el));
+    }
+    return false;
+  }
+
+  const visiblePopupElements = () =>
+    Array.from(document.querySelectorAll(POPUP_SEL)).filter(isPopupLayer);
 
   const short = (s, n) => {
     s = (s || "").replace(/\s+/g, " ").trim();
@@ -151,6 +202,37 @@
     }
     const role = el.getAttribute("role");
     if (role) parts.push("role=" + role);
+    if (role === "combobox" || role === "button" || el.hasAttribute("aria-haspopup")) {
+      const lt = labelTextOf(el);
+      if (lt && !parts.some((part) => part.startsWith("标签="))) {
+        parts.push("标签=" + short(lt, 30));
+      }
+    }
+    const expanded = el.getAttribute("aria-expanded");
+    if (expanded === "true" || expanded === "false") {
+      parts.push("状态=" + (expanded === "true" ? "已展开" : "已收起"));
+    }
+    const popup = el.getAttribute("aria-haspopup");
+    if (popup && popup !== "false") parts.push("弹层=" + (popup === "true" ? "menu" : popup));
+    const controls = el.getAttribute("aria-controls") || el.getAttribute("aria-owns");
+    if (controls) parts.push("关联=" + short(controls, 40));
+    const activeDescendant = el.getAttribute("aria-activedescendant");
+    if (activeDescendant) parts.push("当前候选=" + short(activeDescendant, 40));
+    const autocomplete = el.getAttribute("aria-autocomplete");
+    if (autocomplete && autocomplete !== "none") parts.push("可搜索=" + autocomplete);
+    if (role === "combobox" && (isEditable(el) || visibleMatches(el, 'input, [role="textbox"]').length)) {
+      parts.push("可输入搜索");
+    }
+    if (role === "option") {
+      const selected = el.getAttribute("aria-selected");
+      if (selected === "true") parts.push("已选择");
+      const pos = el.getAttribute("aria-posinset");
+      const size = el.getAttribute("aria-setsize");
+      if (pos || size) parts.push(`位置=${pos || "?"}/${size || "?"}`);
+    }
+    if (el.matches(':disabled, [aria-disabled="true"]')) parts.push("已禁用");
+    if (el.matches('[required], [aria-required="true"]')) parts.push("必填");
+    if (el.matches('[readonly], [aria-readonly="true"]')) parts.push("只读");
     const aria = el.getAttribute("aria-label");
     if (aria) parts.push("aria=" + short(aria, 40));
     return parts.filter(Boolean).join(" ");
@@ -169,7 +251,6 @@
   // 正文庞大的页面（如 LinkedIn feed）会先把字符预算耗尽，导致弹窗被截断丢失。
   // scope 模式：只遍历指定元素子树，编号从 1 重排——先全量定位容器、再局部细看，
   // AI 面对的候选从几百个降到十几个，选择精度显著提升。
-  const DIALOG_SEL = '[role="dialog"], [aria-modal="true"], dialog[open]';
   function buildSnapshot(maxChars, scopeRoot) {
     const refs = {};
     const numberedMap = new Map();
@@ -200,9 +281,9 @@
 
     // markedAnc：祖先已被编号时，启发式命中的后代不再编号
     // （cursor:pointer 是继承属性，不去重会把 RN 页面整棵子树都编号）
-    const walk = (el, depth, markedAnc, skipDialogs) => {
+    const walk = (el, depth, markedAnc, skipPopups) => {
       if (truncated || !el || el.nodeType !== 1 || SKIP_TAGS.has(el.tagName)) return;
-      if (skipDialogs && el.matches(DIALOG_SEL)) return;
+      if (skipPopups && el.matches(POPUP_SEL) && isPopupLayer(el)) return;
       const st = visibleStyle(el);
       if (!st) return;
       const alreadyNumbered = numberedMap.has(el);
@@ -233,8 +314,8 @@
       if (line !== null && !pushLine(depth, line)) return;
       const nextDepth = depth + (line !== null ? 1 : 0);
       const childMarked = markedAnc || interactive;
-      if (el.shadowRoot) Array.from(el.shadowRoot.children).forEach((c) => walk(c, nextDepth, childMarked, skipDialogs));
-      Array.from(el.children).forEach((c) => walk(c, nextDepth, childMarked, skipDialogs));
+      if (el.shadowRoot) Array.from(el.shadowRoot.children).forEach((c) => walk(c, nextDepth, childMarked, skipPopups));
+      Array.from(el.children).forEach((c) => walk(c, nextDepth, childMarked, skipPopups));
     };
 
     if (scopeRoot) {
@@ -246,13 +327,16 @@
       return lines.join("\n");
     }
 
-    // 第一遍：打开的弹窗优先（嵌套弹窗随外层一并遍历，不重复）
-    const walkedDialogs = [];
-    document.querySelectorAll(DIALOG_SEL).forEach((d) => {
-      if (truncated || !visibleStyle(d)) return;
-      if (walkedDialogs.some((w) => w.contains(d))) return;
-      walkedDialogs.push(d);
-      walk(d, 0, false, false);
+    // 第一遍：当前可见浮层优先。自定义下拉通常 portal 到 body 末尾，若仍按正文顺序
+    // 遍历，选项会被大页面字符预算吞掉。嵌套浮层随外层遍历，不重复。
+    const walkedPopups = [];
+    document.querySelectorAll(POPUP_SEL).forEach((popup) => {
+      if (truncated || !isPopupLayer(popup)) return;
+      if (walkedPopups.some((walked) => walked.contains(popup))) return;
+      walkedPopups.push(popup);
+      const role = popup.getAttribute('role') || popup.tagName.toLowerCase();
+      pushLine(0, `◆ 当前可见浮层 role=${role}${popup.id ? ` id=${popup.id}` : ''}`);
+      walk(popup, 1, false, false);
     });
 
     // 当前焦点所在的可编辑元素必须进快照（即使不在弹窗里、即使页面巨大）
@@ -328,6 +412,90 @@
     return null;
   }
 
+  function asScrollable(el, horizontal) {
+    if (!el) return null;
+    const st = getComputedStyle(el);
+    const overflow = horizontal ? st.overflowX : st.overflowY;
+    const room = horizontal ? el.scrollWidth - el.clientWidth : el.scrollHeight - el.clientHeight;
+    return /(auto|scroll)/.test(overflow) && room > 8 ? el : null;
+  }
+
+  function relatedScrollable(el, horizontal) {
+    for (const related of controlledElements(el)) {
+      const direct = asScrollable(related, horizontal);
+      if (direct) return direct;
+      const descendants = related.querySelectorAll('*');
+      for (let i = 0; i < Math.min(descendants.length, 3000); i++) {
+        const candidate = asScrollable(descendants[i], horizontal);
+        if (candidate && visibleStyle(candidate)) return candidate;
+      }
+    }
+    const role = el && el.getAttribute && el.getAttribute('role');
+    const hasPopup = el && el.getAttribute && el.getAttribute('aria-haspopup');
+    if (role === 'combobox' || (hasPopup && hasPopup !== 'false')) {
+      const popups = visiblePopupElements();
+      for (let i = popups.length - 1; i >= 0; i--) {
+        const popup = popups[i];
+        const direct = asScrollable(popup, horizontal);
+        if (direct) return direct;
+        const descendants = popup.querySelectorAll('*');
+        for (let j = 0; j < Math.min(descendants.length, 3000); j++) {
+          const candidate = asScrollable(descendants[j], horizontal);
+          if (candidate && visibleStyle(candidate)) return candidate;
+        }
+      }
+    }
+    return null;
+  }
+
+  function activePopupScrollable(horizontal) {
+    const popups = visiblePopupElements();
+    for (let i = popups.length - 1; i >= 0; i--) {
+      const popup = popups[i];
+      const direct = asScrollable(popup, horizontal);
+      if (direct) return direct;
+      const descendants = popup.querySelectorAll('*');
+      for (let j = 0; j < Math.min(descendants.length, 3000); j++) {
+        const candidate = asScrollable(descendants[j], horizontal);
+        if (candidate && visibleStyle(candidate)) return candidate;
+      }
+    }
+    return null;
+  }
+
+  async function resolveEditable(el) {
+    if (isEditable(el)) return { target: el, adapted: false, opened: false };
+    const nested = visibleMatches(el, 'input:not([type="hidden"]), textarea, select, [contenteditable]:not([contenteditable="false"])')[0];
+    if (nested) return { target: nested, adapted: true, opened: false };
+    for (const related of controlledElements(el)) {
+      const candidate = visibleMatches(related, 'input:not([type="hidden"]), textarea, select, [contenteditable]:not([contenteditable="false"])')[0];
+      if (candidate) return { target: candidate, adapted: true, opened: false };
+    }
+
+    // 对任何被当作输入目标的非编辑元素，先执行一次标准按压，再从实际焦点、关联
+    // 控件和新出现的浮层中找编辑面。这适用于组合框、日期选择器、标签选择器等，
+    // 不绑定具体 UI 框架或站点。
+    const beforePopups = new Set(visiblePopupElements());
+    el.scrollIntoView({ block: 'center', behavior: 'instant' });
+    const { x, y } = centerOf(el);
+    firePressSequence(el, x, y);
+    await sleep(220);
+    if (isEditable(document.activeElement) && visibleStyle(document.activeElement)) {
+      return { target: document.activeElement, adapted: true, opened: true };
+    }
+    for (const related of controlledElements(el)) {
+      const candidate = visibleMatches(related, 'input:not([type="hidden"]), textarea, select, [contenteditable]:not([contenteditable="false"])')[0];
+      if (candidate) return { target: candidate, adapted: true, opened: true };
+    }
+    const popups = visiblePopupElements();
+    const ordered = popups.filter((popup) => !beforePopups.has(popup)).concat(popups.filter((popup) => beforePopups.has(popup)));
+    for (const popup of ordered) {
+      const candidate = visibleMatches(popup, 'input:not([type="hidden"]), textarea, [contenteditable]:not([contenteditable="false"])')[0];
+      if (candidate) return { target: candidate, adapted: true, opened: true };
+    }
+    return { target: null, adapted: true, opened: popups.length > beforePopups.size };
+  }
+
   // 页面级最佳滚动容器：取视口内面积最大的可滚动元素；window 可滚且没有
   // 足够大的内层容器时返回 null（表示用 window 滚动）
   function bestScrollable(horizontal) {
@@ -376,6 +544,8 @@
 
   window.__dhVer = DH_VER;
   window.__dh = {
+    // 给 browser_evaluate 的 ref 模式使用；返回真实 DOM 元素，不做站点专用封装。
+    ref: (ref) => getRef(ref),
     // scope：数字=上次快照中的元素编号，字符串=CSS 选择器；只遍历该元素子树
     snapshot: (maxChars, scope) => {
       if (scope == null || scope === "") return buildSnapshot(maxChars || 8000, null);
@@ -434,6 +604,8 @@
 
       const urlBefore = location.href;
       const activeBefore = document.activeElement;
+      const expandedBefore = el.getAttribute('aria-expanded');
+      const visiblePopupsBefore = visiblePopupElements().length;
       let mutated = false;
       const mo = new MutationObserver(() => { mutated = true; });
       mo.observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
@@ -444,21 +616,50 @@
 
       const urlChanged = location.href !== urlBefore;
       const focusChanged = document.activeElement !== activeBefore;
+      const expandedAfter = el.getAttribute('aria-expanded');
+      const visiblePopupsAfter = visiblePopupElements().length;
       const changed = mutated || urlChanged || focusChanged;
-      const out = { ok: true, changed, target: describeEl(el) };
+      const out = {
+        ok: true,
+        changed,
+        target: describeEl(el),
+        observed: {
+          expanded_before: expandedBefore,
+          expanded_after: expandedAfter,
+          visible_popups_before: visiblePopupsBefore,
+          visible_popups_after: visiblePopupsAfter,
+          focus: describeEl(document.activeElement || document.body),
+        },
+      };
       if (urlChanged) out.url = location.href;
       if (coveredBy) {
         out.covered_by = coveredBy;
         out.hint = `元素中心被「${coveredBy}」遮挡，点击可能落在遮挡层上；可先关闭遮挡、滚动调整位置后重试`;
       } else if (!changed) {
         out.hint = "点击后页面无可见变化，可能未生效：可重新快照确认目标、滚动后再点，或用 browser_evaluate 直接触发页面逻辑";
+      } else if (visiblePopupsAfter > visiblePopupsBefore || expandedAfter === 'true') {
+        out.next = "控件已展开或出现新浮层。重新获取快照观察其中的输入框、选项和滚动状态，再决定输入、点击或滚动；不要沿用旧编号猜测。";
       }
       return out;
     },
 
-    type: (ref, text, clear) => {
-      const el = getRef(ref);
-      if (!el) return { error: `元素 [${ref}] 不存在或已失效，请重新获取快照` };
+    type: async (ref, text, clear) => {
+      const source = getRef(ref);
+      if (!source) return { error: `元素 [${ref}] 不存在或已失效，请重新获取快照` };
+      const resolved = await resolveEditable(source);
+      const el = resolved.target;
+      if (!el) {
+        return {
+          error: `元素 [${ref}] 本身不可输入，且打开/检查其关联控件和当前浮层后仍未找到可编辑区域。`,
+          target: describeEl(source),
+          observed: {
+            role: source.getAttribute('role') || '',
+            expanded: source.getAttribute('aria-expanded'),
+            controls: source.getAttribute('aria-controls') || source.getAttribute('aria-owns') || '',
+          },
+          next: "重新获取快照查看打开后的浮层与焦点；若页面语义不足，用 browser_evaluate 依据 role/aria/text 生成最小 DOM 脚本，并返回执行后的可观察状态。",
+        };
+      }
       el.scrollIntoView({ block: "center", behavior: "instant" });
       el.focus();
       // 焦点校验：弹层/RN 拦截 focus 时，先模拟真实按压再聚焦（点击会触发页面自身的焦点管理）
@@ -476,6 +677,7 @@
 
       let expected;
       let ceHandled = false; // 富文本编辑器已自行处理事件时，跳过下方的共享事件派发
+      let matchMode = "input";
       if (el.isContentEditable) {
         const sel = window.getSelection();
         const range = document.createRange();
@@ -506,10 +708,36 @@
         }
         expected = clear === false ? (el.innerText || "") : text;
       } else if (el.tagName === "SELECT") {
-        const opt = Array.from(el.options).find((o) => o.value === text || o.textContent.trim() === text);
-        if (!opt) return { error: `下拉框没有选项「${text}」` };
+        const wanted = String(text).trim().toLocaleLowerCase();
+        const options = Array.from(el.options);
+        let opt = options.find((o) => o.value === text || o.textContent.trim() === text);
+        if (!opt) opt = options.find((o) => o.textContent.trim().toLocaleLowerCase() === wanted);
+        if (!opt) {
+          const fuzzy = options.filter((o) => {
+            const label = o.textContent.trim().toLocaleLowerCase();
+            return label.includes(wanted) || wanted.includes(label);
+          });
+          if (fuzzy.length === 1) {
+            opt = fuzzy[0];
+            matchMode = "unique_fuzzy";
+          } else if (fuzzy.length > 1) {
+            return {
+              error: `下拉框中「${text}」有多个模糊匹配，不能替用户猜测`,
+              candidates: fuzzy.slice(0, 20).map((o) => short(o.textContent.trim(), 80)),
+              next: "根据用户掌握的业务名称选择精确候选；关键信息不足时询问用户。",
+            };
+          }
+        }
+        if (!opt) {
+          return {
+            error: `下拉框没有找到「${text}」`,
+            candidates: options.slice(0, 20).map((o) => short(o.textContent.trim(), 80)),
+            next: options.length > 20 ? "选项较多；可缩小关键词或用 browser_evaluate 检查完整 options。" : "核对目标文字后重试。",
+          };
+        }
         el.value = opt.value;
         expected = opt.value;
+        if (matchMode === "input") matchMode = "exact";
       } else {
         try {
           expected = clear === false ? (el.value || "") + text : text;
@@ -545,6 +773,12 @@
         focused: true,
         value: isPwd ? "（密码已隐藏）" : short(actual, 60),
         target: describeEl(el),
+        resolved_from: resolved.adapted ? describeEl(source) : null,
+        opened_control: resolved.opened,
+        match_mode: matchMode,
+        next: resolved.adapted
+          ? "已在控件实际编辑面完成输入。重新获取快照观察候选、校验信息或下一步动作；不要仅凭输入成功推断已完成选择。"
+          : undefined,
       };
     },
 
@@ -558,8 +792,8 @@
       let container = null;
       const anchor = ref != null ? getRef(ref) : null;
       if (ref != null && !anchor) return { error: `元素 [${ref}] 不存在或已失效，请重新获取快照` };
-      if (anchor) container = nearestScrollable(anchor, horizontal);
-      if (!container && !anchor) container = bestScrollable(horizontal);
+      if (anchor) container = nearestScrollable(anchor, horizontal) || relatedScrollable(anchor, horizontal);
+      if (!container && !anchor) container = activePopupScrollable(horizontal) || bestScrollable(horizontal);
 
       const posBefore = container
         ? { x: container.scrollLeft, y: container.scrollTop }

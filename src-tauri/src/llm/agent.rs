@@ -44,7 +44,7 @@ pub async fn run_chat(
         return Ok(());
     }
 
-    let (history, profile_block, skills_block) = {
+    let (history, profile_block) = {
         let state = app.state::<crate::AppState>();
         let history = state.db.load_chat(session_id, 30)?;
         let latest_user = history
@@ -60,8 +60,7 @@ pub async fn run_chat(
         } else {
             None
         };
-        let skills = state.skills.catalog_block();
-        (history, profile, skills)
+        (history, profile)
     };
 
     // 上下文缓存优化：系统提示词 + 历史消息构成逐字节稳定的前缀（命中缓存计费极低）；
@@ -72,7 +71,11 @@ pub async fn run_chat(
         "content": sys,
     })];
     for msg in history {
-        let role = if msg.role == "user" { "user" } else { "assistant" };
+        let role = if msg.role == "user" {
+            "user"
+        } else {
+            "assistant"
+        };
         messages.push(json!({ "role": role, "content": msg.content }));
     }
     let mut tail = format!(
@@ -81,9 +84,6 @@ pub async fn run_chat(
     );
     if let Some(pb) = &profile_block {
         tail.push_str(pb);
-    }
-    if let Some(sb) = &skills_block {
-        tail.push_str(sb);
     }
     messages.push(json!({
         "role": "system",
@@ -100,6 +100,7 @@ pub async fn run_chat(
         model: settings.model.clone(),
     };
     let mut text_call_retries = 0usize;
+    let mut active_tools = tools::core_tool_names();
 
     for round in 0..MAX_TOOL_ROUNDS {
         if cancel.is_cancelled() {
@@ -113,7 +114,7 @@ pub async fn run_chat(
             }));
         }
         trim_context(&mut messages);
-        let body = request_body(&cfg, &settings, &messages, true);
+        let body = request_body(&cfg, &settings, &messages, Some(&active_tools));
 
         let resp = stream_filtered(&http, &cfg, &body, &cancel, &app).await?;
 
@@ -126,10 +127,11 @@ pub async fn run_chat(
             let cleaned = strip_tool_call_text(&resp.content);
             // 模型把工具调用写成了正文：本意是继续调工具而非收尾。
             // 清理后的正文放回对话并提醒改用标准格式，给重试机会（限次数防死循环）
-            if contains_tool_call_text(&resp.content) && text_call_retries < MAX_TEXT_CALL_RETRIES
-            {
+            if contains_tool_call_text(&resp.content) && text_call_retries < MAX_TEXT_CALL_RETRIES {
                 text_call_retries += 1;
-                log::warn!("模型以文本形式输出工具调用，提醒改用标准格式（第 {text_call_retries} 次）");
+                log::warn!(
+                    "模型以文本形式输出工具调用，提醒改用标准格式（第 {text_call_retries} 次）"
+                );
                 if !cleaned.is_empty() {
                     messages.push(json!({ "role": "assistant", "content": cleaned }));
                 }
@@ -184,17 +186,28 @@ pub async fn run_chat(
                 finalize_cancelled(&app, session_id, &resp.content, &tool_log).await;
                 return Ok(());
             }
-            let _ = app.emit("tool-status", json!({ "name": call.name, "status": "running" }));
+            let _ = app.emit(
+                "tool-status",
+                json!({ "name": call.name, "status": "running" }),
+            );
             let parsed_args: Value =
                 serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
             let result = match tools::execute(&app, &call.name, &parsed_args, &cancel).await {
                 Ok(v) => v,
                 Err(e) => json!({ "error": e.to_string() }),
             };
+            if call.name == tools::DISCOVER_TOOL {
+                activate_discovered_tools(&mut active_tools, &result);
+            }
+            let tool_status = if is_failed_tool_result(&result) {
+                "error"
+            } else {
+                "done"
+            };
             push_tool_log(&mut tool_log, &call.name, &call.arguments, &result);
             let _ = app.emit(
                 "tool-status",
-                json!({ "name": call.name, "status": "done", "result": result }),
+                json!({ "name": call.name, "status": tool_status, "result": result }),
             );
             messages.push(json!({
                 "role": "tool",
@@ -204,8 +217,35 @@ pub async fn run_chat(
         }
     }
 
-    finalize_with_summary(&app, &http, &cfg, &settings, session_id, messages, &cancel, &tool_log)
-        .await
+    finalize_with_summary(
+        &app, &http, &cfg, &settings, session_id, messages, &cancel, &tool_log,
+    )
+    .await
+}
+
+/// 工具协议层成功返回并不等于业务动作成功；命令非零退出等情况也要让界面显示失败。
+fn is_failed_tool_result(result: &Value) -> bool {
+    if result.get("ok").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
+    if result.get("error").is_some() {
+        return true;
+    }
+    matches!(
+        result.get("status").and_then(Value::as_str),
+        Some("failed" | "timeout" | "cancelled")
+    )
+}
+
+fn activate_discovered_tools(active_tools: &mut Vec<String>, result: &Value) {
+    let Some(names) = result.get("activated_tools").and_then(Value::as_array) else {
+        return;
+    };
+    for name in names.iter().filter_map(Value::as_str) {
+        if !active_tools.iter().any(|active| active == name) {
+            active_tools.push(name.to_string());
+        }
+    }
 }
 
 /// 构造请求体。DeepSeek 思考模式参数（thinking / reasoning_effort）只对 DeepSeek 接口附加，
@@ -214,7 +254,7 @@ fn request_body(
     cfg: &client::LlmConfig,
     settings: &crate::commands::Settings,
     messages: &[Value],
-    with_tools: bool,
+    active_tools: Option<&[String]>,
 ) -> Value {
     let mut body = json!({
         "model": cfg.model,
@@ -222,8 +262,8 @@ fn request_body(
         "stream": true,
         "temperature": 0.3,
     });
-    if with_tools {
-        body["tools"] = json!(tools::definitions());
+    if let Some(active_tools) = active_tools {
+        body["tools"] = tools::definitions_for(active_tools);
         body["tool_choice"] = json!("auto");
     }
     if cfg.base_url.contains("deepseek") {
@@ -251,7 +291,9 @@ async fn finalize_cancelled(app: &AppHandle, session_id: i64, partial: &str, too
         saved.push_str(&digest_of(tool_log));
     }
     if !saved.is_empty() {
-        saved.push_str("\n（回复被用户中断；以上资料已收集完毕，继续时请直接基于它们推进，不要重复收集）");
+        saved.push_str(
+            "\n（回复被用户中断；以上资料已收集完毕，继续时请直接基于它们推进，不要重复收集）",
+        );
         let state = app.state::<crate::AppState>();
         let _ = state.db.save_chat(session_id, "assistant", &saved);
     }
@@ -310,7 +352,7 @@ async fn finalize_with_summary(
         "content": "工具调用轮次已用完，你现在没有任何工具可用。请基于已获得的信息，直接用自然语言给出阶段性回答：1) 已完成的部分；2) 卡在什么地方；3) 如果用户说「继续」，你接下来打算怎么做。不要声称完成了并未完成的步骤。严禁输出任何工具调用语法（例如 <tool_call>…</tool_call>、<｜tool▁call▁begin｜>…、<｜｜DSML｜｜tool_calls>…</｜｜DSML｜｜tool_calls>、或带 \"name\"/\"arguments\" 字段的 JSON 代码块），只能输出给用户看的自然语言。",
     }));
     trim_context(&mut messages);
-    let body = request_body(cfg, settings, &messages, false);
+    let body = request_body(cfg, settings, &messages, None);
     let resp = stream_filtered(http, cfg, &body, cancel, app).await;
     match resp {
         Ok(r) if r.interrupted => {
@@ -327,7 +369,9 @@ async fn finalize_with_summary(
                 }
                 saved.push_str("【工具预算耗尽前已完成的工具调用与结果】\n");
                 saved.push_str(&digest_of(tool_log));
-                saved.push_str("（以上资料已收集完毕，用户说「继续」时请直接基于它们推进，不要重复收集）");
+                saved.push_str(
+                    "（以上资料已收集完毕，用户说「继续」时请直接基于它们推进，不要重复收集）",
+                );
             }
             if saved.is_empty() {
                 let _ = app.emit(
@@ -608,6 +652,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tool_result_distinguishes_failure_from_intentional_stop() {
+        assert!(is_failed_tool_result(&json!({
+            "ok": false,
+            "status": "failed",
+            "exit_code": 1
+        })));
+        assert!(is_failed_tool_result(&json!({ "error": "boom" })));
+        assert!(!is_failed_tool_result(&json!({
+            "ok": true,
+            "status": "cancelled"
+        })));
+        assert!(!is_failed_tool_result(&json!({ "status": "done" })));
+    }
+
+    #[test]
+    fn discovered_tools_are_added_once() {
+        let mut active = tools::core_tool_names();
+        activate_discovered_tools(
+            &mut active,
+            &json!({ "activated_tools": ["read_file", "run_command", "read_file"] }),
+        );
+        assert!(active.iter().any(|name| name == "read_file"));
+        assert!(active.iter().any(|name| name == "run_command"));
+        assert_eq!(active.iter().filter(|name| *name == "read_file").count(), 1);
+    }
+
+    #[test]
     fn filter_passes_plain_text() {
         let mut f = ToolTextFilter::new();
         assert_eq!(f.feed("你好，世界"), "你好，世界");
@@ -685,7 +756,10 @@ mod tests {
             ""
         );
         assert_eq!(f.feed("(() => 1)()</｜｜DSML｜｜parameter>"), "");
-        assert_eq!(f.feed("</｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>收尾"), "收尾");
+        assert_eq!(
+            f.feed("</｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>收尾"),
+            "收尾"
+        );
         assert_eq!(f.flush(), "");
     }
 
@@ -706,12 +780,16 @@ mod tests {
         assert!(contains_tool_call_text(
             "看看<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name=\"x\">"
         ));
-        assert!(contains_tool_call_text("<tool_call>{\"name\":\"x\"}</tool_call>"));
+        assert!(contains_tool_call_text(
+            "<tool_call>{\"name\":\"x\"}</tool_call>"
+        ));
         assert!(contains_tool_call_text("{\"name\":\"x\",\"arguments\":{}}"));
         assert!(contains_tool_call_text(
             "说明：\n```json\n{\"name\":\"x\",\"arguments\":{}}\n```"
         ));
         assert!(!contains_tool_call_text("这是正常回答。"));
-        assert!(!contains_tool_call_text("```json\n{\"title\":\"你好\"}\n```"));
+        assert!(!contains_tool_call_text(
+            "```json\n{\"title\":\"你好\"}\n```"
+        ));
     }
 }

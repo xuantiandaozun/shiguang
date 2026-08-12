@@ -9,6 +9,7 @@ export interface UiMessage {
   /** 思考模式下的思维链（仅流式期间展示，不入库） */
   reasoning?: string;
   toolName?: string;
+  toolFailed?: boolean;
   plan?: Plan;
   streaming?: boolean;
 }
@@ -27,7 +28,7 @@ interface ChatState {
   appendToken: (d: string) => void;
   appendReasoning: (d: string) => void;
   finishStreaming: (content?: string) => void;
-  completeTool: (toolName: string) => void;
+  completeTool: (toolName: string, error?: string) => void;
   setStreaming: (b: boolean) => void;
   setPendingPlan: (p: Plan | null) => void;
 }
@@ -100,12 +101,14 @@ export const useChatStore = create<ChatState>()((set) => ({
         streaming: false,
       };
     }),
-  completeTool: (toolName) =>
+  completeTool: (toolName, error) =>
     set((s) => {
       const msgs = s.messages.map((m) => ({ ...m }));
       for (let i = msgs.length - 1; i >= 0; i--) {
         if (msgs[i].role === "tool" && msgs[i].toolName === toolName && msgs[i].streaming) {
           msgs[i].streaming = false;
+          msgs[i].toolFailed = Boolean(error);
+          msgs[i].content = error ?? "";
           break;
         }
       }

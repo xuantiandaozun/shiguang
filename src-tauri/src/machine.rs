@@ -77,7 +77,10 @@ fn os_block() -> Value {
 
 fn cpu_brief(sys: &System) -> Value {
     let cpus = sys.cpus();
-    let brand = cpus.first().map(|c| c.brand().trim().to_string()).unwrap_or_default();
+    let brand = cpus
+        .first()
+        .map(|c| c.brand().trim().to_string())
+        .unwrap_or_default();
     let usage = cpus.iter().map(|c| c.cpu_usage() as f64).sum::<f64>() / cpus.len().max(1) as f64;
     json!({
         "brand": brand,
@@ -256,7 +259,9 @@ $out | ConvertTo-Json -Depth 4 -Compress
     {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let child = cmd.spawn().map_err(|e| anyhow!("启动 PowerShell 失败: {}", e))?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| anyhow!("启动 PowerShell 失败: {}", e))?;
     let out = tokio::time::timeout(
         std::time::Duration::from_secs(CIM_TIMEOUT_SECS),
         child.wait_with_output(),
@@ -268,8 +273,13 @@ $out | ConvertTo-Json -Depth 4 -Compress
         return Err(anyhow!("PowerShell 退出码异常: {:?}", out.status.code()));
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let mut v: Value = serde_json::from_str(text.trim())
-        .map_err(|e| anyhow!("解析 CIM 结果失败: {} / 原文: {}", e, &text[..text.len().min(200)]))?;
+    let mut v: Value = serde_json::from_str(text.trim()).map_err(|e| {
+        anyhow!(
+            "解析 CIM 结果失败: {} / 原文: {}",
+            e,
+            &text[..text.len().min(200)]
+        )
+    })?;
     normalize_array_field(&mut v, "gpu");
     normalize_array_field(&mut v, "battery");
     Ok(v)

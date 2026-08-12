@@ -15,14 +15,16 @@ use crate::tempfs::{self, RelativeBase};
 /// 单次写入内容上限（字符），防止模型超长输出失控
 const MAX_CONTENT_CHARS: usize = 200_000;
 
-pub fn create_file(app: &AppHandle, path_raw: &str, content: &str, overwrite: bool) -> Result<Value> {
+pub fn create_file(
+    app: &AppHandle,
+    path_raw: &str,
+    content: &str,
+    overwrite: bool,
+) -> Result<Value> {
     let path = tempfs::resolve(app, path_raw, RelativeBase::Temp)?;
     let mut result = create_file_impl(&path, content, overwrite, &backup_dir(app))?;
     if let Some(obj) = result.as_object_mut() {
-        obj.insert(
-            "in_temp".into(),
-            json!(tempfs::is_under_temp(app, &path)),
-        );
+        obj.insert("in_temp".into(), json!(tempfs::is_under_temp(app, &path)));
         if tempfs::is_under_temp(app, &path) {
             obj.insert(
                 "hint".into(),
@@ -43,7 +45,15 @@ pub fn edit_file(
     all: bool,
 ) -> Result<Value> {
     let path = tempfs::resolve(app, path_raw, RelativeBase::Desktop)?;
-    edit_file_impl(&path, mode, old_text, new_text, content, all, &backup_dir(app))
+    edit_file_impl(
+        &path,
+        mode,
+        old_text,
+        new_text,
+        content,
+        all,
+        &backup_dir(app),
+    )
 }
 
 fn backup_dir(app: &AppHandle) -> PathBuf {
@@ -64,7 +74,10 @@ fn check_writable(path: &Path) -> Result<()> {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
     if name.is_empty() || name.chars().any(|c| "<>:\"|?*".contains(c)) {
-        bail!("文件名无效或含非法字符（< > : \" | ? *）: {}", path.display());
+        bail!(
+            "文件名无效或含非法字符（< > : \" | ? *）: {}",
+            path.display()
+        );
     }
     match path.extension() {
         None => Ok(()),
@@ -98,10 +111,19 @@ fn backup_file(path: &Path, dir: &Path) -> Result<PathBuf> {
     Ok(dest)
 }
 
-fn create_file_impl(path: &Path, content: &str, overwrite: bool, backup_dir: &Path) -> Result<Value> {
+fn create_file_impl(
+    path: &Path,
+    content: &str,
+    overwrite: bool,
+    backup_dir: &Path,
+) -> Result<Value> {
     let chars = content.chars().count();
     if chars > MAX_CONTENT_CHARS {
-        bail!("内容过长（{} 字符），上限 {} 字符", chars, MAX_CONTENT_CHARS);
+        bail!(
+            "内容过长（{} 字符），上限 {} 字符",
+            chars,
+            MAX_CONTENT_CHARS
+        );
     }
     check_writable(path)?;
     let existed = path.exists();
@@ -119,7 +141,7 @@ fn create_file_impl(path: &Path, content: &str, overwrite: bool, backup_dir: &Pa
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, content.as_bytes())?;
+    std::fs::write(path, encode_new_text(path, content))?;
     Ok(json!({
         "ok": true,
         "path": path.to_string_lossy().replace('\\', "/"),
@@ -127,6 +149,22 @@ fn create_file_impl(path: &Path, content: &str, overwrite: bool, backup_dir: &Pa
         "chars": chars,
         "backup": backup_path.map(|p| p.to_string_lossy().replace('\\', "/")),
     }))
+}
+
+/// Windows PowerShell 5.1 会把无 BOM 的 UTF-8 `.ps1` 当作系统 ANSI 代码页读取。
+/// 新建脚本自动写 UTF-8 BOM，使中文字符串不被错解并间接破坏引号/语法；其它
+/// 文本仍保持普通 UTF-8，避免改变常规代码文件的预期格式。
+fn encode_new_text(path: &Path, text: &str) -> Vec<u8> {
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("ps1"))
+    {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(text.as_bytes());
+        bytes
+    } else {
+        text.as_bytes().to_vec()
+    }
 }
 
 fn edit_file_impl(
@@ -139,7 +177,10 @@ fn edit_file_impl(
     backup_dir: &Path,
 ) -> Result<Value> {
     if !path.exists() {
-        bail!("文件不存在: {}。要新建文件请用 create_file。", path.display());
+        bail!(
+            "文件不存在: {}。要新建文件请用 create_file。",
+            path.display()
+        );
     }
     check_writable(path)?;
     let raw_bytes = std::fs::read(path)?;
@@ -171,7 +212,11 @@ fn edit_file_impl(
 
     let chars = edited.chars().count();
     if chars > MAX_CONTENT_CHARS {
-        bail!("编辑后内容过长（{} 字符），上限 {} 字符", chars, MAX_CONTENT_CHARS);
+        bail!(
+            "编辑后内容过长（{} 字符），上限 {} 字符",
+            chars,
+            MAX_CONTENT_CHARS
+        );
     }
     if edited == original {
         return Ok(json!({
@@ -330,10 +375,26 @@ mod tests {
         assert_eq!(std::fs::read_dir(&bkdir).unwrap().count(), 1);
 
         edit_file_impl(&file, "append", None, None, Some("追加"), false, &bkdir).unwrap();
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "第一行\n改动行\n追加");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "第一行\n改动行\n追加"
+        );
 
         edit_file_impl(&file, "prepend", None, None, Some("开头\n"), false, &bkdir).unwrap();
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "开头\n第一行\n改动行\n追加");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "开头\n第一行\n改动行\n追加"
+        );
+    }
+
+    #[test]
+    fn new_powershell_script_uses_utf8_bom() {
+        let dir = tmp_dir("powershell-bom");
+        let file = dir.join("中文脚本.ps1");
+        create_file_impl(&file, "Write-Output '中文'", false, &dir.join("bk")).unwrap();
+        let bytes = std::fs::read(file).unwrap();
+        assert!(bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
+        assert_eq!(crate::reader::decode_text(&bytes), "Write-Output '中文'");
     }
 
     #[test]

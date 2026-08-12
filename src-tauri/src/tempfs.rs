@@ -153,9 +153,15 @@ mod tests {
 
     #[test]
     fn strip_prefixes() {
-        assert_eq!(strip_dir_prefix("temp/a.txt", &["temp/", "临时/"]), Some("a.txt"));
+        assert_eq!(
+            strip_dir_prefix("temp/a.txt", &["temp/", "临时/"]),
+            Some("a.txt")
+        );
         assert_eq!(strip_dir_prefix("临时/x", &["temp/", "临时/"]), Some("x"));
-        assert_eq!(strip_dir_prefix("desktop/a", &["desktop/", "桌面/"]), Some("a"));
+        assert_eq!(
+            strip_dir_prefix("desktop/a", &["desktop/", "桌面/"]),
+            Some("a")
+        );
         assert_eq!(strip_dir_prefix("a.txt", &["temp/", "临时/"]), None);
     }
 }

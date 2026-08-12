@@ -6,7 +6,8 @@
 //! - **external（外部）**：`app_data/skills/<name>/`，AI 与用户可自由创建/修改/删除/从
 //!   Claude·Codex·Cursor 同步；也承接由旧「工作流经验」迁移来的条目。
 //!
-//! 启用技能只把目录（name+description）注入对话末尾；命中后再 `load_skill` 拉全文。
+//! 启用技能由 `discover_capabilities` 按当前目标检索；命中后再 `load_skill` 拉全文，
+//! 不把完整目录永久注入每一轮对话。
 
 use crate::builtin_skills;
 use anyhow::{anyhow, bail, Result};
@@ -107,14 +108,14 @@ impl SkillStore {
         }
 
         // 外部技能（同名被内部占用时跳过，避免影子条目）
-            let Ok(entries) = fs::read_dir(&self.dir) else {
-                out.sort_by(|a, b| match (a.scope.as_str(), b.scope.as_str()) {
-                    ("internal", "external") => std::cmp::Ordering::Less,
-                    ("external", "internal") => std::cmp::Ordering::Greater,
-                    _ => a.name.cmp(&b.name),
-                });
-                return out;
-            };
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            out.sort_by(|a, b| match (a.scope.as_str(), b.scope.as_str()) {
+                ("internal", "external") => std::cmp::Ordering::Less,
+                ("external", "internal") => std::cmp::Ordering::Greater,
+                _ => a.name.cmp(&b.name),
+            });
+            return out;
+        };
         for e in entries.flatten() {
             let path = e.path();
             if !path.is_dir() {
@@ -175,31 +176,6 @@ impl SkillStore {
         out
     }
 
-    /// 注入对话末尾的目录摘要
-    pub fn catalog_block(&self) -> Option<String> {
-        let skills: Vec<_> = self.list().into_iter().filter(|s| s.enabled).collect();
-        if skills.is_empty() {
-            return None;
-        }
-        let mut s = String::from(
-            "\n\n## 可用 Skills（任务匹配时 load_skill 再执行；[内部]只读随版本更新，[外部]可 create_skill 调整）",
-        );
-        for sk in &skills {
-            let tag = if sk.scope == "internal" {
-                "内部"
-            } else {
-                "外部"
-            };
-            let desc = sk.description.replace('\n', " ");
-            let brief: String = desc.chars().take(200).collect();
-            s.push_str(&format!("\n- **[{}] {}**：{}", tag, sk.name, brief));
-            if desc.chars().count() > 200 {
-                s.push('…');
-            }
-        }
-        Some(s)
-    }
-
     /// AI load_skill：禁用则拒绝
     pub fn load(&self, name: &str) -> Result<String> {
         let name = sanitize_name(name)?;
@@ -247,7 +223,10 @@ impl SkillStore {
         }
         let dir = self.dir.join(&name);
         fs::create_dir_all(&dir)?;
-        fs::write(dir.join("SKILL.md"), format_skill_md(&name, description, body))?;
+        fs::write(
+            dir.join("SKILL.md"),
+            format_skill_md(&name, description, body),
+        )?;
         {
             let mut meta = self.meta.lock().map_err(|e| anyhow!(e.to_string()))?;
             meta.enabled.entry(name.clone()).or_insert(true);
@@ -296,11 +275,7 @@ impl SkillStore {
     }
 
     pub fn scan_external(&self) -> Vec<ExternalSkill> {
-        let local_names: HashSet<String> = self
-            .list()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
+        let local_names: HashSet<String> = self.list().into_iter().map(|s| s.name).collect();
         let mut out = Vec::new();
         let mut seen: HashSet<(String, String)> = HashSet::new();
         for (source, root) in peer_skill_roots() {
@@ -351,8 +326,7 @@ impl SkillStore {
         names: Option<&[String]>,
         overwrite: bool,
     ) -> Result<Value> {
-        let want: Option<HashSet<&str>> =
-            names.map(|ns| ns.iter().map(|s| s.as_str()).collect());
+        let want: Option<HashSet<&str>> = names.map(|ns| ns.iter().map(|s| s.as_str()).collect());
         let source_filter = source.map(str::trim).filter(|s| !s.is_empty());
 
         let mut imported = 0usize;
@@ -743,10 +717,7 @@ fn peer_skill_roots() -> Vec<(String, PathBuf)> {
         ("claude", home.join(".claude").join("skills")),
         ("codex", home.join(".codex").join("skills")),
         ("cursor", home.join(".cursor").join("skills")),
-        (
-            "cursor-builtin",
-            home.join(".cursor").join("skills-cursor"),
-        ),
+        ("cursor-builtin", home.join(".cursor").join("skills-cursor")),
     ];
     for (label, p) in candidates {
         if p.is_dir() {
@@ -809,9 +780,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dh-skills-test-{}", uuid::Uuid::new_v4()));
         let _ = fs::create_dir_all(&dir);
         let store = SkillStore::new(&dir);
-        let err = store
-            .create("desktop-organize", "x", "# body")
-            .unwrap_err();
+        let err = store.create("desktop-organize", "x", "# body").unwrap_err();
         assert!(err.to_string().contains("内部技能"));
         let _ = fs::remove_dir_all(&dir);
     }

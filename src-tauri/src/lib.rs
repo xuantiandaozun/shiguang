@@ -5,8 +5,11 @@ pub mod browser;
 pub mod builtin_skills;
 pub mod commands;
 pub mod db;
+pub mod file_index;
 pub mod llm;
 pub mod machine;
+pub mod ntfs_helper;
+pub mod ntfs_usn;
 pub mod ocr;
 pub mod organizer;
 pub mod reader;
@@ -35,6 +38,8 @@ pub struct AppState {
     pub ocr: ocr::OcrEngine,
     /// 后台命令任务管理器（输出落日志文件，不占对话上下文）
     pub tasks: tasks::TaskManager,
+    /// 持久化文件元数据索引（简化版 Everything）
+    pub file_index: file_index::FileIndex,
     /// Agent Skills（app_data/skills/）
     pub skills: skills::SkillStore,
 }
@@ -113,8 +118,12 @@ pub fn run() {
                 browser: browser::Hub::spawn(&app_dir),
                 ocr: ocr::OcrEngine::new(&app_dir),
                 tasks: tasks::TaskManager::new(&app_dir),
+                file_index: file_index::FileIndex::new(&app_dir)?,
                 skills: skills::SkillStore::new(&app_dir),
             });
+            // Catch up NTFS changes that occurred while the app was closed.
+            // This runs in the background; the previous index remains searchable.
+            app.state::<AppState>().file_index.recover_usn_async();
             // 旧版「工作流经验」一次性迁成外部 Skills
             {
                 let state = app.state::<AppState>();

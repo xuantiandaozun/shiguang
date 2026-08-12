@@ -97,7 +97,12 @@ pub fn undo_batch(db: &Db, batch_id: &str) -> Result<u64> {
             src.to_path_buf()
         };
         if let Err(e) = move_path(dst, &back) {
-            log::warn!("撤销移动失败 {} -> {}: {}", dst.display(), back.display(), e);
+            log::warn!(
+                "撤销移动失败 {} -> {}: {}",
+                dst.display(),
+                back.display(),
+                e
+            );
             continue;
         }
         count += 1;

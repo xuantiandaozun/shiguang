@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "ShiGuang - AI desktop assistant for Windows"
 edition = "2021"
 rust-version = "1.85"
+default-run = "shiguang"
 
 [lib]
 name = "shiguang_lib"
@@ -43,3 +44,18 @@ tauri-plugin-dialog = "2.7.2"
 rapidocr-core = "0.2.2"
 trash = "5"
 sysinfo = "0.36.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Ioctl",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[[bin]]
+name = "shiguang-index-helper"
+path = "src/bin/shiguang-index-helper.rs"

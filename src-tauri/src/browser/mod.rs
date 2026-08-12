@@ -87,12 +87,10 @@ impl Hub {
                     }
                     // 扩展通道做不到（CSP/注入被拒，且扩展内 debugger 兜底也失败）：
                     // 取当前活动页 URL，让 CDP 对齐到同一页面后重试
-                    let target_url = self
-                        .ext
-                        .call("info", json!({}))
-                        .await
-                        .ok()
-                        .and_then(|i| i.get("url").and_then(|u| u.as_str()).map(str::to_string));
+                    let target_url =
+                        self.ext.call("info", json!({})).await.ok().and_then(|i| {
+                            i.get("url").and_then(|u| u.as_str()).map(str::to_string)
+                        });
                     let mut p = params;
                     if let Some(u) = target_url {
                         p["__target_url"] = json!(u);
@@ -104,16 +102,14 @@ impl Hub {
                                 obj.insert("failover_reason".into(), json!(e.to_string()));
                                 obj.insert(
                                     "note".into(),
-                                    json!("已切换到 CDP 通道，之前的快照编号已失效，请重新获取快照"),
+                                    json!(
+                                        "已切换到 CDP 通道，之前的快照编号已失效，请重新获取快照"
+                                    ),
                                 );
                             }
                             Ok(v)
                         }
-                        Err(ce) => Err(anyhow!(
-                            "扩展通道失败（{}）；CDP 兜底也失败（{}）",
-                            e,
-                            ce
-                        )),
+                        Err(ce) => Err(anyhow!("扩展通道失败（{}）；CDP 兜底也失败（{}）", e, ce)),
                     };
                 }
             }
@@ -220,7 +216,14 @@ fn stamp_ext(v: &mut Value) {
         .as_object_mut()
         .and_then(|obj| obj.remove("via"))
         .and_then(|x| x.as_str().map(str::to_string));
-    stamp(v, if via.as_deref() == Some("debugger") { "extension-debugger" } else { "extension" });
+    stamp(
+        v,
+        if via.as_deref() == Some("debugger") {
+            "extension-debugger"
+        } else {
+            "extension"
+        },
+    );
 }
 
 fn stamp(v: &mut Value, channel: &str) {
@@ -234,6 +237,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn page_api_exposes_adaptive_interaction_primitives() {
+        assert!(PAGE_API_JS.contains("const DH_VER = 6"));
+        assert!(PAGE_API_JS.contains("aria-controls"));
+        assert!(PAGE_API_JS.contains("unique_fuzzy"));
+        assert!(PAGE_API_JS.contains("activePopupScrollable"));
+        assert!(PAGE_API_JS.contains("ref: (ref) => getRef(ref)"));
+    }
+
+    #[test]
     fn channel_error_classification() {
         // CSP 拦截（X 等站点 MAIN-world eval 被拒）→ 应转移
         assert!(is_channel_error(&anyhow!(
@@ -244,11 +256,15 @@ mod tests {
         )));
         assert!(is_channel_error(&anyhow!("Cannot attach to this target")));
         // 业务错误 → 不转移，原样返回给 LLM
-        assert!(!is_channel_error(&anyhow!("元素 [3] 不存在或已失效，请重新获取快照")));
+        assert!(!is_channel_error(&anyhow!(
+            "元素 [3] 不存在或已失效，请重新获取快照"
+        )));
         assert!(!is_channel_error(&anyhow!("没有活动标签页")));
         assert!(!is_channel_error(&anyhow!("缺少参数 ref")));
         // 页面 JS 自身抛出的普通异常不误判
-        assert!(!is_channel_error(&anyhow!("Uncaught TypeError: Cannot read properties of null")));
+        assert!(!is_channel_error(&anyhow!(
+            "Uncaught TypeError: Cannot read properties of null"
+        )));
     }
 
     #[test]

@@ -17,11 +17,63 @@ const RAW_READ_CAP: u64 = 20 * 1024 * 1024;
 
 /// 文本类扩展名白名单（writer 模块复用：只有这些格式允许创建/编辑）
 pub const TEXT_EXTS: &[&str] = &[
-    "txt", "text", "md", "markdown", "log", "json", "jsonl", "csv", "tsv", "xml", "yaml", "yml",
-    "toml", "ini", "conf", "cfg", "env", "properties", "svg", "html", "htm", "css", "js", "mjs",
-    "cjs", "jsx", "ts", "tsx", "vue", "rs", "py", "java", "c", "h", "cpp", "hpp", "cs", "go",
-    "php", "rb", "swift", "kt", "sql", "sh", "bat", "ps1", "cmd", "lua", "r", "ipynb", "lock",
-    "gitignore", "gitattributes", "editorconfig", "dockerignore", "reg", "vbs",
+    "txt",
+    "text",
+    "md",
+    "markdown",
+    "log",
+    "json",
+    "jsonl",
+    "csv",
+    "tsv",
+    "xml",
+    "yaml",
+    "yml",
+    "toml",
+    "ini",
+    "conf",
+    "cfg",
+    "env",
+    "properties",
+    "svg",
+    "html",
+    "htm",
+    "css",
+    "js",
+    "mjs",
+    "cjs",
+    "jsx",
+    "ts",
+    "tsx",
+    "vue",
+    "rs",
+    "py",
+    "java",
+    "c",
+    "h",
+    "cpp",
+    "hpp",
+    "cs",
+    "go",
+    "php",
+    "rb",
+    "swift",
+    "kt",
+    "sql",
+    "sh",
+    "bat",
+    "ps1",
+    "cmd",
+    "lua",
+    "r",
+    "ipynb",
+    "lock",
+    "gitignore",
+    "gitattributes",
+    "editorconfig",
+    "dockerignore",
+    "reg",
+    "vbs",
 ];
 
 #[derive(Debug, Serialize)]
@@ -77,8 +129,8 @@ fn classify(ext: &str) -> FileClass {
         e if TEXT_EXTS.contains(&e) => FileClass::Text,
         // 已知二进制扩展直接归类，其余按内容嗅探
         "zip" | "7z" | "rar" | "tar" | "gz" | "exe" | "msi" | "dll" | "com" | "bin" | "dat"
-        | "mp3" | "wav" | "flac" | "m4a" | "mp4" | "mkv" | "avi" | "mov" | "wmv"
-        | "iso" | "lnk" | "url" | "db" | "sqlite" => FileClass::Binary,
+        | "mp3" | "wav" | "flac" | "m4a" | "mp4" | "mkv" | "avi" | "mov" | "wmv" | "iso"
+        | "lnk" | "url" | "db" | "sqlite" => FileClass::Binary,
         _ => FileClass::Unknown,
     }
 }
@@ -100,7 +152,10 @@ pub fn read_file(
     full: bool,
 ) -> Result<ReadResult> {
     if path.is_dir() {
-        bail!("该路径是文件夹，请用 scan_desktop 查看其内容: {}", path.display());
+        bail!(
+            "该路径是文件夹，请用 scan_desktop 查看其内容: {}",
+            path.display()
+        );
     }
     let ext = path
         .extension()
@@ -356,13 +411,17 @@ fn blocks<'a>(xml: &'a str, open: &str, close: &str) -> Vec<&'a str> {
     let mut pos = 0;
     while let Some(i) = xml[pos..].find(open) {
         let start = pos + i;
-        let Some(gt) = xml[start..].find('>') else { break };
+        let Some(gt) = xml[start..].find('>') else {
+            break;
+        };
         if xml[start..start + gt + 1].ends_with("/>") {
             pos = start + gt + 1;
             continue;
         }
         let body_start = start + gt + 1;
-        let Some(c) = xml[body_start..].find(close) else { break };
+        let Some(c) = xml[body_start..].find(close) else {
+            break;
+        };
         let end = body_start + c + close.len();
         res.push(&xml[start..end]);
         pos = end;
@@ -403,13 +462,17 @@ fn extract_tag_texts(xml: &str, tag: &str) -> Vec<String> {
     let mut pos = 0;
     while let Some(i) = xml[pos..].find(&open) {
         let start = pos + i;
-        let Some(gt) = xml[start..].find('>') else { break };
+        let Some(gt) = xml[start..].find('>') else {
+            break;
+        };
         if xml[start..start + gt + 1].ends_with("/>") {
             pos = start + gt + 1;
             continue;
         }
         let body_start = start + gt + 1;
-        let Some(c) = xml[body_start..].find(&close) else { break };
+        let Some(c) = xml[body_start..].find(&close) else {
+            break;
+        };
         res.push(xml[body_start..body_start + c].to_string());
         pos = body_start + c + close.len();
     }
@@ -489,7 +552,11 @@ pub fn file_info(path: &Path) -> Result<FileInfo> {
     Ok(FileInfo {
         path: path.to_string_lossy().replace('\\', "/"),
         name,
-        kind: if is_dir { "文件夹".into() } else { "文件".into() },
+        kind: if is_dir {
+            "文件夹".into()
+        } else {
+            "文件".into()
+        },
         type_desc: type_desc(&ext, is_dir),
         ext,
         size_bytes: if is_dir { 0 } else { meta.len() },

@@ -9,9 +9,7 @@ pub static ALL: &[(&str, &str)] = &[(
 )];
 
 pub fn get(name: &str) -> Option<&'static str> {
-    ALL.iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, c)| *c)
+    ALL.iter().find(|(n, _)| *n == name).map(|(_, c)| *c)
 }
 
 pub fn names() -> impl Iterator<Item = &'static str> {

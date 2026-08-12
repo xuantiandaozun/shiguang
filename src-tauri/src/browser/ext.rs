@@ -139,9 +139,7 @@ impl ExtServer {
         let req = json!({ "id": id, "action": action, "params": params });
         {
             let mut guard = self.inner.writer.lock().await;
-            let w = guard
-                .as_mut()
-                .ok_or_else(|| anyhow!("浏览器扩展未连接"))?;
+            let w = guard.as_mut().ok_or_else(|| anyhow!("浏览器扩展未连接"))?;
             w.send(Message::Text(req.to_string().into()))
                 .await
                 .map_err(|e| anyhow!("发送扩展消息失败: {}", e))?;

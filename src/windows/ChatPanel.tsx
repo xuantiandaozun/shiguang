@@ -134,11 +134,11 @@ export default function ChatPanel() {
       finishStreaming();
       addMessage({ role: "system", content: `出错了：${p.message}` });
     });
-    add<{ name: string; status: string }>("tool-status", (p) => {
+    add<{ name: string; status: string; result?: unknown }>("tool-status", (p) => {
       if (p.status === "running") {
         addMessage({ role: "tool", toolName: p.name, content: "", streaming: true });
-      } else if (p.status === "done") {
-        completeTool(p.name);
+      } else if (p.status === "done" || p.status === "error") {
+        completeTool(p.name, p.status === "error" ? toolFailureSummary(p.result) : undefined);
       }
     });
     add<Plan>("plan-proposed", (p) => {
@@ -492,7 +492,9 @@ export default function ChatPanel() {
 
 /** 工具调用提示的友好文案（原始工具名 → 用户可读的进行式描述） */
 const TOOL_LABELS: Record<string, string> = {
+  discover_capabilities: "发现所需能力",
   scan_desktop: "扫描目录",
+  search_files: "搜索本机文件",
   read_file: "读取文件",
   get_file_info: "查询文件属性",
   create_file: "创建文件",
@@ -537,6 +539,28 @@ const TOOL_LABELS: Record<string, string> = {
   manage_skill: "管理 Skill",
 };
 
+function toolFailureSummary(result: unknown): string {
+  if (!result || typeof result !== "object") return "执行遇到问题，AI 正在根据结果尝试修正";
+  const value = result as {
+    error?: unknown;
+    status?: unknown;
+    exit_code?: unknown;
+    guidance?: unknown;
+  };
+  if (typeof value.error === "string" && value.error.trim()) return value.error.trim();
+  if (Array.isArray(value.guidance)) {
+    const first = value.guidance.find((item): item is string => typeof item === "string" && !!item.trim());
+    if (first) return first;
+  }
+  if (value.status === "timeout") return "命令执行超时，AI 正在调整执行方式";
+  if (value.status === "failed") {
+    return typeof value.exit_code === "number"
+      ? `命令执行失败（退出码 ${value.exit_code}），AI 正在检查输出`
+      : "命令执行失败，AI 正在检查输出";
+  }
+  return "执行遇到问题，AI 正在根据结果尝试修正";
+}
+
 function MessageBubble({
   m,
   activePlanId,
@@ -556,11 +580,21 @@ function MessageBubble({
   if (m.role === "tool") {
     const label = TOOL_LABELS[m.toolName ?? ""] ?? m.toolName;
     return (
-      <div className="flex items-center gap-2 text-[11px] text-slate-400">
+      <div
+        className={`flex items-start gap-2 text-[11px] ${m.toolFailed ? "text-rose-400" : "text-slate-400"}`}
+      >
         {m.streaming ? (
           <>
             <span className="inline-block w-3 h-3 rounded-full border-2 border-sky-400 border-t-transparent animate-spin" />
             {label}
+          </>
+        ) : m.toolFailed ? (
+          <>
+            <span className="shrink-0 text-rose-400">!</span>
+            <span>
+              <span>{label}未成功</span>
+              {m.content && <span className="block text-rose-300/80">{m.content}</span>}
+            </span>
           </>
         ) : (
           <>

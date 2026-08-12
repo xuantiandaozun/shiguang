@@ -135,7 +135,10 @@ fn default_temp_path() -> String {
 /// 旧版本默认把分类建在「桌面/桌面整理」下。若用户仍在用该默认值（未自定义过），
 /// 自动切换到桌面顶层，并同步改写指向旧根目录的规则目标；返回生效的根目录。
 fn migrate_legacy_root(db: &Db, desktop: &std::path::Path, current: &str) -> Option<String> {
-    let legacy = desktop.join("桌面整理").to_string_lossy().replace('\\', "/");
+    let legacy = desktop
+        .join("桌面整理")
+        .to_string_lossy()
+        .replace('\\', "/");
     if current.replace('\\', "/") != legacy {
         return None;
     }
@@ -285,10 +288,7 @@ pub async fn send_chat_message(
         let busy_state = app2.state::<AppState>();
         busy_state.chat_busy.store(false, Ordering::SeqCst);
         if let Err(e) = result {
-            let _ = app2.emit(
-                "llm-error",
-                serde_json::json!({ "message": e.to_string() }),
-            );
+            let _ = app2.emit("llm-error", serde_json::json!({ "message": e.to_string() }));
         }
     });
     Ok(msg_id)
@@ -298,11 +298,7 @@ pub async fn send_chat_message(
 /// 正在执行的工具会跑完当前这个再停，保证文件操作的一致性。
 #[tauri::command]
 pub fn stop_chat_message(state: State<AppState>) -> Result<(), String> {
-    let token = state
-        .chat_cancel
-        .lock()
-        .map_err(|e| e.to_string())?
-        .take();
+    let token = state.chat_cancel.lock().map_err(|e| e.to_string())?.take();
     match token {
         Some(t) => {
             t.cancel();
@@ -315,7 +311,10 @@ pub fn stop_chat_message(state: State<AppState>) -> Result<(), String> {
 #[tauri::command]
 pub fn get_current_session(state: State<AppState>) -> Result<SessionView, String> {
     let session_id = state.db.current_session_id().map_err(|e| e.to_string())?;
-    let messages = state.db.load_chat(session_id, 50).map_err(|e| e.to_string())?;
+    let messages = state
+        .db
+        .load_chat(session_id, 50)
+        .map_err(|e| e.to_string())?;
     Ok(SessionView {
         session_id,
         messages,
@@ -330,7 +329,10 @@ pub fn list_sessions(state: State<AppState>) -> Result<Vec<crate::db::SessionInf
 #[tauri::command]
 pub fn new_session(app: AppHandle, state: State<AppState>) -> Result<SessionView, String> {
     let id = state.db.create_session().map_err(|e| e.to_string())?;
-    state.db.set_current_session(id).map_err(|e| e.to_string())?;
+    state
+        .db
+        .set_current_session(id)
+        .map_err(|e| e.to_string())?;
     let _ = app.emit("sessions-changed", ());
     Ok(SessionView {
         session_id: id,
@@ -344,7 +346,10 @@ pub fn switch_session(
     state: State<AppState>,
     id: i64,
 ) -> Result<SessionView, String> {
-    state.db.set_current_session(id).map_err(|e| e.to_string())?;
+    state
+        .db
+        .set_current_session(id)
+        .map_err(|e| e.to_string())?;
     let messages = state.db.load_chat(id, 50).map_err(|e| e.to_string())?;
     let _ = app.emit("sessions-changed", ());
     Ok(SessionView {
@@ -379,7 +384,10 @@ pub fn recall_message(state: State<AppState>, id: i64) -> Result<(), String> {
 #[tauri::command]
 pub fn load_chat_history(state: State<AppState>) -> Result<Vec<ChatMsg>, String> {
     let session_id = state.db.current_session_id().map_err(|e| e.to_string())?;
-    state.db.load_chat(session_id, 50).map_err(|e| e.to_string())
+    state
+        .db
+        .load_chat(session_id, 50)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -535,8 +543,16 @@ pub fn delete_todo(app: AppHandle, state: State<AppState>, id: i64) -> Result<()
 }
 
 #[tauri::command]
-pub fn set_todo_done(app: AppHandle, state: State<AppState>, id: i64, done: bool) -> Result<(), String> {
-    state.db.set_todo_done(id, done).map_err(|e| e.to_string())?;
+pub fn set_todo_done(
+    app: AppHandle,
+    state: State<AppState>,
+    id: i64,
+    done: bool,
+) -> Result<(), String> {
+    state
+        .db
+        .set_todo_done(id, done)
+        .map_err(|e| e.to_string())?;
     let _ = app.emit("todos-changed", ());
     Ok(())
 }
@@ -624,11 +640,7 @@ pub fn list_rules(state: State<AppState>) -> Result<Vec<Rule>, String> {
 }
 
 #[tauri::command]
-pub fn upsert_rule(
-    app: AppHandle,
-    state: State<AppState>,
-    rule: RuleInput,
-) -> Result<i64, String> {
+pub fn upsert_rule(app: AppHandle, state: State<AppState>, rule: RuleInput) -> Result<i64, String> {
     if !["ext", "keyword", "regex"].contains(&rule.match_type.as_str()) {
         return Err("match_type 必须是 ext / keyword / regex".to_string());
     }
@@ -638,15 +650,29 @@ pub fn upsert_rule(
     let target = resolve_target_folder(&state.db, &rule.target_folder)?;
     let id = state
         .db
-        .upsert_rule(rule.id, rule.name.trim(), &rule.match_type, rule.pattern.trim(), &target)
+        .upsert_rule(
+            rule.id,
+            rule.name.trim(),
+            &rule.match_type,
+            rule.pattern.trim(),
+            &target,
+        )
         .map_err(|e| e.to_string())?;
     let _ = app.emit("rules-changed", ());
     Ok(id)
 }
 
 #[tauri::command]
-pub fn toggle_rule(app: AppHandle, state: State<AppState>, id: i64, enabled: bool) -> Result<(), String> {
-    state.db.toggle_rule(id, enabled).map_err(|e| e.to_string())?;
+pub fn toggle_rule(
+    app: AppHandle,
+    state: State<AppState>,
+    id: i64,
+    enabled: bool,
+) -> Result<(), String> {
+    state
+        .db
+        .toggle_rule(id, enabled)
+        .map_err(|e| e.to_string())?;
     let _ = app.emit("rules-changed", ());
     Ok(())
 }
@@ -693,13 +719,27 @@ pub fn save_settings(
     ] {
         db.set_setting(k, v).map_err(|e| e.to_string())?;
     }
-    db.set_setting("auto_organize", if settings.auto_organize { "true" } else { "false" })
-        .map_err(|e| e.to_string())?;
-    db.set_setting("autostart", if settings.autostart { "true" } else { "false" })
-        .map_err(|e| e.to_string())?;
+    db.set_setting(
+        "auto_organize",
+        if settings.auto_organize {
+            "true"
+        } else {
+            "false"
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    db.set_setting(
+        "autostart",
+        if settings.autostart { "true" } else { "false" },
+    )
+    .map_err(|e| e.to_string())?;
     db.set_setting(
         "thinking_enabled",
-        if settings.thinking_enabled { "true" } else { "false" },
+        if settings.thinking_enabled {
+            "true"
+        } else {
+            "false"
+        },
     )
     .map_err(|e| e.to_string())?;
     db.set_setting("reasoning_effort", settings.reasoning_effort.trim())
@@ -713,7 +753,11 @@ pub fn save_settings(
     }
     db.set_setting(
         "subagent_thinking_enabled",
-        if settings.subagent_thinking_enabled { "true" } else { "false" },
+        if settings.subagent_thinking_enabled {
+            "true"
+        } else {
+            "false"
+        },
     )
     .map_err(|e| e.to_string())?;
     db.set_setting(
@@ -725,7 +769,11 @@ pub fn save_settings(
         .map_err(|e| e.to_string())?;
     db.set_setting(
         "command_tools_enabled",
-        if settings.command_tools_enabled { "true" } else { "false" },
+        if settings.command_tools_enabled {
+            "true"
+        } else {
+            "false"
+        },
     )
     .map_err(|e| e.to_string())?;
     for (k, v) in [
@@ -741,7 +789,11 @@ pub fn save_settings(
     }
     db.set_setting(
         "auto_organize_paused",
-        if settings.auto_organize { "false" } else { "true" },
+        if settings.auto_organize {
+            "false"
+        } else {
+            "true"
+        },
     )
     .map_err(|e| e.to_string())?;
     state
@@ -854,7 +906,11 @@ pub fn create_skill_cmd(
 }
 
 #[tauri::command]
-pub fn delete_skill_cmd(app: AppHandle, state: State<AppState>, name: String) -> Result<(), String> {
+pub fn delete_skill_cmd(
+    app: AppHandle,
+    state: State<AppState>,
+    name: String,
+) -> Result<(), String> {
     state.skills.delete(&name).map_err(|e| e.to_string())?;
     let _ = app.emit("skills-changed", ());
     Ok(())

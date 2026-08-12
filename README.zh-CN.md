@@ -12,7 +12,8 @@
 | 自动化规则 | 方案确认后对 AI 说「以后都按这个规则来」，或在主窗口手动建规则；之后桌面新文件命中规则自动归类（仅已审核规则生效，可全局暂停） |
 | 待办事项 | 自然语言创建：「明天下午三点提醒我交周报」；支持重复（每天/每周）、优先级、延后提醒；提醒方式可选 Windows 通知或弹窗——带输入框的弹窗能直接把回复发给 AI 继续聊 |
 | 浏览器操作 | 读文章正文（Readability）、快照后按编号点击/输入；走配套扩展操作你的真实浏览器（带登录态），失败自动故障转移到独立 CDP 实例 |
-| 后台命令 | AI 可在后台跑 shell 命令（编译、监听等耗时任务）并稍后查看结果；可在设置中关闭 |
+| 本机文件索引 | 持久化的 Everything 类元数据索引，用于批量搜索和整盘分析；大范围扫描优先使用索引，开始维护前会先征得同意，可直接按一级目录汇总递归占用，避免每次重新遍历磁盘 |
+| 后台命令 | AI 可同步或后台执行 PowerShell / cmd；执行前检查 PowerShell 语法，保持中文输出编码，传播原生程序退出码，并可稍后查看长任务结果；可在设置中关闭命令工具 |
 | Agent Skills | 内置只读 Skill + AI 可自建/沉淀的外部 Skill；可与 Claude / Codex / Cursor 的技能目录同步 |
 | 文件与视觉 | 读文件（文本/PDF）、OCR、看图、带自动备份的安全写入、只读子代理 |
 | 悬浮球 | 桌面常驻小圆球，可拖动，单击展开/收起聊天窗；聊天窗、主窗口关闭后程序仍在托盘运行 |
@@ -25,6 +26,8 @@
 - 快捷方式 `.lnk/.url`、`desktop.ini`、隐藏文件默认不动
 - 所有移动记入 SQLite `operation_logs`，撤销 = 反向移动
 - 文件写入自动备份；破坏性 shell 命令必须征得同意
+- 整盘与批量文件扫描会先询问是否维护元数据索引；索引只保存元数据，不读取文件内容
+- 高速 NTFS/MFT 索引由短生命周期的只读辅助进程隔离执行，弹出 UAC 前必须获得明确同意
 
 ## 技术栈
 
@@ -61,7 +64,8 @@ npm run tauri:build
 `%APPDATA%/com.deskhelper.win/`：
 
 - `deskhelper.db`（SQLite：待办、规则、操作记录、设置、聊天记录）
-- `tasks/`、`skills/`、`screenshots/`、`temp/`（AI 临时文件）、`file_backups/`
+- `file_index.db`（持久化文件元数据索引：路径、名称、大小、时间；不含文件内容）
+- `tasks/`、`skills/`、`screenshots/`、`temp/`（AI 临时文件）、`file_backups/`、`ntfs-helper/`
 
 API Key 仅保存在本机此数据库中，不会上传。
 
@@ -81,12 +85,16 @@ src-tauri/src/
                         工具集、子代理、提示词、个人信息、视觉模型
   organizer/            桌面扫描、方案执行/撤销、规则引擎、文件监听
   browser/              扩展桥 + CDP；page-api + Readability（browser_read 抽正文）
+  file_index.rs         持久化文件元数据索引、覆盖检查与目录占用汇总
+  ntfs_usn.rs           只读 NTFS MFT / USN Journal 支持
+  ntfs_helper.rs        短生命周期提权索引辅助进程的协议与客户端
   todo/scheduler.rs     待办提醒调度（通知 / 弹窗 / 带输入弹窗）
   tasks.rs              后台命令；skills.rs + builtin_skills.rs  Agent Skills
   reader.rs / writer.rs / ocr.rs / machine.rs / tempfs.rs
 src-tauri/builtin-skills/  内置 Skill 源文件（编译进应用）
 browser-extension/      配套浏览器扩展（WebSocket 桥接桌面端）
 scripts/gen-icon.cjs    应用图标生成脚本（node scripts/gen-icon.cjs）
+scripts/build-index-helper.mjs  打包前构建 NTFS 索引 sidecar
 ```
 
 ## 规划

@@ -22,6 +22,7 @@ const RESULT_MAX_CHARS: usize = 6000;
 /// 不含 run_subagent 自身（防止嵌套递归）。
 const ALLOWED_TOOLS: &[&str] = &[
     "scan_desktop",
+    "search_files",
     "read_file",
     "get_file_info",
     "ocr_image",
@@ -126,6 +127,24 @@ async fn run_inner(
             let result = if ALLOWED_TOOLS.contains(&call.name.as_str()) {
                 let parsed: Value =
                     serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
+                if call.name == "search_files"
+                    && !matches!(
+                        parsed
+                            .get("action")
+                            .and_then(Value::as_str)
+                            .unwrap_or("search"),
+                        "search" | "status"
+                    )
+                {
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": json!({
+                            "error": "子代理只能查询已有文件索引；建库、停止和 NTFS/UAC 动作必须由主代理向用户申请后执行"
+                        }).to_string(),
+                    }));
+                    continue;
+                }
                 // execute → subagent::run → execute 构成异步递归，Box::pin 打破无限大小的 future
                 match Box::pin(tools::execute(app, &call.name, &parsed, cancel)).await {
                     Ok(v) => v,

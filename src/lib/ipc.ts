@@ -122,6 +122,10 @@ export interface BgTask {
   id: string;
   label: string;
   command: string;
+  shell: string;
+  shell_selection: string;
+  transport: string;
+  success_exit_codes: number[];
   /** running / done / failed / cancelled / timeout */
   status: string;
   exit_code: number | null;

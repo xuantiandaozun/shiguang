@@ -100,10 +100,12 @@ mod tests {
     #[test]
     fn extract_exe_from_command_lines() {
         assert_eq!(
-            extract_exe(r#""C:\Program Files\Google\Chrome\Application\chrome.exe" --single-argument %1"#)
-                .unwrap()
-                .to_str()
-                .unwrap(),
+            extract_exe(
+                r#""C:\Program Files\Google\Chrome\Application\chrome.exe" --single-argument %1"#
+            )
+            .unwrap()
+            .to_str()
+            .unwrap(),
             r"C:\Program Files\Google\Chrome\Application\chrome.exe"
         );
         assert_eq!(

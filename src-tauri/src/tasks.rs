@@ -3,7 +3,9 @@
 //! 避免大量输出挤占模型上下文窗口。
 
 use anyhow::{anyhow, bail, Result};
+use base64::Engine as _;
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -27,6 +29,14 @@ pub struct TaskInfo {
     pub id: String,
     pub label: String,
     pub command: String,
+    /// cmd / powershell；用于诊断命令实际在哪种解释器中执行。
+    pub shell: String,
+    /// explicit / legacy_wrapper / inferred / default
+    pub shell_selection: String,
+    /// cmd / encoded_command / encoded_bootstrap_file
+    pub transport: String,
+    /// 被视为成功的进程退出码。
+    pub success_exit_codes: Vec<i32>,
     /// running / done / failed / cancelled / timeout
     pub status: String,
     pub exit_code: Option<i32>,
@@ -38,6 +48,7 @@ pub struct TaskInfo {
 
 struct TaskEntry {
     info: TaskInfo,
+    success_exit_codes: Vec<i32>,
 }
 
 type TaskMap = Arc<Mutex<HashMap<String, TaskEntry>>>;
@@ -52,6 +63,7 @@ impl TaskManager {
     pub fn new(app_dir: &Path) -> Self {
         let dir = app_dir.join("tasks");
         let _ = std::fs::create_dir_all(&dir);
+        cleanup_stale_powershell_wrappers(&dir);
         Self {
             dir,
             seq: AtomicU64::new(0),
@@ -59,7 +71,9 @@ impl TaskManager {
         }
     }
 
-    /// 启动后台命令（Windows cmd /c），输出实时写入日志文件后立即返回。
+    /// 启动后台命令，输出实时写入日志文件后立即返回。
+    /// cmd 命令经 cmd /c；PowerShell 脚本经 UTF-16LE Base64 EncodedCommand，
+    /// 不再经过 cmd 或临时 ps1 文件，避免 `$`、引号和无 BOM UTF-8 的歧义。
     /// 监控协程等待进程结束后更新状态并广播 task-changed。
     pub fn start_command(
         &self,
@@ -67,6 +81,11 @@ impl TaskManager {
         command: &str,
         label: Option<&str>,
         workdir: Option<&str>,
+        shell: Option<&str>,
+        powershell_strict: bool,
+        success_exit_codes: &[i32],
+        script_args: &Value,
+        environment: &HashMap<String, String>,
     ) -> Result<TaskInfo> {
         let command = command.trim();
         if command.is_empty() {
@@ -84,14 +103,63 @@ impl TaskManager {
             .filter(|p| p.is_dir())
             .unwrap_or_else(|| dirs::desktop_dir().unwrap_or_else(|| PathBuf::from(".")));
 
-        let mut cmd = tokio::process::Command::new("cmd");
-        cmd.args(["/c", command])
-            .current_dir(&dir)
+        let (shell_kind, executable_command, shell_selection) = resolve_shell(command, shell)?;
+        let accepted_exit_codes = normalize_success_exit_codes(success_exit_codes)?;
+        let mut transient_script = None;
+        let mut transport = "cmd";
+        let mut cmd = match shell_kind {
+            ShellKind::Cmd => {
+                let mut cmd = tokio::process::Command::new("cmd");
+                cmd.args(["/d", "/s", "/c", &utf8_command(&executable_command)]);
+                cmd
+            }
+            ShellKind::PowerShell => {
+                let mut cmd = tokio::process::Command::new("powershell");
+                let wrapper =
+                    powershell_wrapper(&executable_command, powershell_strict, script_args)?;
+                let encoded = encode_powershell_command(&wrapper);
+                if encoded.len() <= 24_000 {
+                    transport = "encoded_command";
+                    cmd.args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded]);
+                } else {
+                    // CreateProcess 命令行有长度上限。超长脚本改用后端生成的、带 BOM
+                    // 的临时 wrapper 文件；路径作为独立 argv 传入，不经过 shell 引号。
+                    transport = "encoded_bootstrap_file";
+                    let script_path = self.dir.join(format!("task-{}.ps1", id));
+                    write_utf8_bom(&script_path, &wrapper)?;
+                    let bootstrap = encode_powershell_command(powershell_file_bootstrap());
+                    cmd.args([
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-EncodedCommand",
+                        &bootstrap,
+                    ]);
+                    transient_script = Some(script_path);
+                }
+                cmd
+            }
+        };
+        cmd.current_dir(&dir)
+            .envs(environment)
+            .env("PYTHONUTF8", "1")
+            .env("PYTHONIOENCODING", "utf-8")
             .stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(stderr_file))
             .creation_flags(CREATE_NO_WINDOW);
-        let mut child = cmd.spawn().map_err(|e| anyhow!("启动命令失败: {}", e))?;
+        if let Some(path) = transient_script.as_ref() {
+            // 内部保留变量最后设置，避免被调用方 environment 覆盖。
+            cmd.env("DH_PS_WRAPPER_PATH", path);
+        }
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                if let Some(path) = transient_script.as_ref() {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(anyhow!("启动命令失败: {}", error));
+            }
+        };
         let pid = child.id().unwrap_or(0);
 
         let info = TaskInfo {
@@ -104,6 +172,10 @@ impl TaskManager {
                 .take(60)
                 .collect(),
             command: command.to_string(),
+            shell: shell_kind.as_str().to_string(),
+            shell_selection: shell_selection.to_string(),
+            transport: transport.to_string(),
+            success_exit_codes: accepted_exit_codes.clone(),
             status: "running".to_string(),
             exit_code: None,
             pid,
@@ -114,7 +186,13 @@ impl TaskManager {
         self.tasks
             .lock()
             .map_err(|e| anyhow!(e.to_string()))?
-            .insert(id.clone(), TaskEntry { info: info.clone() });
+            .insert(
+                id.clone(),
+                TaskEntry {
+                    info: info.clone(),
+                    success_exit_codes: accepted_exit_codes,
+                },
+            );
         emit_changed(app, &info);
 
         // 监控协程：独占 child，等进程退出后回填状态。
@@ -127,14 +205,35 @@ impl TaskManager {
             let (status, code) = match result {
                 Ok(s) => {
                     let code = s.code();
-                    (if s.success() { "done" } else { "failed" }, code)
+                    let accepted = tasks2
+                        .lock()
+                        .ok()
+                        .and_then(|guard| {
+                            guard
+                                .get(&id2)
+                                .map(|entry| entry.success_exit_codes.clone())
+                        })
+                        .unwrap_or_else(|| vec![0]);
+                    (
+                        if code.is_some_and(|value| accepted.contains(&value)) {
+                            "done"
+                        } else {
+                            "failed"
+                        },
+                        code,
+                    )
                 }
                 Err(_) => ("failed", None),
             };
+            if let Some(path) = transient_script {
+                let _ = std::fs::remove_file(path);
+            }
             let finished = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
             let snapshot = {
                 let Ok(mut guard) = tasks2.lock() else { return };
-                let Some(entry) = guard.get_mut(&id2) else { return };
+                let Some(entry) = guard.get_mut(&id2) else {
+                    return;
+                };
                 // 用户主动 stop 时状态已被标记为 cancelled，不覆盖
                 if entry.info.status == "running" {
                     entry.info.status = status.to_string();
@@ -169,7 +268,9 @@ impl TaskManager {
     pub fn stop(&self, app: &AppHandle, id: &str) -> Result<TaskInfo> {
         let (pid, already_finished) = {
             let mut guard = self.tasks.lock().map_err(|e| anyhow!(e.to_string()))?;
-            let entry = guard.get_mut(id).ok_or_else(|| anyhow!("任务不存在: {}", id))?;
+            let entry = guard
+                .get_mut(id)
+                .ok_or_else(|| anyhow!("任务不存在: {}", id))?;
             if entry.info.status != "running" {
                 (entry.info.pid, true)
             } else {
@@ -250,8 +351,23 @@ impl TaskManager {
         command: &str,
         workdir: Option<&str>,
         timeout_secs: u64,
+        shell: Option<&str>,
+        powershell_strict: bool,
+        success_exit_codes: &[i32],
+        script_args: &Value,
+        environment: &HashMap<String, String>,
     ) -> Result<TaskInfo> {
-        let info = self.start_command(app, command, None, workdir)?;
+        let info = self.start_command(
+            app,
+            command,
+            None,
+            workdir,
+            shell,
+            powershell_strict,
+            success_exit_codes,
+            script_args,
+            environment,
+        )?;
         let id = info.id.clone();
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
         loop {
@@ -275,6 +391,249 @@ impl TaskManager {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         }
     }
+}
+
+/// 每个命令都在独立 cmd 子进程内执行，切换代码页不会影响用户自己的终端。
+/// UTF-8 优先可统一 cmd 内建命令与大多数现代 CLI；日志读取仍保留 GB18030 回退，
+/// 兼容忽略活动代码页的旧程序。
+fn utf8_command(command: &str) -> String {
+    format!("chcp 65001 >nul & {}", command)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellKind {
+    Cmd,
+    PowerShell,
+}
+
+impl ShellKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cmd => "cmd",
+            Self::PowerShell => "powershell",
+        }
+    }
+}
+
+/// 决定实际解释器。显式 shell 最可靠；auto 仍识别旧提示词产生的
+/// `powershell ... -Command "..."`，取出脚本后改走 EncodedCommand。
+fn resolve_shell(
+    command: &str,
+    requested: Option<&str>,
+) -> Result<(ShellKind, String, &'static str)> {
+    let requested = requested.unwrap_or("auto").trim().to_ascii_lowercase();
+    match requested.as_str() {
+        "cmd" => Ok((ShellKind::Cmd, command.to_string(), "explicit")),
+        "powershell" | "pwsh" => Ok((
+            ShellKind::PowerShell,
+            unwrap_powershell_command(command)
+                .unwrap_or(command)
+                .to_string(),
+            "explicit",
+        )),
+        "auto" | "" => match unwrap_powershell_command(command) {
+            Some(script) => Ok((ShellKind::PowerShell, script.to_string(), "legacy_wrapper")),
+            None if looks_like_powershell(command) => {
+                Ok((ShellKind::PowerShell, command.to_string(), "inferred"))
+            }
+            None => Ok((ShellKind::Cmd, command.to_string(), "default")),
+        },
+        other => bail!("shell 必须是 auto / cmd / powershell，收到: {}", other),
+    }
+}
+
+/// 只对高置信度 PowerShell 语法自动切换解释器；普通 `$` 文本、正则和外部
+/// CLI 参数不会仅凭单个符号触发。存在歧义时仍由 AI 显式指定 shell。
+fn looks_like_powershell(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    let starts_with_variable_assignment = command
+        .trim_start()
+        .strip_prefix('$')
+        .and_then(|tail| tail.find('=').map(|pos| tail[..pos].trim()))
+        .is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '?'))
+        });
+    starts_with_variable_assignment
+        || lower.contains("$_")
+        || lower.contains("$psitem")
+        || lower.contains("$env:")
+        || lower.contains("@(")
+        || lower.contains("[system.")
+        || lower.contains("[console]::")
+        || lower.contains("foreach (")
+        || lower.contains("where-object")
+        || lower.contains("foreach-object")
+        || [
+            "get-childitem",
+            "get-item",
+            "get-content",
+            "set-content",
+            "test-path",
+            "measure-object",
+            "select-object",
+            "convertto-json",
+            "convertfrom-json",
+            "write-output",
+        ]
+        .iter()
+        .any(|cmdlet| {
+            lower
+                .split(['|', ';', '\n', '\r'])
+                .map(str::trim_start)
+                .any(|segment| {
+                    segment.strip_prefix(cmdlet).is_some_and(|tail| {
+                        tail.is_empty() || tail.starts_with(char::is_whitespace)
+                    })
+                })
+        })
+}
+
+/// 兼容旧调用形态：powershell[-.exe] [flags] -Command <script>。
+/// 这里只识别明确包装器，不猜测普通命令是不是 PowerShell 语法。
+fn unwrap_powershell_command(command: &str) -> Option<&str> {
+    let trimmed = command.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let rest = ["powershell.exe", "powershell", "pwsh.exe", "pwsh"]
+        .into_iter()
+        .find_map(|prefix| {
+            lower.strip_prefix(prefix).and_then(|_| {
+                trimmed
+                    .get(prefix.len()..)
+                    .filter(|tail| tail.starts_with(char::is_whitespace))
+            })
+        })?
+        .trim_start();
+    let lower_rest = rest.to_ascii_lowercase();
+    let marker = "-command";
+    let start = lower_rest.find(marker)?;
+    if start > 0
+        && !lower_rest[..start]
+            .chars()
+            .last()
+            .is_some_and(char::is_whitespace)
+    {
+        return None;
+    }
+    let after_marker = start + marker.len();
+    if lower_rest
+        .get(after_marker..)
+        .and_then(|s| s.chars().next())
+        .is_some_and(|c| !c.is_whitespace())
+    {
+        return None;
+    }
+    let script = rest.get(after_marker..)?.trim();
+    if script.len() >= 2 {
+        let first = script.as_bytes()[0];
+        let last = script.as_bytes()[script.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return script.get(1..script.len() - 1);
+        }
+    }
+    (!script.is_empty()).then_some(script)
+}
+
+fn powershell_wrapper(script: &str, strict: bool, script_args: &Value) -> Result<String> {
+    let source = base64::engine::general_purpose::STANDARD.encode(script.as_bytes());
+    let structured_args =
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(script_args)?);
+    Ok(format!(
+        r#"$ProgressPreference = 'SilentlyContinue'
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
+$ErrorActionPreference = 'Stop'
+{strict_mode}
+$source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{source}'))
+$argsJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{structured_args}'))
+$DHArgs = ConvertFrom-Json -InputObject $argsJson
+$tokens = $null
+$parseErrors = $null
+[void][System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -gt 0) {{
+  foreach ($parseError in $parseErrors) {{
+    [Console]::Error.WriteLine(('__DH_PS_PARSE_ERROR__ line={{0}} column={{1}}: {{2}}' -f $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber, $parseError.Message))
+  }}
+  exit 2
+}}
+try {{
+  $block = [ScriptBlock]::Create($source)
+  $global:LASTEXITCODE = 0
+  & $block
+  $scriptSucceeded = $?
+  $nativeExit = $global:LASTEXITCODE
+  if ($nativeExit -ne 0) {{ exit [int]$nativeExit }}
+  if (-not $scriptSucceeded) {{
+    exit 1
+  }}
+}} catch {{
+  [Console]::Error.WriteLine(('__DH_PS_RUNTIME_ERROR__ {{0}}' -f $_.Exception.Message))
+  if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) {{ [Console]::Error.WriteLine($_.InvocationInfo.PositionMessage) }}
+  exit 1
+}}"#,
+        strict_mode = if strict {
+            "Set-StrictMode -Version 2.0"
+        } else {
+            "# StrictMode disabled for compatibility"
+        },
+    ))
+}
+
+fn encode_powershell_command(wrapper: &str) -> String {
+    let utf16: Vec<u8> = wrapper
+        .encode_utf16()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect();
+    base64::engine::general_purpose::STANDARD.encode(utf16)
+}
+
+fn powershell_file_bootstrap() -> &'static str {
+    r#"$ErrorActionPreference = 'Stop'
+try {
+  $wrapper = [IO.File]::ReadAllText($env:DH_PS_WRAPPER_PATH, [Text.Encoding]::UTF8)
+  & ([ScriptBlock]::Create($wrapper))
+} catch {
+  [Console]::Error.WriteLine(('__DH_PS_BOOTSTRAP_ERROR__ {0}' -f $_.Exception.Message))
+  exit 1
+}"#
+}
+
+fn write_utf8_bom(path: &Path, text: &str) -> Result<()> {
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend_from_slice(text.as_bytes());
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+fn cleanup_stale_powershell_wrappers(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("task-") && name.ends_with(".ps1") {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn normalize_success_exit_codes(codes: &[i32]) -> Result<Vec<i32>> {
+    if codes.len() > 32 {
+        bail!("success_exit_codes 最多 32 个");
+    }
+    let mut normalized = if codes.is_empty() {
+        vec![0]
+    } else {
+        codes.to_vec()
+    };
+    normalized.sort_unstable();
+    normalized.dedup();
+    Ok(normalized)
 }
 
 fn emit_changed(app: &AppHandle, info: &TaskInfo) {
@@ -322,9 +681,8 @@ fn decode_log(bytes: &[u8]) -> String {
     match String::from_utf8(bytes.to_vec()) {
         Ok(s) => s,
         Err(_) => {
-            let mid_cut = (1..=3usize).any(|n| {
-                bytes.len() > n + 8 && std::str::from_utf8(&bytes[n..]).is_ok()
-            });
+            let mid_cut = (1..=3usize)
+                .any(|n| bytes.len() > n + 8 && std::str::from_utf8(&bytes[n..]).is_ok());
             if mid_cut {
                 String::from_utf8_lossy(bytes).into_owned()
             } else {
@@ -347,12 +705,253 @@ fn read_tail(path: &Path, max_chars: usize) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_log;
+    use super::{
+        decode_log, encode_powershell_command, looks_like_powershell, normalize_success_exit_codes,
+        powershell_file_bootstrap, powershell_wrapper, resolve_shell, unwrap_powershell_command,
+        utf8_command, write_utf8_bom, ShellKind,
+    };
+    use base64::Engine as _;
+
+    #[test]
+    fn command_switches_child_code_page_to_utf8() {
+        assert_eq!(
+            utf8_command("lark-cli project list"),
+            "chcp 65001 >nul & lark-cli project list"
+        );
+    }
+
+    #[test]
+    fn auto_unwraps_legacy_powershell_command_without_losing_variables() {
+        let original =
+            "powershell -NoProfile -Command \"$dirs=@('甲','乙'); foreach($d in $dirs){$d}\"";
+        let (shell, script, selection) = resolve_shell(original, None).unwrap();
+        assert_eq!(shell, ShellKind::PowerShell);
+        assert_eq!(selection, "legacy_wrapper");
+        assert_eq!(script, "$dirs=@('甲','乙'); foreach($d in $dirs){$d}");
+        assert_eq!(
+            unwrap_powershell_command("echo powershell -Command x"),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_powershell_keeps_raw_multiline_script() {
+        let script = "$dirs = @('中文')\nforeach ($d in $dirs) { $d }";
+        let (shell, resolved, selection) = resolve_shell(script, Some("powershell")).unwrap();
+        assert_eq!(shell, ShellKind::PowerShell);
+        assert_eq!(selection, "explicit");
+        assert_eq!(resolved, script);
+    }
+
+    #[test]
+    fn auto_detects_high_confidence_powershell_but_not_plain_dollar_text() {
+        assert!(looks_like_powershell(
+            "$dirs=@('A'); foreach ($d in $dirs) {$d}"
+        ));
+        assert!(looks_like_powershell("$value = 1; Write-Output $value"));
+        assert!(looks_like_powershell("Get-ChildItem C:/ | Measure-Object"));
+        assert!(!looks_like_powershell("echo price=$5"));
+        assert!(!looks_like_powershell("npm view package-$tag"));
+        assert!(!looks_like_powershell("tool.exe --get-item value"));
+        let (_, _, selection) = resolve_shell("Get-ChildItem C:/", None).unwrap();
+        assert_eq!(selection, "inferred");
+    }
+
+    #[test]
+    fn encoded_command_roundtrips_static_wrapper_and_chinese_source() {
+        let script = "$dirs=@('中文'); foreach($d in $dirs){ '目录=' + $d }";
+        let wrapper = powershell_wrapper(script, true, &serde_json::Value::Null).unwrap();
+        let encoded = encode_powershell_command(&wrapper);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let decoded = String::from_utf16(&units).unwrap();
+        assert_eq!(decoded, wrapper);
+        assert!(decoded.starts_with("$ProgressPreference = 'SilentlyContinue'"));
+        assert!(decoded.contains("[Console]::OutputEncoding"));
+        assert!(decoded.contains("Parser]::ParseInput"));
+        assert!(decoded.contains("Set-StrictMode"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn structured_script_args_preserve_quotes_spaces_and_chinese() {
+        use std::os::windows::process::CommandExt;
+
+        let args = serde_json::json!({
+            "path": "C:/目录/有 空格/'单引号'/\"双引号\"",
+            "items": ["甲", "乙"]
+        });
+        let wrapper =
+            powershell_wrapper("$DHArgs.path; $DHArgs.items -join ','", true, &args).unwrap();
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                &encode_powershell_command(&wrapper),
+            ])
+            .creation_flags(super::CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", decode_log(&output.stderr));
+        let stdout = decode_log(&output.stdout);
+        assert!(stdout.contains("C:/目录/有 空格/'单引号'/\"双引号\""));
+        assert!(stdout.contains("甲,乙"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn encoded_bootstrap_runs_long_wrapper_file_and_preserves_unicode() {
+        use std::os::windows::process::CommandExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "shiguang-powershell-bootstrap-{}.ps1",
+            std::process::id()
+        ));
+        let long_text = "长脚本内容".repeat(5000);
+        let script = format!("$value = '{}'; $value.Length", long_text);
+        let wrapper = powershell_wrapper(&script, true, &serde_json::Value::Null).unwrap();
+        assert!(encode_powershell_command(&wrapper).len() > 24_000);
+        write_utf8_bom(&path, &wrapper).unwrap();
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                &encode_powershell_command(powershell_file_bootstrap()),
+            ])
+            .env("DH_PS_WRAPPER_PATH", &path)
+            .creation_flags(super::CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(path);
+        assert!(output.status.success(), "{}", decode_log(&output.stderr));
+        assert_eq!(
+            decode_log(&output.stdout).trim(),
+            long_text.chars().count().to_string()
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn encoded_command_executes_variables_and_chinese_in_windows_powershell() {
+        use std::os::windows::process::CommandExt;
+
+        let script = "$dirs=@('甲','乙'); foreach($d in $dirs){ '目录=' + $d }";
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                &encode_powershell_command(
+                    &powershell_wrapper(script, true, &serde_json::Value::Null).unwrap(),
+                ),
+            ])
+            .creation_flags(super::CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "PowerShell failed: {}",
+            decode_log(&output.stderr)
+        );
+        let stdout = decode_log(&output.stdout);
+        assert!(
+            output.stderr.is_empty(),
+            "unexpected PowerShell auxiliary stream: {}",
+            decode_log(&output.stderr)
+        );
+        assert!(stdout.contains("目录=甲"), "unexpected stdout: {}", stdout);
+        assert!(stdout.contains("目录=乙"), "unexpected stdout: {}", stdout);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn powershell_preflight_rejects_syntax_before_execution() {
+        use std::os::windows::process::CommandExt;
+
+        let script = "Write-Output '不应执行'; foreach ($d in ) { $d }";
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                &encode_powershell_command(
+                    &powershell_wrapper(script, true, &serde_json::Value::Null).unwrap(),
+                ),
+            ])
+            .creation_flags(super::CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!decode_log(&output.stdout).contains("不应执行"));
+        assert!(decode_log(&output.stderr).contains("__DH_PS_PARSE_ERROR__"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn powershell_strict_mode_rejects_uninitialized_variables() {
+        use std::os::windows::process::CommandExt;
+
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                &encode_powershell_command(
+                    &powershell_wrapper("Write-Output $missing", true, &serde_json::Value::Null)
+                        .unwrap(),
+                ),
+            ])
+            .creation_flags(super::CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(decode_log(&output.stderr).contains("__DH_PS_RUNTIME_ERROR__"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn powershell_wrapper_propagates_native_failure_exit_code() {
+        use std::os::windows::process::CommandExt;
+
+        let wrapper =
+            powershell_wrapper("cmd.exe /d /c exit 7", true, &serde_json::Value::Null).unwrap();
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                &encode_powershell_command(&wrapper),
+            ])
+            .creation_flags(super::CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(7));
+    }
+
+    #[test]
+    fn success_exit_codes_are_normalized_and_bounded() {
+        assert_eq!(normalize_success_exit_codes(&[]).unwrap(), vec![0]);
+        assert_eq!(
+            normalize_success_exit_codes(&[7, 0, 7, 1]).unwrap(),
+            vec![0, 1, 7]
+        );
+        assert!(normalize_success_exit_codes(&vec![0; 33]).is_err());
+    }
 
     #[test]
     fn decodes_gbk_cmd_output() {
         // 中文 cmd 的 GBK 输出："目录" 的 GBK 编码
-        let gbk = encoding_rs::GB18030.encode(" 目录 C:\\Users 中文路径\r\n").0.into_owned();
+        let gbk = encoding_rs::GB18030
+            .encode(" 目录 C:\\Users 中文路径\r\n")
+            .0
+            .into_owned();
         assert!(std::str::from_utf8(&gbk).is_err());
         let s = decode_log(&gbk);
         assert!(s.contains("目录"), "GBK 解码失败: {}", s);

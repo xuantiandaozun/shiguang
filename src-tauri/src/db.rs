@@ -294,7 +294,7 @@ impl Db {
                     |r| r.get::<_, i64>(0),
                 )
                 .unwrap_or(0)
-                > 0
+                    > 0
             })
             .unwrap_or(false);
         if !current_valid {
@@ -321,9 +321,11 @@ impl Db {
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         let v = conn
-            .query_row("SELECT value FROM settings WHERE key=?1", params![key], |r| {
-                r.get::<_, String>(0)
-            })
+            .query_row(
+                "SELECT value FROM settings WHERE key=?1",
+                params![key],
+                |r| r.get::<_, String>(0),
+            )
             .optional()?;
         Ok(v)
     }
@@ -479,8 +481,7 @@ impl Db {
         batch_id: Option<String>,
         created_at: String,
     ) -> Plan {
-        let categories: Vec<PlanCategory> =
-            serde_json::from_str(plan_json).unwrap_or_default();
+        let categories: Vec<PlanCategory> = serde_json::from_str(plan_json).unwrap_or_default();
         Plan {
             id,
             summary,
@@ -808,10 +809,7 @@ impl Db {
     /// 删除会话及其消息；若删的是当前会话则切换到最新会话（没有则新建），返回新的当前会话 id
     pub fn delete_session(&self, id: i64) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM chat_messages WHERE session_id=?1",
-            params![id],
-        )?;
+        conn.execute("DELETE FROM chat_messages WHERE session_id=?1", params![id])?;
         conn.execute("DELETE FROM chat_sessions WHERE id=?1", params![id])?;
         let cur: Option<String> = conn
             .query_row(
@@ -941,7 +939,14 @@ impl Db {
         Ok(conn.last_insert_rowid())
     }
 
-    pub fn wf_update(&self, id: i64, site: &str, title: &str, keywords: &str, steps: &str) -> Result<()> {
+    pub fn wf_update(
+        &self,
+        id: i64,
+        site: &str,
+        title: &str,
+        keywords: &str,
+        steps: &str,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE workflows SET site=?1, title=?2, keywords=?3, steps=?4, updated_at=?5 WHERE id=?6",
@@ -1007,7 +1012,12 @@ impl Db {
                 if !w.title.is_empty() && lower.contains(&w.title.to_lowercase()) {
                     score += 4;
                 }
-                for kw in w.keywords.split(',').map(|k| k.trim()).filter(|k| !k.is_empty()) {
+                for kw in w
+                    .keywords
+                    .split(',')
+                    .map(|k| k.trim())
+                    .filter(|k| !k.is_empty())
+                {
                     if lower.contains(&kw.to_lowercase()) {
                         score += 3;
                     }

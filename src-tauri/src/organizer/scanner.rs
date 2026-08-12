@@ -37,7 +37,15 @@ pub fn scan_path(
         return Err(anyhow!("目录不存在或不可访问: {}", dir.display()));
     }
     let mut items = Vec::new();
-    scan_level(dir, Path::new(""), 1, max_depth.max(1), &skip_dir, &mut items, limit);
+    scan_level(
+        dir,
+        Path::new(""),
+        1,
+        max_depth.max(1),
+        &skip_dir,
+        &mut items,
+        limit,
+    );
     Ok(items)
 }
 
@@ -114,7 +122,15 @@ fn scan_level(
         let child_rel = PathBuf::from(&item.path);
         items.push(item);
         if descend {
-            scan_level(&fs_path, &child_rel, depth + 1, max_depth, skip_dir, items, limit);
+            scan_level(
+                &fs_path,
+                &child_rel,
+                depth + 1,
+                max_depth,
+                skip_dir,
+                items,
+                limit,
+            );
         }
     }
 }
