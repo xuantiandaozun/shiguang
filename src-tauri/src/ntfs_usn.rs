@@ -25,15 +25,18 @@ pub struct UsnChange {
     pub name: String,
 }
 
-/// One name record returned while enumerating the NTFS master file table.
-/// Size and timestamps are intentionally absent: the MFT enumeration control
-/// returns the namespace graph without opening every file.
+/// One record returned while enumerating the NTFS master file table.
+/// `estimated_size_bytes` is read from the unnamed `$DATA` attribute in the
+/// raw MFT record. It is suitable for fast whole-volume estimates, but it does
+/// not include alternate data streams and is not a replacement for an exact
+/// filesystem metadata scan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MftRecord {
     pub file_reference: u64,
     pub parent_reference: u64,
     pub file_attributes: u32,
     pub name: String,
+    pub estimated_size_bytes: Option<u64>,
 }
 
 impl UsnChange {
@@ -156,12 +159,24 @@ pub fn enumerate_mft(
 ) -> Result<JournalCheckpoint> {
     let handle = windows_impl::VolumeHandle::open(volume)?;
     let journal = handle.query_journal()?;
+    // Reuse one raw-record buffer for the whole volume. Allocating 64 KiB per
+    // file would erase much of the benefit of sequential MFT enumeration.
+    let mut file_record_buffer = vec![0u8; 64 * 1024 + 16];
     handle.enumerate_mft(journal.next_usn, |change| {
+        let estimated_size_bytes = if change.is_directory() {
+            Some(0)
+        } else {
+            handle
+                .estimated_file_size(change.file_reference, &mut file_record_buffer)
+                .ok()
+                .flatten()
+        };
         on_record(MftRecord {
             file_reference: change.file_reference,
             parent_reference: change.parent_reference,
             file_attributes: change.file_attributes,
             name: change.name,
+            estimated_size_bytes,
         })
     })?;
     Ok(JournalCheckpoint {
@@ -246,7 +261,7 @@ fn friendly_error(error: &anyhow::Error) -> String {
 
 #[cfg(windows)]
 mod windows_impl {
-    use super::{parse_usn_buffer, UsnChange};
+    use super::{parse_ntfs_unnamed_data_size, parse_usn_buffer, UsnChange};
     use anyhow::{anyhow, Context, Result};
     use std::ffi::c_void;
     use std::mem::{size_of, zeroed};
@@ -261,7 +276,8 @@ mod windows_impl {
         FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, VOLUME_NAME_DOS,
     };
     use windows_sys::Win32::System::Ioctl::{
-        FSCTL_ENUM_USN_DATA, FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL, MFT_ENUM_DATA_V0,
+        FSCTL_ENUM_USN_DATA, FSCTL_GET_NTFS_FILE_RECORD, FSCTL_QUERY_USN_JOURNAL,
+        FSCTL_READ_USN_JOURNAL, MFT_ENUM_DATA_V0, NTFS_FILE_RECORD_INPUT_BUFFER,
         READ_USN_JOURNAL_DATA_V0, USN_JOURNAL_DATA_V0,
     };
     use windows_sys::Win32::System::IO::DeviceIoControl;
@@ -443,6 +459,56 @@ mod windows_impl {
             Ok(())
         }
 
+        /// Read the unnamed `$DATA` length straight from an NTFS file record.
+        /// This stays on the volume handle and avoids opening the file by path.
+        pub fn estimated_file_size(
+            &self,
+            file_reference: u64,
+            output: &mut [u8],
+        ) -> Result<Option<u64>> {
+            const OUTPUT_HEADER_LEN: usize = size_of::<i64>() + size_of::<u32>();
+            if output.len() <= OUTPUT_HEADER_LEN {
+                return Err(anyhow!("MFT 文件记录缓冲区过短"));
+            }
+            let mut input = NTFS_FILE_RECORD_INPUT_BUFFER {
+                FileReferenceNumber: file_reference as i64,
+            };
+            let mut returned = 0u32;
+            let ok = unsafe {
+                DeviceIoControl(
+                    self.0,
+                    FSCTL_GET_NTFS_FILE_RECORD,
+                    &mut input as *mut _ as *mut c_void,
+                    size_of::<NTFS_FILE_RECORD_INPUT_BUFFER>() as u32,
+                    output.as_mut_ptr() as *mut c_void,
+                    output.len() as u32,
+                    &mut returned,
+                    null_mut(),
+                )
+            };
+            if ok == 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("读取 MFT 文件记录 {} 失败", file_reference));
+            }
+            let used = returned as usize;
+            if used < OUTPUT_HEADER_LEN {
+                return Err(anyhow!("MFT 文件记录返回缓冲区过短: {}", used));
+            }
+            let returned_reference = i64::from_le_bytes(output[0..8].try_into().unwrap()) as u64;
+            // File references include a 16-bit sequence number above the
+            // 48-bit record number. The control may return the closest record,
+            // so reject anything other than the requested record number.
+            const RECORD_NUMBER_MASK: u64 = 0x0000_ffff_ffff_ffff;
+            if returned_reference & RECORD_NUMBER_MASK != file_reference & RECORD_NUMBER_MASK {
+                return Ok(None);
+            }
+            let record_len = u32::from_le_bytes(output[8..12].try_into().unwrap()) as usize;
+            if record_len == 0 || OUTPUT_HEADER_LEN + record_len > used {
+                return Err(anyhow!("MFT 文件记录长度无效: {}", record_len));
+            }
+            parse_ntfs_unnamed_data_size(&output[OUTPUT_HEADER_LEN..OUTPUT_HEADER_LEN + record_len])
+        }
+
         pub fn path_for_file_id(&self, file_reference: u64) -> Result<PathBuf> {
             let descriptor = FILE_ID_DESCRIPTOR {
                 dwSize: size_of::<FILE_ID_DESCRIPTOR>() as u32,
@@ -500,6 +566,83 @@ mod windows_impl {
             }
         }
     }
+}
+
+/// Parse the logical length of the unnamed `$DATA` attribute in a raw NTFS
+/// FILE record. Attribute-list extensions and alternate streams are omitted,
+/// which is why callers expose this value as an estimate.
+fn parse_ntfs_unnamed_data_size(raw_record: &[u8]) -> Result<Option<u64>> {
+    const FILE_SIGNATURE: &[u8; 4] = b"FILE";
+    const ATTRIBUTE_DATA: u32 = 0x80;
+    const ATTRIBUTE_END: u32 = u32::MAX;
+    if raw_record.len() < 24 || &raw_record[..4] != FILE_SIGNATURE {
+        return Ok(None);
+    }
+
+    let mut record = raw_record.to_vec();
+    apply_ntfs_update_sequence(&mut record)?;
+    let mut offset = u16::from_le_bytes(record[20..22].try_into().unwrap()) as usize;
+    while offset + 16 <= record.len() {
+        let attribute_type = u32::from_le_bytes(record[offset..offset + 4].try_into().unwrap());
+        if attribute_type == ATTRIBUTE_END {
+            break;
+        }
+        let attribute_len =
+            u32::from_le_bytes(record[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        if attribute_len < 16 || offset + attribute_len > record.len() {
+            return Ok(None);
+        }
+        let non_resident = record[offset + 8] != 0;
+        let name_len = record[offset + 9];
+        if attribute_type == ATTRIBUTE_DATA && name_len == 0 {
+            if non_resident {
+                if attribute_len < 64 {
+                    return Ok(None);
+                }
+                let lowest_vcn =
+                    u64::from_le_bytes(record[offset + 16..offset + 24].try_into().unwrap());
+                if lowest_vcn == 0 {
+                    let size =
+                        i64::from_le_bytes(record[offset + 48..offset + 56].try_into().unwrap());
+                    return Ok(Some(size.max(0) as u64));
+                }
+            } else {
+                if attribute_len < 24 {
+                    return Ok(None);
+                }
+                let size = u32::from_le_bytes(record[offset + 16..offset + 20].try_into().unwrap());
+                return Ok(Some(size as u64));
+            }
+        }
+        offset += attribute_len;
+    }
+    Ok(None)
+}
+
+fn apply_ntfs_update_sequence(record: &mut [u8]) -> Result<()> {
+    if record.len() < 8 {
+        return Ok(());
+    }
+    let usa_offset = u16::from_le_bytes(record[4..6].try_into().unwrap()) as usize;
+    let usa_count = u16::from_le_bytes(record[6..8].try_into().unwrap()) as usize;
+    if usa_count <= 1 {
+        return Ok(());
+    }
+    if usa_offset + usa_count * 2 > record.len() {
+        return Err(anyhow!("MFT 更新序列范围无效"));
+    }
+    let sectors = usa_count - 1;
+    if record.len() % sectors != 0 {
+        return Err(anyhow!("MFT 文件记录扇区布局无效"));
+    }
+    let sector_size = record.len() / sectors;
+    for sector in 1..=sectors {
+        let target = sector * sector_size - 2;
+        let replacement = usa_offset + sector * 2;
+        let replacement_bytes = [record[replacement], record[replacement + 1]];
+        record[target..target + 2].copy_from_slice(&replacement_bytes);
+    }
+    Ok(())
 }
 
 fn parse_usn_buffer(mut bytes: &[u8]) -> Result<Vec<UsnChange>> {
@@ -582,6 +725,33 @@ mod tests {
         assert_eq!(parsed[0].parent_reference, 7);
         assert_eq!(parsed[0].usn, 99);
         assert_eq!(parsed[0].name, "demo.txt");
+    }
+
+    #[test]
+    fn parses_resident_and_nonresident_mft_data_sizes() {
+        let mut resident = synthetic_file_record(24);
+        resident[72..76].copy_from_slice(&321u32.to_le_bytes());
+        assert_eq!(parse_ntfs_unnamed_data_size(&resident).unwrap(), Some(321));
+
+        let mut nonresident = synthetic_file_record(64);
+        nonresident[64] = 1;
+        nonresident[72..80].copy_from_slice(&0u64.to_le_bytes());
+        nonresident[104..112].copy_from_slice(&987_654i64.to_le_bytes());
+        assert_eq!(
+            parse_ntfs_unnamed_data_size(&nonresident).unwrap(),
+            Some(987_654)
+        );
+    }
+
+    fn synthetic_file_record(attribute_len: usize) -> Vec<u8> {
+        let mut record = vec![0u8; 1024];
+        record[..4].copy_from_slice(b"FILE");
+        record[20..22].copy_from_slice(&56u16.to_le_bytes());
+        record[56..60].copy_from_slice(&0x80u32.to_le_bytes());
+        record[60..64].copy_from_slice(&(attribute_len as u32).to_le_bytes());
+        let end = 56 + attribute_len;
+        record[end..end + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        record
     }
 
     #[cfg(windows)]

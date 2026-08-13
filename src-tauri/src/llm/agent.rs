@@ -28,6 +28,7 @@ const MAX_TEXT_CALL_RETRIES: usize = 3;
 pub async fn run_chat(
     app: AppHandle,
     session_id: i64,
+    request_message_id: i64,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let mut settings = {
@@ -104,7 +105,7 @@ pub async fn run_chat(
 
     for round in 0..MAX_TOOL_ROUNDS {
         if cancel.is_cancelled() {
-            finalize_cancelled(&app, session_id, "", &tool_log).await;
+            finalize_cancelled(&app, session_id, request_message_id, "", &tool_log).await?;
             return Ok(());
         }
         if round == MAX_TOOL_ROUNDS - WARN_BEFORE_END {
@@ -119,7 +120,14 @@ pub async fn run_chat(
         let resp = stream_filtered(&http, &cfg, &body, &cancel, &app).await?;
 
         if resp.interrupted {
-            finalize_cancelled(&app, session_id, &resp.content, &tool_log).await;
+            finalize_cancelled(
+                &app,
+                session_id,
+                request_message_id,
+                &resp.content,
+                &tool_log,
+            )
+            .await?;
             return Ok(());
         }
 
@@ -150,7 +158,12 @@ pub async fn run_chat(
                 return Ok(());
             }
             let state = app.state::<crate::AppState>();
-            let _ = state.db.save_chat(session_id, "assistant", &cleaned);
+            let response_message_id = state.db.save_chat(session_id, "assistant", &cleaned)?;
+            state.db.link_tool_calls_response(
+                session_id,
+                request_message_id,
+                response_message_id,
+            )?;
             let _ = app.emit("llm-message-done", json!({ "content": cleaned }));
             let _ = app.emit("sessions-changed", ());
             drop(state);
@@ -180,12 +193,34 @@ pub async fn run_chat(
         }
         messages.push(assistant_msg);
 
-        for call in &resp.tool_calls {
+        for (call_index, call) in resp.tool_calls.iter().enumerate() {
             // 正在执行的工具让其跑完（保证文件操作一致性），在下一个工具前中断
             if cancel.is_cancelled() {
-                finalize_cancelled(&app, session_id, &resp.content, &tool_log).await;
+                finalize_cancelled(
+                    &app,
+                    session_id,
+                    request_message_id,
+                    &resp.content,
+                    &tool_log,
+                )
+                .await?;
                 return Ok(());
             }
+            // 先落 running 记录再执行，避免有副作用的动作成功后却无调用轨迹。
+            let tool_record_id = {
+                let state = app.state::<crate::AppState>();
+                state.db.start_tool_call(
+                    session_id,
+                    request_message_id,
+                    round,
+                    call_index,
+                    &call.id,
+                    &call.name,
+                    &call.arguments,
+                    &clean_content,
+                    &resp.reasoning_content,
+                )?
+            };
             let _ = app.emit(
                 "tool-status",
                 json!({ "name": call.name, "status": "running" }),
@@ -204,6 +239,12 @@ pub async fn run_chat(
             } else {
                 "done"
             };
+            {
+                let state = app.state::<crate::AppState>();
+                state
+                    .db
+                    .finish_tool_call(tool_record_id, tool_status, &result.to_string())?;
+            }
             push_tool_log(&mut tool_log, &call.name, &call.arguments, &result);
             let _ = app.emit(
                 "tool-status",
@@ -218,7 +259,15 @@ pub async fn run_chat(
     }
 
     finalize_with_summary(
-        &app, &http, &cfg, &settings, session_id, messages, &cancel, &tool_log,
+        &app,
+        &http,
+        &cfg,
+        &settings,
+        session_id,
+        request_message_id,
+        messages,
+        &cancel,
+        &tool_log,
     )
     .await
 }
@@ -280,7 +329,13 @@ fn request_body(
 /// 用户中断：部分内容 + 本轮已完成的工具调用摘要一起入库（标注中断），
 /// 后续「继续」时模型能直接基于已收集的资料推进，而不是从头再来。
 /// 通知前端收尾。被中断的路径不做工作流提炼，也不计工作流使用次数。
-async fn finalize_cancelled(app: &AppHandle, session_id: i64, partial: &str, tool_log: &[String]) {
+async fn finalize_cancelled(
+    app: &AppHandle,
+    session_id: i64,
+    request_message_id: i64,
+    partial: &str,
+    tool_log: &[String],
+) -> Result<()> {
     let cleaned = strip_tool_call_text(partial);
     let mut saved = cleaned.clone();
     if !tool_log.is_empty() {
@@ -295,10 +350,14 @@ async fn finalize_cancelled(app: &AppHandle, session_id: i64, partial: &str, too
             "\n（回复被用户中断；以上资料已收集完毕，继续时请直接基于它们推进，不要重复收集）",
         );
         let state = app.state::<crate::AppState>();
-        let _ = state.db.save_chat(session_id, "assistant", &saved);
+        let response_message_id = state.db.save_chat(session_id, "assistant", &saved)?;
+        state
+            .db
+            .link_tool_calls_response(session_id, request_message_id, response_message_id)?;
     }
     let _ = app.emit("llm-cancelled", json!({ "content": cleaned }));
     let _ = app.emit("sessions-changed", ());
+    Ok(())
 }
 
 /// 记录一次工具调用的简要信息（参数 160 字符、结果 500 字符封顶）
@@ -343,6 +402,7 @@ async fn finalize_with_summary(
     cfg: &client::LlmConfig,
     settings: &crate::commands::Settings,
     session_id: i64,
+    request_message_id: i64,
     mut messages: Vec<Value>,
     cancel: &tokio_util::sync::CancellationToken,
     tool_log: &[String],
@@ -356,7 +416,7 @@ async fn finalize_with_summary(
     let resp = stream_filtered(http, cfg, &body, cancel, app).await;
     match resp {
         Ok(r) if r.interrupted => {
-            finalize_cancelled(app, session_id, &r.content, tool_log).await;
+            finalize_cancelled(app, session_id, request_message_id, &r.content, tool_log).await?;
         }
         Ok(r) => {
             let cleaned = strip_tool_call_text(&r.content);
@@ -380,7 +440,12 @@ async fn finalize_with_summary(
                 );
             } else {
                 let state = app.state::<crate::AppState>();
-                let _ = state.db.save_chat(session_id, "assistant", &saved);
+                let response_message_id = state.db.save_chat(session_id, "assistant", &saved)?;
+                state.db.link_tool_calls_response(
+                    session_id,
+                    request_message_id,
+                    response_message_id,
+                )?;
                 // 收尾正文可能整段跑偏成文本工具调用而被清空，此时给用户一句兜底提示
                 let display = if cleaned.is_empty() {
                     "（工具调用轮次已用完，本轮进展已保存。说「继续」即可接着推进。）".to_string()

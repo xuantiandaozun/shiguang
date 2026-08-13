@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
-const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 const REQUEST_DIR_NAME: &str = "ntfs-helper";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +59,8 @@ pub struct MftSnapshotResult {
     pub checkpoint: crate::ntfs_usn::JournalCheckpoint,
     pub snapshot_file: String,
     pub record_count: u64,
+    pub estimated_size_count: u64,
+    pub missing_size_count: u64,
     pub catch_up: ResolvedCatchUpResult,
 }
 
@@ -141,7 +143,10 @@ pub fn execute_request_in_dir(
     let result = match request.action {
         HelperAction::Probe { volume } => {
             if !is_canonical_volume(&volume) {
-                return protocol_error(request.request_id, "卷路径必须是规范盘符根路径，例如 C:/");
+                return protocol_error(
+                    request.request_id,
+                    "卷路径必须是规范盘符根路径，格式为“盘符:/”",
+                );
             }
             HelperResult::Probe {
                 result: crate::ntfs_usn::checkpoint(Path::new(&volume)),
@@ -151,7 +156,7 @@ pub fn execute_request_in_dir(
             if !is_canonical_volume(&checkpoint.volume) {
                 return protocol_error(
                     request.request_id,
-                    "检查点卷路径必须是规范盘符根路径，例如 C:/",
+                    "检查点卷路径必须是规范盘符根路径，格式为“盘符:/”",
                 );
             }
             let result = match crate::ntfs_usn::read_since(&checkpoint) {
@@ -186,7 +191,10 @@ pub fn execute_request_in_dir(
         }
         HelperAction::MftSnapshot { volume } => {
             if !is_canonical_volume(&volume) {
-                return protocol_error(request.request_id, "卷路径必须是规范盘符根路径，例如 C:/");
+                return protocol_error(
+                    request.request_id,
+                    "卷路径必须是规范盘符根路径，格式为“盘符:/”",
+                );
             }
             let Some(dir) = request_dir else {
                 return protocol_error(request.request_id, "MFT 快照缺少受控输出目录");
@@ -194,13 +202,15 @@ pub fn execute_request_in_dir(
             let snapshot_file = format!("snapshot-{}.db", request.request_id);
             let snapshot_path = dir.join(&snapshot_file);
             match write_mft_snapshot(&volume, &snapshot_path) {
-                Ok((checkpoint, record_count)) => {
+                Ok((checkpoint, record_count, estimated_size_count, missing_size_count)) => {
                     let catch_up = resolve_catch_up(&checkpoint);
                     HelperResult::MftSnapshot {
                         result: MftSnapshotResult {
                             checkpoint,
                             snapshot_file,
                             record_count,
+                            estimated_size_count,
+                            missing_size_count,
                             catch_up,
                         },
                     }
@@ -252,7 +262,7 @@ fn resolve_catch_up(checkpoint: &crate::ntfs_usn::JournalCheckpoint) -> Resolved
 fn write_mft_snapshot(
     volume: &str,
     snapshot_path: &Path,
-) -> Result<(crate::ntfs_usn::JournalCheckpoint, u64)> {
+) -> Result<(crate::ntfs_usn::JournalCheckpoint, u64, u64, u64)> {
     if snapshot_path.exists() {
         return Err(anyhow!("MFT 快照文件已存在"));
     }
@@ -264,34 +274,54 @@ fn write_mft_snapshot(
            parent_reference INTEGER NOT NULL,
            name TEXT NOT NULL,
            extension TEXT NOT NULL,
-           file_attributes INTEGER NOT NULL
+           file_attributes INTEGER NOT NULL,
+           estimated_size_bytes INTEGER,
+           size_known INTEGER NOT NULL
          );",
     )?;
     let tx = conn.transaction()?;
     let mut insert = tx.prepare_cached(
         "INSERT OR REPLACE INTO records(
-           file_reference,parent_reference,name,extension,file_attributes
-         ) VALUES(?1,?2,?3,?4,?5)",
+           file_reference,parent_reference,name,extension,file_attributes,
+           estimated_size_bytes,size_known
+         ) VALUES(?1,?2,?3,?4,?5,?6,?7)",
     )?;
     let mut record_count = 0u64;
+    let mut estimated_size_count = 0u64;
+    let mut missing_size_count = 0u64;
     let checkpoint = crate::ntfs_usn::enumerate_mft(volume, |record| {
         let extension = Path::new(&record.name)
             .extension()
             .map(|value| value.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
+        let is_directory = record.file_attributes & 0x10 != 0;
+        if !is_directory {
+            if record.estimated_size_bytes.is_some() {
+                estimated_size_count += 1;
+            } else {
+                missing_size_count += 1;
+            }
+        }
         insert.execute(rusqlite::params![
             record.file_reference as i64,
             record.parent_reference as i64,
             record.name,
             extension,
             record.file_attributes as i64,
+            record.estimated_size_bytes.map(|size| size as i64),
+            record.estimated_size_bytes.is_some() as i64,
         ])?;
         record_count += 1;
         Ok(())
     })?;
     drop(insert);
     tx.commit()?;
-    Ok((checkpoint, record_count))
+    Ok((
+        checkpoint,
+        record_count,
+        estimated_size_count,
+        missing_size_count,
+    ))
 }
 
 fn is_canonical_volume(volume: &str) -> bool {

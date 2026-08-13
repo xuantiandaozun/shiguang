@@ -1,4 +1,4 @@
-use crate::db::{Db, PlanCategory};
+use crate::db::{Db, PlanCategory, ToolCallRecord};
 use crate::organizer::{executor, rules, scanner};
 use anyhow::{anyhow, bail, Result};
 use chrono::TimeZone;
@@ -12,7 +12,11 @@ pub const DISCOVER_TOOL: &str = "discover_capabilities";
 /// 初始只暴露能力发现与 Skill 加载。其余工具由模型围绕当前目标按需激活，
 /// 避免几十个无关 schema 同时挤占注意力。
 pub fn core_tool_names() -> Vec<String> {
-    vec![DISCOVER_TOOL.to_string(), "load_skill".to_string()]
+    vec![
+        DISCOVER_TOOL.to_string(),
+        "get_tool_call_history".to_string(),
+        "load_skill".to_string(),
+    ]
 }
 
 fn tools_for_category(category: &str) -> &'static [&'static str] {
@@ -110,6 +114,28 @@ pub fn definitions() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "get_tool_call_history",
+                "description": "查询持久化的工具调用历史，用于复盘过去操作、追踪“失败 → 调整 → 验证”过程、排障或总结可复用 Skill。记录与触发它的用户消息及最终 AI 回复相关联。search 先找到相关调用和 id；需要某次调用的完整参数/结果时再用 get，避免一次载入过多历史。不要用它代替对当前环境的实际验证。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["search", "get"], "description": "默认 search；get 按 id 返回单次调用的完整参数和结果" },
+                        "id": { "type": "integer", "description": "action=get 时必填，来自 search 结果" },
+                        "scope": { "type": "string", "enum": ["current_session", "all_sessions"], "description": "search 范围，默认当前会话；跨会话总结经验时可用 all_sessions" },
+                        "query": { "type": "string", "description": "搜索工具名、参数、结果、用户消息和最终回复中包含的文字" },
+                        "tool_name": { "type": "string", "description": "精确限定工具名" },
+                        "status": { "type": "string", "enum": ["running", "done", "error"], "description": "按最终调用状态过滤" },
+                        "before_id": { "type": "integer", "description": "分页：只返回小于该 id 的更早记录" },
+                        "limit": { "type": "integer", "description": "search 返回数，默认 20，最大 50" },
+                        "include_history_queries": { "type": "boolean", "description": "是否也返回历史查询工具自身的调用，默认 false" }
+                    },
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "scan_desktop",
                 "description": "扫描一个小而明确的目录，返回文件和文件夹清单（名称/相对路径/类型/大小/修改时间/层级）。默认扫描用户桌面。整盘、跨目录、大量文件、空间占用、清理候选等批量任务必须优先使用 search_files 的持久化索引；只有用户明确拒绝维护索引并要求临时扫描时，才用本工具或命令遍历。",
                 "parameters": {
@@ -127,14 +153,14 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "search_files",
-                "description": "本机持久化文件元数据索引（简化版 Everything），是整盘、跨目录、大量文件、空间占用、清理候选和批量筛选任务的首选入口。先用 status/coverage 判断覆盖；完整索引可 search，也可 summarize 按目标目录的一级子项汇总递归占用。没有完整索引时，先向用户说明将后台建立并持续维护文件名、路径、大小和修改时间等元数据，获得明确同意后调用 index（user_confirmed=true）；不要悄悄改用 PowerShell 全盘遍历。用户明确拒绝索引并要求一次性扫描时才回退。ntfs_index 通过 MFT 快速建立仅名称索引，需 UAC，不含可靠大小/时间，不能用于空间分析；ntfs_sync 用于显式提权追赶，ntfs_probe 用于诊断。索引不读取文件内容。",
+                "description": "本机持久化文件元数据索引（简化版 Everything），是整盘、跨目录、大量文件、空间占用、清理候选和批量筛选任务的首选入口。整盘空间分析默认采用最简原则：先获得用户对 UAC 的明确同意，再用 ntfs_index 从 MFT 快速建立路径和估算大小索引，然后 summarize(accuracy=fast) 汇总一级目录；结果必须明确称为估算。只有用户明确要求精确值，或要精查某个文件/目录时，才说明普通 index 会逐项读取大小/时间并在其同意后建立完整索引，再 summarize(accuracy=exact)。不要为了初步空间分析直接全盘递归，也不要把估算结果说成精确值。ntfs_sync 用于显式提权追赶，ntfs_probe 用于诊断；所有 ntfs_* 操作都需 user_confirmed=true 且会弹 UAC。索引不读取文件内容。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": { "type": "string", "enum": ["search", "summarize", "index", "status", "stop", "ntfs_probe", "ntfs_sync", "ntfs_index"], "description": "默认 search；summarize 汇总一级子项递归占用；所有 ntfs_* 动作必须先获得用户对 UAC 的明确同意" },
                         "roots": { "type": "array", "items": { "type": "string" }, "description": "status/coverage、index、search 使用的目标绝对目录；search 可限制范围。相对路径按桌面解析" },
-                        "root": { "type": "string", "description": "summarize 要汇总的单个绝对目录，如 D:/" },
-                        "volume": { "type": "string", "description": "ntfs_probe/ntfs_sync/ntfs_index 使用的规范盘符根路径，如 C:/" },
+                        "root": { "type": "string", "description": "summarize 要汇总的单个绝对目录；必须来自用户指定或当前任务解析出的目标" },
+                        "volume": { "type": "string", "description": "ntfs_probe/ntfs_sync/ntfs_index 使用的规范盘符根路径，格式为“盘符:/”；必须从当前目标解析，不能使用固定默认盘符" },
                         "query": { "type": "string", "description": "名称或完整路径包含的文字；支持 SQLite 通配符 % 和 _" },
                         "extensions": { "type": "array", "items": { "type": "string" }, "description": "扩展名白名单，如 [\"pdf\",\"docx\"]" },
                         "kind": { "type": "string", "enum": ["file", "directory"], "description": "只找文件或只找目录" },
@@ -143,8 +169,9 @@ pub fn definitions() -> Value {
                         "modified_after": { "type": "string", "description": "修改时间下限，本地时间 YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS" },
                         "modified_before": { "type": "string", "description": "修改时间上限，本地时间 YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS" },
                         "sort": { "type": "string", "enum": ["name_asc", "name_desc", "size_asc", "size_desc", "modified_asc", "modified_desc"], "description": "默认 name_asc" },
+                        "accuracy": { "type": "string", "enum": ["fast", "exact"], "description": "仅 summarize 使用，默认 fast：接受 MFT 估算大小并返回覆盖率；exact 只接受普通逐项扫描形成的完整索引" },
                         "limit": { "type": "integer", "description": "返回上限；search 默认 100、最大 500，summarize 最大 100；truncated=true 表示还有更多结果" },
-                        "user_confirmed": { "type": "boolean", "description": "index 时必填 true，且只能在用户已明确同意开始维护这些目录的索引后设置" }
+                        "user_confirmed": { "type": "boolean", "description": "index 时表示用户同意维护完整索引；所有 ntfs_* 动作时表示用户已明确同意本次 UAC。需要触发相应操作时必填 true" }
                     },
                     "required": []
                 }
@@ -185,7 +212,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "create_file",
-                "description": "创建文本/代码文件（txt/md/log/json/csv/xml/yaml/html/css/js/ts/py/java/go/rs/sql/sh/bat/ps1 等文本类格式）；普通文本以 UTF-8 写入，新建 .ps1 自动带 Windows PowerShell 5.1 兼容的 UTF-8 BOM。父目录不存在时自动创建。相对路径默认写入应用临时目录（禁止把草稿/中间产物堆到桌面）；用户明确要求交付到桌面时用绝对路径或 desktop/文件名；也可写 temp/文件名。目标已存在时默认报错，overwrite=true 才会覆盖（覆盖前自动备份原文件）。一般 PowerShell 操作优先直接用 run_command 的 shell=powershell，无需创建中间脚本。不能创建 exe/docx/xlsx/pdf 等二进制或 Office 格式。要修改已有文件请用 edit_file。",
+                "description": "创建文本/代码文件（txt/md/log/json/csv/xml/yaml/html/css/js/ts/py/java/go/rs/sql/sh/bat/ps1 等文本类格式）；普通文本以 UTF-8 写入，新建 .ps1 自动带 Windows PowerShell 5.1 兼容的 UTF-8 BOM。父目录不存在时自动创建。相对路径默认写入应用临时目录（禁止把草稿/中间产物堆到桌面）；用户明确要求交付到桌面时用绝对路径或 desktop/文件名；也可写 temp/文件名。目标已存在时默认报错，overwrite=true 才会覆盖（覆盖前自动备份原文件）。JSON 等结构化参数可写到临时目录，再把返回路径作为 run_command 的 argv 一项传入。一般 PowerShell 操作优先直接用 run_command 的 shell=powershell，无需创建中间脚本。不能创建 exe/docx/xlsx/pdf 等二进制或 Office 格式。要修改已有文件请用 edit_file。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -608,13 +635,15 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "同步执行一条 Windows 命令并等待结束（默认 60 秒超时）。shell=cmd 适合 exe、批处理和 cmd 内建命令；shell=powershell 适合含 `$变量`、管道、对象处理或多行逻辑的 PowerShell 脚本。后端会自动选择 EncodedCommand，超长时安全降级为带 BOM 临时脚本；两者都不经过 cmd 引号嵌套。执行前进行完整 AST 语法检查，默认启用严格变量与错误即停，并传播原生程序失败退出码。动态数据优先放 script_args/environment，避免拼进代码。默认 auto 还能识别高置信度 PowerShell 语法和旧的 powershell -Command 包装。整盘、跨目录或大量文件扫描优先 search_files；没有索引时先提示用户开始维护，用户明确拒绝并要求一次性扫描后才能用本工具遍历。返回 ok=false 或 status=failed/timeout 时必须根据输出修正，不能声称成功。耗时命令改用 run_command_background；破坏性命令必须先向用户说明并征得同意。",
+                "description": "同步执行一条 Windows 命令并等待结束（默认 60 秒超时）。调用外部程序时优先用 argv：每个参数独立一项，JSON/空格/中文不必转义；系统直启进程，按 PATHEXT 解析 exe/cmd，不会命中同名 .ps1。结构化正文放 stdin，或先 create_file 再把路径作为 argv 的一项。只有 cmd 内建命令或 PowerShell 语法（$变量、管道、对象）才用 command+shell。PowerShell 走 EncodedCommand，动态值放 script_args（脚本里 $DHArgs），不要再包 powershell -Command，也不要把 JSON 拼进一条命令字符串。PowerShell 管道无匹配时是 $null，取 .Count 前用 @()。失败时按 guidance 修正，不能声称成功。耗时改用 run_command_background。破坏性操作须征得同意。整盘、跨目录或大量文件扫描优先 search_files。",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "要执行的命令或 PowerShell 脚本正文；PowerShell 模式直接写 `$dirs=...`，不要再包 powershell -Command" },
-                        "shell": { "type": "string", "enum": ["auto", "cmd", "powershell"], "description": "解释器，默认 auto。出现 `$变量`、PowerShell 管道/对象或多行脚本时选 powershell；普通 CLI/cmd 命令选 cmd" },
-                        "powershell_strict": { "type": "boolean", "description": "PowerShell 是否启用严格变量检查和错误即停，默认 true；只有明确依赖宽松行为的旧脚本才设 false" },
+                        "argv": { "type": "array", "items": { "type": "string" }, "description": "推荐。外部程序+参数，每项一个参数，例如 [\"git\", \"status\", \"-sb\"]。第一项只放程序名，不要把整条命令塞进一项" },
+                        "command": { "type": "string", "description": "cmd 内建命令或 PowerShell 脚本正文。有 argv 时忽略。PowerShell 模式直接写 `$dirs=...`，不要再包 powershell -Command" },
+                        "stdin": { "type": "string", "description": "写入子进程标准输入的文本（UTF-8）。JSON/长文本优先放这里，不要拼进命令行" },
+                        "shell": { "type": "string", "enum": ["auto", "cmd", "powershell"], "description": "仅 command 使用，默认 auto。cmd 内建选 cmd；`$变量`/管道/对象/多行脚本选 powershell。有 argv 时忽略" },
+                        "powershell_strict": { "type": "boolean", "description": "PowerShell 是否启用严格变量检查和错误即停，默认 true。管道无匹配时是 $null，取 .Count 前用 @()；不要为了 Count 关闭严格模式" },
                         "success_exit_codes": { "type": "array", "items": { "type": "integer" }, "description": "被视为成功的退出码，默认 [0]；仅按目标程序文档扩展，例如某些同步/差异工具" },
                         "script_args": { "description": "PowerShell 的结构化 JSON 参数；脚本中通过 `$DHArgs` 读取。用户提供的路径、关键词、文本等动态数据优先放这里，不要拼入脚本字符串" },
                         "environment": { "type": "object", "additionalProperties": { "type": "string" }, "description": "可选环境变量键值；适合向 CLI 安全传递配置，避免把动态值拼进命令。不得包含敏感信息，除非当前任务确实需要" },
@@ -622,7 +651,7 @@ pub fn definitions() -> Value {
                         "timeout_secs": { "type": "integer", "description": "超时秒数，默认 60，上限 600；超时自动终止" },
                         "tail_chars": { "type": "integer", "description": "返回输出的末尾字符数，默认 2000，上限 8000" }
                     },
-                    "required": ["command"]
+                    "required": []
                 }
             }
         },
@@ -630,20 +659,22 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "run_command_background",
-                "description": "在后台执行 Windows 命令或 PowerShell 脚本（构建、下载、批量处理、启动服务等耗时任务），立即返回 task_id。解释器识别、PowerShell AST 预检、严格错误处理、安全传输、结构化 script_args/environment 和成功退出码规则均与 run_command 相同。输出写入 UTF-8/GB18030 自适应日志；之后用 check_task 查询状态和必要片段，并检查 status、exit_code 与 guidance。破坏性命令必须先向用户说明并征得同意。",
+                "description": "在后台执行 Windows 命令或 PowerShell 脚本（构建、下载、批量处理、启动服务等耗时任务），立即返回 task_id。argv / stdin / command / shell 的选择规则与 run_command 相同：外部程序用 argv，结构化正文用 stdin，脚本才用 command。输出写入 UTF-8/GB18030 自适应日志；之后用 check_task 查询状态和必要片段，并检查 status、exit_code 与 guidance。破坏性命令必须先向用户说明并征得同意。",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "要执行的命令或 PowerShell 脚本正文" },
-                        "shell": { "type": "string", "enum": ["auto", "cmd", "powershell"], "description": "解释器，默认 auto；PowerShell 语法和 `$变量` 选 powershell" },
-                        "powershell_strict": { "type": "boolean", "description": "PowerShell 严格模式，默认 true；旧脚本兼容时才关闭" },
+                        "argv": { "type": "array", "items": { "type": "string" }, "description": "推荐。外部程序+参数，每项一个参数；第一项只放程序名" },
+                        "command": { "type": "string", "description": "cmd 内建命令或 PowerShell 脚本正文；有 argv 时忽略" },
+                        "stdin": { "type": "string", "description": "写入子进程标准输入的文本（UTF-8）" },
+                        "shell": { "type": "string", "enum": ["auto", "cmd", "powershell"], "description": "仅 command 使用，默认 auto；cmd 内建选 cmd，PowerShell 语法和 `$变量` 选 powershell" },
+                        "powershell_strict": { "type": "boolean", "description": "PowerShell 严格模式，默认 true。管道无匹配时取 .Count 前用 @()；不要为了 Count 关闭严格模式" },
                         "success_exit_codes": { "type": "array", "items": { "type": "integer" }, "description": "成功退出码，默认 [0]；只依据目标程序的退出码语义扩展" },
                         "script_args": { "description": "PowerShell 结构化 JSON 参数，脚本中通过 `$DHArgs` 读取；避免拼接动态文本" },
                         "environment": { "type": "object", "additionalProperties": { "type": "string" }, "description": "传给子进程的环境变量键值" },
                         "label": { "type": "string", "description": "任务备注名（如「构建前端」），方便用户识别" },
                         "workdir": { "type": "string", "description": "工作目录（绝对路径）。默认桌面；若命令会写中间文件，必须设为系统提示词中的临时目录" }
                     },
-                    "required": ["command"]
+                    "required": []
                 }
             }
         },
@@ -891,6 +922,83 @@ pub async fn execute(
                 "next": next,
             }))
         }
+        "get_tool_call_history" => {
+            let action = args
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("search");
+            match action {
+                "get" => {
+                    let id = args
+                        .get("id")
+                        .and_then(Value::as_i64)
+                        .ok_or_else(|| anyhow!("action=get 需要有效 id"))?;
+                    let record = db
+                        .get_tool_call(id)?
+                        .ok_or_else(|| anyhow!("未找到工具调用记录 {}", id))?;
+                    Ok(tool_call_detail(&record))
+                }
+                "search" => {
+                    let session_id = match args
+                        .get("scope")
+                        .and_then(Value::as_str)
+                        .unwrap_or("current_session")
+                    {
+                        "current_session" => Some(db.current_session_id()?),
+                        "all_sessions" => None,
+                        other => bail!("未知 scope: {}", other),
+                    };
+                    let tool_name = args
+                        .get("tool_name")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty());
+                    let status = args
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty());
+                    if status.is_some_and(|value| !matches!(value, "running" | "done" | "error")) {
+                        bail!("无效 status");
+                    }
+                    let query = args
+                        .get("query")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty());
+                    let before_id = args.get("before_id").and_then(Value::as_i64);
+                    let limit = args
+                        .get("limit")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(20)
+                        .clamp(1, 50) as usize;
+                    let include_history_queries = args
+                        .get("include_history_queries")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let records = db.query_tool_calls(
+                        session_id,
+                        tool_name,
+                        status,
+                        query,
+                        before_id,
+                        limit,
+                        include_history_queries,
+                    )?;
+                    let next_before_id = (records.len() == limit)
+                        .then(|| records.first().map(|record| record.id))
+                        .flatten();
+                    let items: Vec<Value> = records.iter().map(tool_call_search_item).collect();
+                    Ok(json!({
+                        "count": items.len(),
+                        "calls": items,
+                        "next_before_id": next_before_id,
+                        "note": "search 返回截断预览；需要某条记录的完整参数和结果时，用 action=get + id。",
+                    }))
+                }
+                other => bail!("未知 action: {}", other),
+            }
+        }
         "scan_desktop" => {
             let recursive = args
                 .get("recursive")
@@ -938,18 +1046,27 @@ pub async fn execute(
                 "status" => {
                     let roots = string_array(args, "roots");
                     let coverage = state.file_index.coverage(&roots, false)?;
+                    let estimated_size_coverage =
+                        state.file_index.coverage_for_estimated_sizes(&roots)?;
+                    let exact_coverage = state.file_index.coverage(&roots, true)?;
                     let needs_index = !coverage.ready;
+                    let needs_estimated_size_index = !estimated_size_coverage.ready;
+                    let needs_exact_index = !exact_coverage.ready;
                     let indexed_roots = coverage.indexed_roots.clone();
                     Ok(json!({
                         "ok": true,
                         "status": state.file_index.status(),
                         "indexed_roots": indexed_roots,
                         "coverage": coverage,
+                        "estimated_size_coverage": estimated_size_coverage,
+                        "exact_coverage": exact_coverage,
                         "needs_index": needs_index,
+                        "needs_estimated_size_index": needs_estimated_size_index,
+                        "needs_exact_index": needs_exact_index,
                         "message": if !needs_index {
-                            "目标范围已有索引，可直接搜索；空间/大小/时间分析还需 metadata_level=full。"
+                            "目标范围已有名称索引。空间初步分析至少需要 metadata_level=estimated；精确大小/时间需要 metadata_level=full。"
                         } else {
-                            "目标范围尚未维护索引。请先提示用户：建立后会在后台持续维护文件名、路径、大小和修改时间等元数据，不读取文件内容；用户明确同意后再调用 action=index。"
+                            "目标范围尚未维护索引。整盘空间初步分析优先在用户同意 UAC 后调用 ntfs_index 建立 MFT 估算索引；只有精确分析才在用户同意逐项读取元数据后调用 index。"
                         }
                     }))
                 }
@@ -963,11 +1080,14 @@ pub async fn execute(
                         .and_then(|value| value.as_str())
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
-                        .ok_or_else(|| anyhow!("ntfs_probe 需要 volume，例如 C:/"))?;
+                        .ok_or_else(|| anyhow!("ntfs_probe 需要从当前目标解析出的 volume"))?;
                     if crate::ntfs_usn::volume_for_path(Path::new(volume)).as_deref()
                         != Some(volume)
                     {
-                        bail!("volume 必须是规范盘符根路径，例如 C:/");
+                        bail!("volume 必须是从当前目标解析出的规范盘符根路径，格式为“盘符:/”");
+                    }
+                    if args.get("user_confirmed").and_then(Value::as_bool) != Some(true) {
+                        return Ok(ntfs_confirmation_required(volume, "诊断 NTFS 快速索引能力"));
                     }
                     Ok(serde_json::to_value(
                         crate::ntfs_helper::probe_elevated(app, volume).await?,
@@ -979,11 +1099,14 @@ pub async fn execute(
                         .and_then(|value| value.as_str())
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
-                        .ok_or_else(|| anyhow!("ntfs_sync 需要 volume，例如 C:/"))?;
+                        .ok_or_else(|| anyhow!("ntfs_sync 需要从当前目标解析出的 volume"))?;
                     if crate::ntfs_usn::volume_for_path(Path::new(volume)).as_deref()
                         != Some(volume)
                     {
-                        bail!("volume 必须是规范盘符根路径，例如 C:/");
+                        bail!("volume 必须是从当前目标解析出的规范盘符根路径，格式为“盘符:/”");
+                    }
+                    if args.get("user_confirmed").and_then(Value::as_bool) != Some(true) {
+                        return Ok(ntfs_confirmation_required(volume, "同步 NTFS 索引变化"));
                     }
                     Ok(serde_json::to_value(
                         state.file_index.sync_usn_elevated(app, volume).await?,
@@ -995,11 +1118,14 @@ pub async fn execute(
                         .and_then(|value| value.as_str())
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
-                        .ok_or_else(|| anyhow!("ntfs_index 需要 volume，例如 C:/"))?;
+                        .ok_or_else(|| anyhow!("ntfs_index 需要从当前目标解析出的 volume"))?;
                     if crate::ntfs_usn::volume_for_path(Path::new(volume)).as_deref()
                         != Some(volume)
                     {
-                        bail!("volume 必须是规范盘符根路径，例如 C:/");
+                        bail!("volume 必须是从当前目标解析出的规范盘符根路径，格式为“盘符:/”");
+                    }
+                    if args.get("user_confirmed").and_then(Value::as_bool) != Some(true) {
+                        return Ok(ntfs_confirmation_required(volume, "快速建立 MFT 空间估算索引"));
                     }
                     Ok(serde_json::to_value(
                         state
@@ -1046,21 +1172,33 @@ pub async fn execute(
                         .and_then(Value::as_str)
                         .map(str::trim)
                         .filter(|root| !root.is_empty())
-                        .ok_or_else(|| anyhow!("summarize 需要 root，例如 D:/"))?;
-                    let coverage = state
-                        .file_index
-                        .coverage(&[root.to_string()], true)?;
+                        .ok_or_else(|| anyhow!("summarize 需要用户指定或当前任务解析出的 root"))?;
+                    let require_exact = matches!(
+                        args.get("accuracy").and_then(Value::as_str),
+                        Some("exact")
+                    );
+                    let coverage = if require_exact {
+                        state.file_index.coverage(&[root.to_string()], true)?
+                    } else {
+                        state
+                            .file_index
+                            .coverage_for_estimated_sizes(&[root.to_string()])?
+                    };
                     if !coverage.ready {
-                        return Ok(index_required_result(
-                            coverage,
-                            true,
-                            "空间占用汇总需要完整元数据索引",
-                        ));
+                        return Ok(if require_exact {
+                            index_required_result(
+                                coverage,
+                                true,
+                                "精确空间汇总需要普通逐项扫描形成的完整元数据索引",
+                            )
+                        } else {
+                            fast_size_index_required_result(coverage, root)
+                        });
                     }
                     let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
                     Ok(json!({
                         "ok": true,
-                        "summary": state.file_index.summarize_usage(root, limit)?,
+                        "summary": state.file_index.summarize_usage(root, limit, require_exact)?,
                     }))
                 }
                 "search" => {
@@ -1555,6 +1693,28 @@ fn string_array(args: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn parse_argv(args: &Value) -> Result<Vec<String>> {
+    match args.get("argv") {
+        None => Ok(Vec::new()),
+        Some(Value::Array(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(text) = item.as_str() else {
+                    bail!(
+                        "argv 必须是字符串数组，例如 [\"git\", \"status\"]，不要写成一条命令字符串"
+                    );
+                };
+                out.push(text.to_string());
+            }
+            Ok(out)
+        }
+        Some(Value::String(_)) => bail!(
+            "argv 必须是字符串数组，例如 [\"git\", \"status\"]，不要把整条命令写成一个字符串"
+        ),
+        _ => bail!("argv 必须是字符串数组"),
+    }
+}
+
 fn integer_array(args: &Value, key: &str) -> Result<Vec<i32>> {
     let Some(value) = args.get(key) else {
         return Ok(Vec::new());
@@ -1651,6 +1811,7 @@ fn normalize_match_text(text: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BulkFileScanIntent {
     target_roots: Vec<String>,
+    requires_size_estimates: bool,
     requires_full_metadata: bool,
     direct_scan_override: bool,
 }
@@ -1717,21 +1878,32 @@ fn detect_bulk_file_scan(query: &str) -> Option<BulkFileScanIntent> {
         return None;
     }
 
-    let requires_full_metadata = [
+    let requires_size_estimates = [
         "占用",
         "空间",
         "容量",
         "大小",
         "大文件",
         "统计",
+        "size",
+        "usage",
+        "largest",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    let requires_full_metadata = [
+        "精确",
+        "精准",
+        "准确",
+        "确切",
+        "实际大小",
+        "逐项扫描",
         "修改时间",
         "最近",
         "最旧",
-        "size",
-        "usage",
         "modified",
-        "largest",
         "oldest",
+        "exact",
     ]
     .iter()
     .any(|marker| lower.contains(marker));
@@ -1754,6 +1926,7 @@ fn detect_bulk_file_scan(query: &str) -> Option<BulkFileScanIntent> {
     .any(|marker| lower.contains(marker));
     Some(BulkFileScanIntent {
         target_roots,
+        requires_size_estimates,
         requires_full_metadata,
         direct_scan_override,
     })
@@ -1796,7 +1969,13 @@ fn build_file_scan_policy(
     file_index: &crate::file_index::FileIndex,
     intent: &BulkFileScanIntent,
 ) -> Result<Value> {
-    let coverage = file_index.coverage(&intent.target_roots, intent.requires_full_metadata)?;
+    let coverage = if intent.requires_full_metadata {
+        file_index.coverage(&intent.target_roots, true)?
+    } else if intent.requires_size_estimates {
+        file_index.coverage_for_estimated_sizes(&intent.target_roots)?
+    } else {
+        file_index.coverage(&intent.target_roots, false)?
+    };
     let scope = if intent.target_roots.is_empty() {
         "目标范围".to_string()
     } else {
@@ -1807,7 +1986,12 @@ fn build_file_scan_policy(
     } else if coverage.ready {
         if intent.requires_full_metadata {
             format!(
-                "批量文件任务必须优先使用 search_files。{} 已有完整元数据索引；空间/占用分析下一步调用 action=summarize，普通批量筛选调用 action=search，不要改用 PowerShell 全量遍历。",
+                "批量文件任务必须优先使用 search_files。{} 已有完整元数据索引；精确空间分析下一步调用 action=summarize、accuracy=exact，普通批量筛选调用 action=search，不要改用 PowerShell 全量遍历。",
+                scope
+            )
+        } else if intent.requires_size_estimates {
+            format!(
+                "批量文件任务必须优先使用 search_files。{} 已有 MFT 估算大小索引；下一步调用 action=summarize、accuracy=fast，并明确告诉用户结果是快速估算及其 size_coverage_percent，不要改用 PowerShell 全量遍历，也不要声称是精确值。",
                 scope
             )
         } else {
@@ -1817,12 +2001,32 @@ fn build_file_scan_policy(
             )
         }
     } else if intent.target_roots.is_empty() {
-        "批量文件任务必须优先使用 search_files，但当前没有覆盖目标范围的可用索引。先向用户确认要维护的目录，并说明首次建立会在后台遍历，之后持续维护文件名、路径、大小和修改时间等元数据，不读取文件内容；用户明确同意后调用 action=index、user_confirmed=true。未同意前不要改用 PowerShell 全量遍历。".to_string()
+        "批量文件任务必须优先使用 search_files，但当前没有明确目标范围。先向用户确认要分析的盘符或目录；未确认前不要启动索引或全量遍历。".to_string()
+    } else if intent.requires_size_estimates && !intent.requires_full_metadata {
+        let mut volumes: Vec<String> = intent
+            .target_roots
+            .iter()
+            .filter_map(|root| crate::ntfs_usn::volume_for_path(Path::new(root)))
+            .collect();
+        volumes.sort();
+        volumes.dedup();
+        if !volumes.is_empty() {
+            format!(
+                "{} 尚无快速空间估算索引。请先说明：将针对当前目标卷启动短生命周期、只读的管理员助手，从 NTFS MFT 建立文件路径和逻辑大小估算索引，会弹出 Windows UAC；结果是估算值且不读取文件内容。用户明确同意后，按目标卷逐个调用 action=ntfs_index、volume=<当前卷>、user_confirmed=true；目标卷为 {}。完成后按用户指定的各目标调用 summarize、accuracy=fast。未同意前不要触发 UAC，也不要回退到全盘递归扫描。",
+                scope,
+                serde_json::to_string(&volumes)?
+            )
+        } else {
+            format!(
+                "{} 无法使用 NTFS MFT 快速估算。请说明需要普通逐项元数据扫描，用户同意后调用 action=index；未同意前不要全量遍历。",
+                scope
+            )
+        }
     } else {
         format!(
             "批量文件任务必须优先使用 search_files，但 {} 尚无可用的{}索引。请先提示用户是否开始维护索引：首次建立会后台遍历，之后持续维护文件名、路径、大小和修改时间等元数据，不读取文件内容。用户本轮已明确同意时，调用 action=index、roots={}、user_confirmed=true；否则先询问，不要改用 PowerShell 全量遍历。",
             scope,
-            if intent.requires_full_metadata { "完整元数据" } else { "文件" },
+            if intent.requires_full_metadata { "精确元数据" } else { "文件名" },
             serde_json::to_string(&intent.target_roots)?
         )
     };
@@ -1830,6 +2034,7 @@ fn build_file_scan_policy(
         "intent": "bulk_file_scan",
         "priority_tool": "search_files",
         "target_roots": intent.target_roots,
+        "requires_size_estimates": intent.requires_size_estimates,
         "requires_full_metadata": intent.requires_full_metadata,
         "direct_scan_override": intent.direct_scan_override,
         "coverage": coverage,
@@ -1855,6 +2060,114 @@ fn index_required_result(
     })
 }
 
+fn ntfs_confirmation_required(volume: &str, purpose: &str) -> Value {
+    json!({
+        "ok": false,
+        "status": "confirmation_required",
+        "confirmation_required": true,
+        "uac_required": true,
+        "volume": volume,
+        "message": format!(
+            "{}需要启动一次短生命周期、只读的管理员索引助手，并弹出 Windows UAC。请先获得用户明确同意；同意后以 user_confirmed=true 重试。",
+            purpose
+        ),
+    })
+}
+
+fn fast_size_index_required_result(
+    coverage: crate::file_index::IndexCoverage,
+    root: &str,
+) -> Value {
+    let volume = crate::ntfs_usn::volume_for_path(Path::new(root));
+    json!({
+        "ok": false,
+        "status": "fast_index_required",
+        "index_required": true,
+        "requires_estimated_sizes": true,
+        "uac_required": volume.is_some(),
+        "volume": volume,
+        "coverage": coverage,
+        "message": if let Some(volume) = volume {
+            format!(
+                "快速空间分析需要为 {} 建立 MFT 估算索引。请说明结果属于快速估算，索引助手只读且会弹出 Windows UAC；用户明确同意后调用 action=ntfs_index、volume={}、user_confirmed=true，完成后再调用 summarize、accuracy=fast。不要直接改用全盘递归扫描。",
+                root, volume
+            )
+        } else {
+            "该目标无法使用 NTFS MFT 快速估算。若用户需要空间分析，请说明将逐项读取文件元数据，获得同意后调用 action=index。".to_string()
+        },
+    })
+}
+
+fn text_preview(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        value.to_string()
+    } else {
+        format!("{}…", value.chars().take(max_chars).collect::<String>())
+    }
+}
+
+fn json_value_or_text(value: &str) -> Value {
+    serde_json::from_str(value).unwrap_or_else(|_| json!(value))
+}
+
+fn tool_call_search_item(record: &ToolCallRecord) -> Value {
+    json!({
+        "id": record.id,
+        "session": {
+            "id": record.session_id,
+            "title": record.session_title,
+        },
+        "request_message": {
+            "id": record.request_message_id,
+            "content_preview": text_preview(&record.request_content, 500),
+        },
+        "response_message": {
+            "id": record.response_message_id,
+            "content_preview": record.response_content.as_deref().map(|value| text_preview(value, 500)),
+        },
+        "round_index": record.round_index,
+        "call_index": record.call_index,
+        "tool_call_id": record.tool_call_id,
+        "tool_name": record.tool_name,
+        "status": record.status,
+        "arguments_preview": text_preview(&record.arguments_json, 1000),
+        "result_preview": record.result_json.as_deref().map(|value| text_preview(value, 2000)),
+        "assistant_content_preview": text_preview(&record.assistant_content, 500),
+        "has_reasoning_content": !record.reasoning_content.is_empty(),
+        "started_at": record.started_at,
+        "completed_at": record.completed_at,
+    })
+}
+
+fn tool_call_detail(record: &ToolCallRecord) -> Value {
+    json!({
+        "id": record.id,
+        "session": {
+            "id": record.session_id,
+            "title": record.session_title,
+        },
+        "request_message": {
+            "id": record.request_message_id,
+            "content": record.request_content,
+        },
+        "response_message": {
+            "id": record.response_message_id,
+            "content": record.response_content,
+        },
+        "round_index": record.round_index,
+        "call_index": record.call_index,
+        "tool_call_id": record.tool_call_id,
+        "tool_name": record.tool_name,
+        "status": record.status,
+        "arguments": json_value_or_text(&record.arguments_json),
+        "result": record.result_json.as_deref().map(json_value_or_text),
+        "assistant_content": record.assistant_content,
+        "reasoning_content": record.reasoning_content,
+        "started_at": record.started_at,
+        "completed_at": record.completed_at,
+    })
+}
+
 #[cfg(test)]
 mod capability_tests {
     use super::*;
@@ -1873,7 +2186,7 @@ mod capability_tests {
     }
 
     #[test]
-    fn core_only_exposes_discovery_and_skill_loading() {
+    fn core_exposes_discovery_history_and_skill_loading() {
         let definitions = definitions_for(&core_tool_names());
         let names: Vec<_> = definitions
             .as_array()
@@ -1881,7 +2194,14 @@ mod capability_tests {
             .iter()
             .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
             .collect();
-        assert_eq!(names, vec!["discover_capabilities", "load_skill"]);
+        assert_eq!(
+            names,
+            vec![
+                "discover_capabilities",
+                "get_tool_call_history",
+                "load_skill"
+            ]
+        );
     }
 
     #[test]
@@ -1894,9 +2214,12 @@ mod capability_tests {
 
     #[test]
     fn whole_drive_usage_is_routed_to_persistent_index() {
-        let intent = detect_bulk_file_scan("看看 D 盘，整体分析空间使用和目录占用").unwrap();
-        assert_eq!(intent.target_roots, vec!["D:/"]);
-        assert!(intent.requires_full_metadata);
+        let requested_volume = format!("{}:/", 'R');
+        let query = format!("看看 {}，整体分析空间使用和目录占用", requested_volume);
+        let intent = detect_bulk_file_scan(&query).unwrap();
+        assert_eq!(intent.target_roots, vec![requested_volume]);
+        assert!(intent.requires_size_estimates);
+        assert!(!intent.requires_full_metadata);
         assert!(!intent.direct_scan_override);
 
         let mut active = activate_categories(&[
@@ -1913,16 +2236,32 @@ mod capability_tests {
     }
 
     #[test]
+    fn explicit_exact_drive_usage_requires_full_metadata() {
+        let requested_volume = format!("{}:/", 'R');
+        let intent =
+            detect_bulk_file_scan(&format!("精确分析 {} 空间占用", requested_volume)).unwrap();
+        assert!(intent.requires_size_estimates);
+        assert!(intent.requires_full_metadata);
+    }
+
+    #[test]
     fn explicit_one_time_scan_keeps_direct_scan_override() {
-        let intent = detect_bulk_file_scan("不要索引，D盘只扫一次，用 PowerShell 统计").unwrap();
-        assert_eq!(intent.target_roots, vec!["D:/"]);
+        let requested_volume = format!("{}:/", 'R');
+        let intent = detect_bulk_file_scan(&format!(
+            "不要索引，{} 只扫一次，用 PowerShell 统计",
+            requested_volume
+        ))
+        .unwrap();
+        assert_eq!(intent.target_roots, vec![requested_volume]);
         assert!(intent.direct_scan_override);
     }
 
     #[test]
     fn confirmed_drive_index_maintenance_still_routes_to_file_index() {
-        let intent = detect_bulk_file_scan("用户已同意为 D 盘建立索引").unwrap();
-        assert_eq!(intent.target_roots, vec!["D:/"]);
+        let requested_volume = format!("{}:/", 'R');
+        let intent =
+            detect_bulk_file_scan(&format!("用户已同意为 {} 建立索引", requested_volume)).unwrap();
+        assert_eq!(intent.target_roots, vec![requested_volume]);
         assert!(!intent.direct_scan_override);
     }
 
@@ -1937,6 +2276,9 @@ mod capability_tests {
         assert!(actions.iter().any(|action| action == "summarize"));
         assert!(tool
             .pointer("/function/parameters/properties/user_confirmed")
+            .is_some());
+        assert!(tool
+            .pointer("/function/parameters/properties/accuracy")
             .is_some());
     }
 
@@ -1982,6 +2324,8 @@ mod capability_tests {
                 .and_then(Value::as_object)
                 .unwrap();
             for field in [
+                "argv",
+                "stdin",
                 "shell",
                 "powershell_strict",
                 "success_exit_codes",
@@ -1991,6 +2335,105 @@ mod capability_tests {
                 assert!(properties.contains_key(field), "missing {}", field);
             }
         }
+    }
+
+    #[test]
+    fn command_guidance_recovers_windows_cli_pitfalls() {
+        let quoting = command_guidance(
+            "failed",
+            Some(1),
+            "positional arguments are not supported (got [项目名称])",
+            "cmd",
+        );
+        assert!(quoting.iter().any(|hint| hint.contains("argv")));
+
+        let json = command_guidance("failed", Some(1), "invalid JSON value near byte 1", "cmd");
+        assert!(json.iter().any(|hint| hint.contains("argv")));
+
+        let sub = command_guidance(
+            "failed",
+            Some(1),
+            "unknown subcommand \"whoami\" for \"demo-cli auth\"",
+            "cmd",
+        );
+        assert!(sub.iter().any(|hint| hint.contains("--help")));
+
+        let field = command_guidance(
+            "failed",
+            Some(1),
+            "NOT_FOUND: selected field does not exist",
+            "cmd",
+        );
+        assert!(field.iter().any(|hint| hint.contains("引号")));
+
+        let count = command_guidance(
+            "failed",
+            Some(1),
+            "在此对象上找不到属性 Count",
+            "powershell",
+        );
+        assert!(count.iter().any(|hint| hint.contains("@()")));
+
+        let ps1 = command_guidance(
+            "failed",
+            Some(1),
+            r"C:\Users\user\AppData\Roaming\npm\demo-cli.ps1 执行错误",
+            "powershell",
+        );
+        assert!(ps1.iter().any(|hint| hint.contains("argv")));
+
+        let filter = command_guidance(
+            "failed",
+            Some(1),
+            r#"该类型只支持 "=="、">"、"<"、"empty"、"non_empty""#,
+            "cmd",
+        );
+        assert!(filter.iter().any(|hint| hint.contains("合法运算符")));
+
+        let garbled = command_guidance(
+            "done",
+            Some(0),
+            "| 椤圭洰鍚嶇О | 鍚嶇О |\n| --- | --- |",
+            "cmd",
+        );
+        assert!(garbled.iter().any(|hint| hint.contains("机器可读")));
+    }
+
+    #[test]
+    fn command_tools_prefer_argv_over_shell_strings() {
+        let definitions = definitions_for(&["run_command", "run_command_background"]);
+        for tool in definitions.as_array().unwrap() {
+            let description = tool
+                .pointer("/function/description")
+                .and_then(Value::as_str)
+                .unwrap();
+            assert!(
+                description.contains("argv"),
+                "missing argv guidance in {}",
+                tool.pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .unwrap()
+            );
+            assert!(
+                !description.contains("lark-cli"),
+                "tool description should not hardcode a specific CLI"
+            );
+            assert!(tool
+                .pointer("/function/parameters/properties/argv")
+                .is_some());
+            assert!(tool
+                .pointer("/function/parameters/properties/stdin")
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn parse_argv_rejects_a_single_command_string() {
+        let err = parse_argv(&json!({ "argv": "git status" })).unwrap_err();
+        assert!(err.to_string().contains("字符串数组"));
+        let ok = parse_argv(&json!({ "argv": ["git", "status"] })).unwrap();
+        assert_eq!(ok, vec!["git", "status"]);
+        assert!(parse_argv(&json!({})).unwrap().is_empty());
     }
 }
 
@@ -2027,10 +2470,12 @@ async fn command_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
     let tasks = &state.tasks;
     match name {
         "run_command" => {
-            let command = args
-                .get("command")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("缺少 command"))?;
+            let argv = parse_argv(args)?;
+            let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            if argv.is_empty() && command.trim().is_empty() {
+                bail!("请提供 argv（推荐，调用外部程序）或 command（cmd / PowerShell 脚本）");
+            }
+            let stdin = args.get("stdin").and_then(|v| v.as_str());
             let workdir = args.get("workdir").and_then(|v| v.as_str());
             let shell = args.get("shell").and_then(|v| v.as_str());
             let powershell_strict = args
@@ -2049,14 +2494,19 @@ async fn command_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
             let info = tasks
                 .run_sync(
                     app,
-                    command,
-                    workdir,
+                    crate::tasks::CommandSpec {
+                        command,
+                        argv: &argv,
+                        stdin,
+                        label: None,
+                        workdir,
+                        shell,
+                        powershell_strict,
+                        success_exit_codes: &success_exit_codes,
+                        script_args: &script_args,
+                        environment: &environment,
+                    },
                     timeout,
-                    shell,
-                    powershell_strict,
-                    &success_exit_codes,
-                    &script_args,
-                    &environment,
                 )
                 .await?;
             let (output, truncated) = tasks.head_tail(&info.id, tail_chars).unwrap_or_default();
@@ -2079,10 +2529,12 @@ async fn command_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
             }))
         }
         "run_command_background" => {
-            let command = args
-                .get("command")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("缺少 command"))?;
+            let argv = parse_argv(args)?;
+            let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            if argv.is_empty() && command.trim().is_empty() {
+                bail!("请提供 argv（推荐，调用外部程序）或 command（cmd / PowerShell 脚本）");
+            }
+            let stdin = args.get("stdin").and_then(|v| v.as_str());
             let label = args.get("label").and_then(|v| v.as_str());
             let workdir = args.get("workdir").and_then(|v| v.as_str());
             let shell = args.get("shell").and_then(|v| v.as_str());
@@ -2095,14 +2547,18 @@ async fn command_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
             let environment = string_map(args, "environment")?;
             let info = tasks.start_command(
                 app,
-                command,
-                label,
-                workdir,
-                shell,
-                powershell_strict,
-                &success_exit_codes,
-                &script_args,
-                &environment,
+                crate::tasks::CommandSpec {
+                    command,
+                    argv: &argv,
+                    stdin,
+                    label,
+                    workdir,
+                    shell,
+                    powershell_strict,
+                    success_exit_codes: &success_exit_codes,
+                    script_args: &script_args,
+                    environment: &environment,
+                },
             )?;
             Ok(json!({
                 "task_id": info.id,
@@ -2184,7 +2640,13 @@ fn command_execution_context(info: &crate::tasks::TaskInfo) -> Value {
         "log_decoding": "UTF-8，失败时回退 GB18030"
     });
     if let Some(obj) = context.as_object_mut() {
-        if info.shell == "powershell" {
+        if info.shell == "direct" {
+            obj.insert("launch".into(), json!("CreateProcess argv，不经过 cmd/PowerShell"));
+            obj.insert(
+                "quoting".into(),
+                json!("每个 argv 项是独立参数；JSON、空格、中文无需转义"),
+            );
+        } else if info.shell == "powershell" {
             obj.insert(
                 "launch".into(),
                 json!("Windows PowerShell / NoProfile / NonInteractive"),
@@ -2254,7 +2716,71 @@ fn command_guidance(
     if lower.contains("access is denied") || output.contains("拒绝访问") {
         hints.push("检测到权限不足。先确认目标和操作范围；只有确实需要提升权限且用户已知情时，才请求授权。".to_string());
     }
+    hints.extend(cli_recovery_hints(output, shell));
     hints
+}
+
+/// 把 Windows 上调用外部程序的常见失败翻译成下一步，避免模型继续拼命令字符串。
+fn cli_recovery_hints(output: &str, shell: &str) -> Vec<String> {
+    let mut hints = Vec::new();
+    let lower = output.to_lowercase();
+
+    if lower.contains("positional arguments are not supported")
+        || lower.contains("invalid json value")
+    {
+        hints.push(
+            "命令行里的 JSON/引号已被 shell 拆坏。改用 argv，把 JSON 作为单独一项或放入 stdin；不要继续改引号重试。".to_string(),
+        );
+    }
+    if lower.contains("unknown subcommand") || lower.contains("unknown command") {
+        hints.push(
+            "子命令不存在。不要猜测名称；对该程序及其父命令执行 --help，改用帮助里的真实子命令。".to_string(),
+        );
+    }
+    if lower.contains("selected field does not exist")
+        || (output.contains("NOT_FOUND") && lower.contains("field"))
+    {
+        hints.push(
+            "指定字段未找到。不要把引号写进标志值；先去掉字段投影，输出全量 JSON 再解析真实字段名。".to_string(),
+        );
+    }
+    if (output.contains("找不到属性") && lower.contains("count"))
+        || lower.contains("the property 'count' cannot be found")
+        || lower.contains("propertynotfoundstrict")
+    {
+        hints.push(
+            "PowerShell 管道无匹配时返回 $null，严格模式下没有 .Count。先用 `@()` 转成数组：`$hits = @($lines | Where-Object { ... })` 再取 Count；不要关闭 powershell_strict。".to_string(),
+        );
+    }
+    if shell == "powershell" && lower.contains(".ps1") {
+        hints.push(
+            "PowerShell 可能执行了同名 .ps1 而不是 exe/cmd。改用 argv 直启外部程序，系统按 PATHEXT 解析原生可执行文件。".to_string(),
+        );
+    }
+    if (lower.contains("only support") || output.contains("只支持"))
+        && (lower.contains("filter")
+            || output.contains("过滤")
+            || output.contains("==")
+            || output.contains("empty")
+            || lower.contains(">="))
+    {
+        hints.push(
+            "该字段类型不支持当前过滤运算符。按报错列出的合法运算符改写，不要换一个同义写法硬试。".to_string(),
+        );
+    }
+    if looks_like_garbled_cli_text(output) {
+        hints.push(
+            "输出中文已乱码，不能用来做名称匹配。改用该程序的 JSON/机器可读输出，或把输出重定向到文件再 read_file。".to_string(),
+        );
+    }
+    hints
+}
+
+/// cmd 把 UTF-8 当系统代码页解码后，常见中文会变成另一组仍合法的汉字。
+fn looks_like_garbled_cli_text(output: &str) -> bool {
+    ["椤圭洰", "鍚嶇О", "椤圭", "鍚嶇"]
+        .iter()
+        .any(|marker| output.contains(marker))
 }
 
 fn propose_organization(app: &AppHandle, db: &Db, args: &Value) -> Result<Value> {

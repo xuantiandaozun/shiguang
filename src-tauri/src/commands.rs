@@ -284,7 +284,7 @@ pub async fn send_chat_message(
     }
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
-        let result = llm::agent::run_chat(app2.clone(), session_id, cancel).await;
+        let result = llm::agent::run_chat(app2.clone(), session_id, msg_id, cancel).await;
         let busy_state = app2.state::<AppState>();
         busy_state.chat_busy.store(false, Ordering::SeqCst);
         if let Err(e) = result {

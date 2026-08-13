@@ -12,7 +12,7 @@ fn main() {
         // response is written when the request path was valid enough to derive it.
         if let Some(path) = request_arg().and_then(|path| error_response_path(&path).ok()) {
             let response = serde_json::json!({
-                "version": 1,
+                "version": shiguang_lib::ntfs_helper::PROTOCOL_VERSION,
                 "request_id": request_id_from_path(&path).unwrap_or_default(),
                 "result": null,
                 "error": error.to_string(),

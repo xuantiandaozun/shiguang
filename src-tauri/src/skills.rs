@@ -770,6 +770,16 @@ mod tests {
     }
 
     #[test]
+    fn builtin_windows_cli_parses() {
+        let content = builtin_skills::get("windows-cli").expect("embedded");
+        let parsed = parse_frontmatter(content, Path::new("windows-cli/SKILL.md")).unwrap();
+        assert_eq!(parsed.name, "windows-cli");
+        assert!(parsed.description.contains("argv"));
+        assert!(parsed.description.contains("PowerShell"));
+        assert!(!parsed.description.contains("lark-cli"));
+    }
+
+    #[test]
     fn sanitize_rejects_path() {
         assert!(sanitize_name("../x").is_err());
         assert!(sanitize_name("ok-skill").is_ok());

@@ -23,17 +23,33 @@ const MAX_MATCH_LINES: usize = 50;
 const SCAN_BACK_BYTES: u64 = 2 * 1024 * 1024;
 /// CREATE_NO_WINDOW：后台命令不弹黑色控制台窗口
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
+const MAX_ARGV_ITEMS: usize = 64;
+const MAX_ARGV_ITEM_CHARS: usize = 32_768;
+const MAX_STDIN_BYTES: usize = 256 * 1024;
+
+pub struct CommandSpec<'a> {
+    pub command: &'a str,
+    pub argv: &'a [String],
+    pub stdin: Option<&'a str>,
+    pub label: Option<&'a str>,
+    pub workdir: Option<&'a str>,
+    pub shell: Option<&'a str>,
+    pub powershell_strict: bool,
+    pub success_exit_codes: &'a [i32],
+    pub script_args: &'a Value,
+    pub environment: &'a HashMap<String, String>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskInfo {
     pub id: String,
     pub label: String,
     pub command: String,
-    /// cmd / powershell；用于诊断命令实际在哪种解释器中执行。
+    /// cmd / powershell / direct；direct 表示 argv 直启、不经 shell。
     pub shell: String,
     /// explicit / legacy_wrapper / inferred / default
     pub shell_selection: String,
-    /// cmd / encoded_command / encoded_bootstrap_file
+    /// cmd / encoded_command / encoded_bootstrap_file / argv
     pub transport: String,
     /// 被视为成功的进程退出码。
     pub success_exit_codes: Vec<i32>,
@@ -72,78 +88,88 @@ impl TaskManager {
     }
 
     /// 启动后台命令，输出实时写入日志文件后立即返回。
-    /// cmd 命令经 cmd /c；PowerShell 脚本经 UTF-16LE Base64 EncodedCommand，
-    /// 不再经过 cmd 或临时 ps1 文件，避免 `$`、引号和无 BOM UTF-8 的歧义。
-    /// 监控协程等待进程结束后更新状态并广播 task-changed。
-    pub fn start_command(
-        &self,
-        app: &AppHandle,
-        command: &str,
-        label: Option<&str>,
-        workdir: Option<&str>,
-        shell: Option<&str>,
-        powershell_strict: bool,
-        success_exit_codes: &[i32],
-        script_args: &Value,
-        environment: &HashMap<String, String>,
-    ) -> Result<TaskInfo> {
-        let command = command.trim();
-        if command.is_empty() {
-            bail!("命令不能为空");
+    /// 外部程序优先 argv 直启（CreateProcess，不经 shell）；
+    /// cmd 命令经 cmd /c；PowerShell 脚本经 UTF-16LE Base64 EncodedCommand。
+    pub fn start_command(&self, app: &AppHandle, spec: CommandSpec<'_>) -> Result<TaskInfo> {
+        let command = spec.command.trim();
+        let argv_mode = !spec.argv.is_empty();
+        if !argv_mode && command.is_empty() {
+            bail!("请提供 argv（推荐，调用外部程序）或 command（cmd / PowerShell 脚本）");
         }
+        let stdin_data = normalize_stdin(spec.stdin)?;
+        let display_command = if argv_mode {
+            spec.argv.join(" ")
+        } else {
+            command.to_string()
+        };
         let id = format!("t{}", self.seq.fetch_add(1, Ordering::SeqCst) + 1);
         let log_path = self.dir.join(format!("task-{}.log", id));
         let log_file = std::fs::File::create(&log_path)?;
         let stderr_file = log_file.try_clone()?;
 
-        let dir = workdir
+        let dir = spec
+            .workdir
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .filter(|p| p.is_dir())
             .unwrap_or_else(|| dirs::desktop_dir().unwrap_or_else(|| PathBuf::from(".")));
 
-        let (shell_kind, executable_command, shell_selection) = resolve_shell(command, shell)?;
-        let accepted_exit_codes = normalize_success_exit_codes(success_exit_codes)?;
+        let accepted_exit_codes = normalize_success_exit_codes(spec.success_exit_codes)?;
         let mut transient_script = None;
-        let mut transport = "cmd";
-        let mut cmd = match shell_kind {
-            ShellKind::Cmd => {
-                let mut cmd = tokio::process::Command::new("cmd");
-                cmd.args(["/d", "/s", "/c", &utf8_command(&executable_command)]);
-                cmd
-            }
-            ShellKind::PowerShell => {
-                let mut cmd = tokio::process::Command::new("powershell");
-                let wrapper =
-                    powershell_wrapper(&executable_command, powershell_strict, script_args)?;
-                let encoded = encode_powershell_command(&wrapper);
-                if encoded.len() <= 24_000 {
-                    transport = "encoded_command";
-                    cmd.args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded]);
-                } else {
-                    // CreateProcess 命令行有长度上限。超长脚本改用后端生成的、带 BOM
-                    // 的临时 wrapper 文件；路径作为独立 argv 传入，不经过 shell 引号。
-                    transport = "encoded_bootstrap_file";
-                    let script_path = self.dir.join(format!("task-{}.ps1", id));
-                    write_utf8_bom(&script_path, &wrapper)?;
-                    let bootstrap = encode_powershell_command(powershell_file_bootstrap());
-                    cmd.args([
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-EncodedCommand",
-                        &bootstrap,
-                    ]);
-                    transient_script = Some(script_path);
+        let (mut cmd, shell_name, shell_selection, transport) = if argv_mode {
+            let (program, args) = validate_argv(spec.argv)?;
+            let mut cmd = tokio::process::Command::new(&program);
+            cmd.args(&args);
+            (cmd, "direct", "argv", "argv")
+        } else {
+            let (shell_kind, executable_command, shell_selection) =
+                resolve_shell(command, spec.shell)?;
+            let mut transport = "cmd";
+            let cmd = match shell_kind {
+                ShellKind::Cmd => {
+                    let mut cmd = tokio::process::Command::new("cmd");
+                    cmd.args(["/d", "/s", "/c", &utf8_command(&executable_command)]);
+                    cmd
                 }
-                cmd
-            }
+                ShellKind::PowerShell => {
+                    let mut cmd = tokio::process::Command::new("powershell");
+                    let wrapper = powershell_wrapper(
+                        &executable_command,
+                        spec.powershell_strict,
+                        spec.script_args,
+                    )?;
+                    let encoded = encode_powershell_command(&wrapper);
+                    if encoded.len() <= 24_000 {
+                        transport = "encoded_command";
+                        cmd.args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded]);
+                    } else {
+                        transport = "encoded_bootstrap_file";
+                        let script_path = self.dir.join(format!("task-{}.ps1", id));
+                        write_utf8_bom(&script_path, &wrapper)?;
+                        let bootstrap = encode_powershell_command(powershell_file_bootstrap());
+                        cmd.args([
+                            "-NoProfile",
+                            "-NonInteractive",
+                            "-EncodedCommand",
+                            &bootstrap,
+                        ]);
+                        transient_script = Some(script_path);
+                    }
+                    cmd
+                }
+            };
+            (cmd, shell_kind.as_str(), shell_selection, transport)
         };
         cmd.current_dir(&dir)
-            .envs(environment)
+            .envs(spec.environment)
             .env("PYTHONUTF8", "1")
             .env("PYTHONIOENCODING", "utf-8")
-            .stdin(Stdio::null())
+            .stdin(if stdin_data.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(stderr_file))
             .creation_flags(CREATE_NO_WINDOW);
@@ -164,15 +190,16 @@ impl TaskManager {
 
         let info = TaskInfo {
             id: id.clone(),
-            label: label
+            label: spec
+                .label
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .unwrap_or(command)
+                .unwrap_or(&display_command)
                 .chars()
                 .take(60)
                 .collect(),
-            command: command.to_string(),
-            shell: shell_kind.as_str().to_string(),
+            command: display_command,
+            shell: shell_name.to_string(),
             shell_selection: shell_selection.to_string(),
             transport: transport.to_string(),
             success_exit_codes: accepted_exit_codes.clone(),
@@ -201,6 +228,13 @@ impl TaskManager {
         let tasks2 = Arc::clone(&self.tasks);
         let id2 = id.clone();
         tauri::async_runtime::spawn(async move {
+            if let Some(data) = stdin_data {
+                if let Some(mut pipe) = child.stdin.take() {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = pipe.write_all(data.as_bytes()).await;
+                    let _ = pipe.shutdown().await;
+                }
+            }
             let result = child.wait().await;
             let (status, code) = match result {
                 Ok(s) => {
@@ -348,26 +382,10 @@ impl TaskManager {
     pub async fn run_sync(
         &self,
         app: &AppHandle,
-        command: &str,
-        workdir: Option<&str>,
+        spec: CommandSpec<'_>,
         timeout_secs: u64,
-        shell: Option<&str>,
-        powershell_strict: bool,
-        success_exit_codes: &[i32],
-        script_args: &Value,
-        environment: &HashMap<String, String>,
     ) -> Result<TaskInfo> {
-        let info = self.start_command(
-            app,
-            command,
-            None,
-            workdir,
-            shell,
-            powershell_strict,
-            success_exit_codes,
-            script_args,
-            environment,
-        )?;
+        let info = self.start_command(app, spec)?;
         let id = info.id.clone();
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
         loop {
@@ -398,6 +416,60 @@ impl TaskManager {
 /// 兼容忽略活动代码页的旧程序。
 fn utf8_command(command: &str) -> String {
     format!("chcp 65001 >nul & {}", command)
+}
+
+fn normalize_stdin(stdin: Option<&str>) -> Result<Option<String>> {
+    let Some(raw) = stdin.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if raw.len() > MAX_STDIN_BYTES {
+        bail!("stdin 最长 {} 字节", MAX_STDIN_BYTES);
+    }
+    Ok(Some(raw.to_string()))
+}
+
+fn validate_argv(argv: &[String]) -> Result<(String, Vec<String>)> {
+    if argv.len() > MAX_ARGV_ITEMS {
+        bail!("argv 最多 {} 项", MAX_ARGV_ITEMS);
+    }
+    let program = argv[0].trim();
+    if program.is_empty() {
+        bail!("argv 第一项必须是可执行文件名或路径");
+    }
+    if program.chars().count() > MAX_ARGV_ITEM_CHARS {
+        bail!("argv 单项过长");
+    }
+    if looks_like_unsplit_shell_line(program) {
+        bail!(
+            "argv 第一项应是程序名，不要把整条命令放进一项。请拆成 [\"git\", \"status\"] 这种形式"
+        );
+    }
+    let args = argv[1..].to_vec();
+    for (index, arg) in args.iter().enumerate() {
+        if arg.chars().count() > MAX_ARGV_ITEM_CHARS {
+            bail!("argv[{}] 过长", index + 1);
+        }
+    }
+    Ok((program.to_string(), args))
+}
+
+/// 模型常把整条命令塞进 argv[0]。带空格的真实路径（含 \\ 或 /）放行。
+fn looks_like_unsplit_shell_line(program: &str) -> bool {
+    let program = program.trim();
+    if program.contains('|')
+        || program.contains("&&")
+        || program.contains("||")
+        || program.contains(';')
+    {
+        return true;
+    }
+    let has_space = program.contains(' ');
+    let looks_like_path = program.contains('\\')
+        || program.contains('/')
+        || program.ends_with(".exe")
+        || program.ends_with(".cmd")
+        || program.ends_with(".bat");
+    has_space && !looks_like_path
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -706,18 +778,31 @@ fn read_tail(path: &Path, max_chars: usize) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_log, encode_powershell_command, looks_like_powershell, normalize_success_exit_codes,
-        powershell_file_bootstrap, powershell_wrapper, resolve_shell, unwrap_powershell_command,
-        utf8_command, write_utf8_bom, ShellKind,
+        decode_log, encode_powershell_command, looks_like_powershell,
+        looks_like_unsplit_shell_line, normalize_success_exit_codes, powershell_file_bootstrap,
+        powershell_wrapper, resolve_shell, unwrap_powershell_command, utf8_command, validate_argv,
+        write_utf8_bom, ShellKind,
     };
     use base64::Engine as _;
 
     #[test]
     fn command_switches_child_code_page_to_utf8() {
-        assert_eq!(
-            utf8_command("lark-cli project list"),
-            "chcp 65001 >nul & lark-cli project list"
-        );
+        assert_eq!(utf8_command("echo hello"), "chcp 65001 >nul & echo hello");
+    }
+
+    #[test]
+    fn argv_rejects_unsplit_command_line_but_allows_paths_with_spaces() {
+        let err = validate_argv(&["git status".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("拆成"));
+        assert!(looks_like_unsplit_shell_line("git status -sb"));
+        assert!(looks_like_unsplit_shell_line("tool | more"));
+        assert!(!looks_like_unsplit_shell_line(
+            r"C:\Program Files\Git\cmd\git.exe"
+        ));
+        let (program, args) =
+            validate_argv(&["git".into(), "status".into(), "-sb".into()]).unwrap();
+        assert_eq!(program, "git");
+        assert_eq!(args, vec!["status", "-sb"]);
     }
 
     #[test]

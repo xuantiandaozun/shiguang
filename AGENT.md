@@ -31,7 +31,7 @@ LLM 走 OpenAI 兼容接口（默认 DeepSeek），Function Calling + SSE 流式
 5. **待办提醒** `todo/scheduler.rs`：30s 轮询到期，按 `todos.remind_mode` 分发——`notify` 系统通知；`popup`/`popup_input` 发 `reminder-popup` 事件给 reminder 弹窗。`popup_input` 的输入作为聊天消息发给 AI（调 `send_chat_message`，不落本地），发完 `show_chat_window` 展开聊天窗；重复任务提醒即顺延、一次性任务标 reminded。
 6. **本机信息** `get_system_info`：便利封装，与 `run_command` 等价可选，不在系统提示词强制引导。
 7. **Agent Skills**（两类）
-   - **internal**：`builtin_skills.rs` + `include_str!` 编译期嵌入；只读；AI/UI 禁 create/覆盖/删除；可启停。新增：在 `builtin-skills/<name>/SKILL.md` 写文件并在 `builtin_skills::ALL` 登记。
+   - **internal**：`builtin_skills.rs` + `include_str!` 编译期嵌入；只读；AI/UI 禁 create/覆盖/删除；可启停。新增：在 `builtin-skills/<name>/SKILL.md` 写文件并在 `builtin_skills::ALL` 登记。现有：`desktop-organize`（整理原则）、`windows-cli`（Windows 下用 argv/stdin 调用外部程序，避免拼命令字符串）。
    - **external**：`app_data/skills/`；AI 可 create/覆盖/删除；可从 Claude/Codex/Cursor 同步；承接旧「工作流经验」一次性迁移（`migrate_workflows`，设置键 `workflows_migrated_to_skills`）。
    - 启用技能目录注入对话末尾；命中 `load_skill`。完整完成后用 `create_skill` 沉淀经验（取代旧 save_workflow）。
 8. **系统提示词**：只写产品约束；参数/细则放 tools 与 Skills。整理细则在内部 skill `desktop-organize`。

@@ -3,10 +3,16 @@
 //! 新增内部技能：在 `builtin-skills/<name>/SKILL.md` 加文件，并在 `ALL` 里登记一行。
 
 /// (文件夹名/技能名, 完整 SKILL.md 文本)
-pub static ALL: &[(&str, &str)] = &[(
-    "desktop-organize",
-    include_str!("../builtin-skills/desktop-organize/SKILL.md"),
-)];
+pub static ALL: &[(&str, &str)] = &[
+    (
+        "desktop-organize",
+        include_str!("../builtin-skills/desktop-organize/SKILL.md"),
+    ),
+    (
+        "windows-cli",
+        include_str!("../builtin-skills/windows-cli/SKILL.md"),
+    ),
+];
 
 pub fn get(name: &str) -> Option<&'static str> {
     ALL.iter().find(|(n, _)| *n == name).map(|(_, c)| *c)

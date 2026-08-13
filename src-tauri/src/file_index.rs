@@ -101,7 +101,8 @@ pub struct IndexedRoot {
     pub path: String,
     pub indexed_at: String,
     pub item_count: u64,
-    /// full = size/time metadata is available; names_only = fast MFT name graph;
+    /// full = exact size/time metadata is available; estimated = fast MFT name
+    /// graph plus best-effort logical sizes; names_only = legacy fast MFT graph;
     /// unknown = index created by an older version and should be rebuilt before
     /// metadata-sensitive analysis.
     pub metadata_level: String,
@@ -124,13 +125,20 @@ pub struct DirectoryUsage {
     pub size_bytes: u64,
     pub file_count: u64,
     pub directory_count: u64,
+    pub missing_size_count: u64,
 }
 
 #[derive(Debug, Serialize)]
 pub struct UsageSummary {
     pub root: String,
+    /// `exact` comes from a normal metadata scan; `estimated` comes from raw
+    /// MFT `$DATA` lengths and may omit special records or alternate streams.
+    pub accuracy: String,
     pub total_size_bytes: u64,
     pub file_count: u64,
+    pub sized_file_count: u64,
+    pub missing_size_count: u64,
+    pub size_coverage_percent: f64,
     pub directory_count: u64,
     pub items: Vec<DirectoryUsage>,
     pub returned: usize,
@@ -440,9 +448,10 @@ impl FileIndex {
         status.running = false;
         status.finished_at = Some(crate::db::now_str());
         match result {
-            Ok((summary, records)) => {
+            Ok((summary, records, missing_sizes)) => {
                 status.scanned = records;
                 status.indexed = records;
+                status.skipped = missing_sizes;
                 status.current_path.clear();
                 apply_replay_status(&mut status, Ok(summary));
                 Ok(status.clone())
@@ -460,7 +469,7 @@ impl FileIndex {
         &self,
         app: &tauri::AppHandle,
         volume: &str,
-    ) -> Result<(ReplaySummary, u64)> {
+    ) -> Result<(ReplaySummary, u64, u64)> {
         let (snapshot, snapshot_path) =
             crate::ntfs_helper::mft_snapshot_elevated(app, volume).await?;
         let import_result =
@@ -508,7 +517,7 @@ impl FileIndex {
                 }
             }
         };
-        Ok((summary, snapshot.record_count))
+        Ok((summary, snapshot.record_count, snapshot.missing_size_count))
     }
 
     pub fn indexed_roots(&self) -> Result<Vec<IndexedRoot>> {
@@ -533,6 +542,28 @@ impl FileIndex {
         requested_roots: &[String],
         require_full_metadata: bool,
     ) -> Result<IndexCoverage> {
+        self.coverage_with_level(
+            requested_roots,
+            if require_full_metadata {
+                "full"
+            } else {
+                "names_only"
+            },
+        )
+    }
+
+    pub fn coverage_for_estimated_sizes(
+        &self,
+        requested_roots: &[String],
+    ) -> Result<IndexCoverage> {
+        self.coverage_with_level(requested_roots, "estimated")
+    }
+
+    fn coverage_with_level(
+        &self,
+        requested_roots: &[String],
+        required_level: &str,
+    ) -> Result<IndexCoverage> {
         let indexed_roots = self.indexed_roots()?;
         let requested: Vec<String> = requested_roots
             .iter()
@@ -553,7 +584,9 @@ impl FileIndex {
                 .filter(|indexed| path_covers(&indexed.path, target))
                 .max_by_key(|indexed| normalize_input_path(&indexed.path).chars().count());
             match covering {
-                Some(indexed) if require_full_metadata && indexed.metadata_level != "full" => {
+                Some(indexed)
+                    if !metadata_level_satisfies(&indexed.metadata_level, required_level) =>
+                {
                     insufficient_metadata_roots.push(target.clone());
                 }
                 Some(_) => covered_roots.push(target.clone()),
@@ -672,28 +705,54 @@ impl FileIndex {
 
     /// Summarize indexed file sizes by the first child below `root`. This is the
     /// indexed equivalent of an expensive recursive per-directory disk scan.
-    pub fn summarize_usage(&self, root: &str, limit: usize) -> Result<UsageSummary> {
+    pub fn summarize_usage(
+        &self,
+        root: &str,
+        limit: usize,
+        require_exact: bool,
+    ) -> Result<UsageSummary> {
         let root = normalize_input_path(root);
         if root.is_empty() {
             return Err(anyhow!("汇总目录不能为空"));
         }
-        let coverage = self.coverage(std::slice::from_ref(&root), true)?;
+        let coverage = if require_exact {
+            self.coverage(std::slice::from_ref(&root), true)?
+        } else {
+            self.coverage_for_estimated_sizes(std::slice::from_ref(&root))?
+        };
         if !coverage.ready {
-            return Err(anyhow!("目标目录尚无完整元数据索引"));
+            return Err(anyhow!(if require_exact {
+                "目标目录尚无精确元数据索引"
+            } else {
+                "目标目录尚无可用于空间估算的 MFT 大小索引"
+            }));
         }
+        let actual_level = coverage
+            .indexed_roots
+            .iter()
+            .filter(|indexed| path_covers(&indexed.path, &root))
+            .max_by_key(|indexed| normalize_input_path(&indexed.path).chars().count())
+            .map(|indexed| indexed.metadata_level.as_str())
+            .unwrap_or("estimated");
 
         let prefix = format!("{}/", root.trim_end_matches('/'));
         let child_start = prefix.chars().count() as i64 + 1;
         let pattern = format!("{}%", escape_literal_like(&prefix));
         let conn = Connection::open(&self.db_path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        let (total_size_bytes, file_count, directory_count): (i64, i64, i64) = conn.query_row(
+        let (total_size_bytes, file_count, sized_file_count, directory_count): (
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = conn.query_row(
             "SELECT COALESCE(SUM(CASE WHEN is_dir=0 THEN size_bytes ELSE 0 END),0),
                         COALESCE(SUM(CASE WHEN is_dir=0 THEN 1 ELSE 0 END),0),
+                        COALESCE(SUM(CASE WHEN is_dir=0 AND size_known=1 THEN 1 ELSE 0 END),0),
                         COALESCE(SUM(CASE WHEN is_dir=1 THEN 1 ELSE 0 END),0)
                    FROM files WHERE path LIKE ?1 ESCAPE '\\'",
             params![pattern],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
         let cap = limit.clamp(1, 100);
         let sql = r#"
@@ -704,14 +763,16 @@ impl FileIndex {
                        ELSE substr(path, ?1)
                      END AS segment,
                      is_dir,
-                     size_bytes
+                     size_bytes,
+                     size_known
                 FROM files
                WHERE path LIKE ?2 ESCAPE '\'
             )
             SELECT segment,
                    COALESCE(SUM(CASE WHEN is_dir=0 THEN size_bytes ELSE 0 END),0) AS total_size,
                    COALESCE(SUM(CASE WHEN is_dir=0 THEN 1 ELSE 0 END),0) AS file_count,
-                   COALESCE(SUM(CASE WHEN is_dir=1 THEN 1 ELSE 0 END),0) AS directory_count
+                   COALESCE(SUM(CASE WHEN is_dir=1 THEN 1 ELSE 0 END),0) AS directory_count,
+                   COALESCE(SUM(CASE WHEN is_dir=0 AND size_known=0 THEN 1 ELSE 0 END),0) AS missing_size_count
               FROM scoped
              WHERE segment <> ''
              GROUP BY segment
@@ -727,15 +788,29 @@ impl FileIndex {
                 size_bytes: row.get::<_, i64>(1)?.max(0) as u64,
                 file_count: row.get::<_, i64>(2)?.max(0) as u64,
                 directory_count: row.get::<_, i64>(3)?.max(0) as u64,
+                missing_size_count: row.get::<_, i64>(4)?.max(0) as u64,
             })
         })?;
         let mut items: Vec<DirectoryUsage> = rows.filter_map(|row| row.ok()).collect();
         let truncated = items.len() > cap;
         items.truncate(cap);
+        let missing_size_count = file_count.saturating_sub(sized_file_count);
         Ok(UsageSummary {
             root,
+            accuracy: if actual_level == "full" {
+                "exact".into()
+            } else {
+                "estimated".into()
+            },
             total_size_bytes: total_size_bytes.max(0) as u64,
             file_count: file_count.max(0) as u64,
+            sized_file_count: sized_file_count.max(0) as u64,
+            missing_size_count: missing_size_count.max(0) as u64,
+            size_coverage_percent: if file_count <= 0 {
+                100.0
+            } else {
+                sized_file_count.max(0) as f64 * 100.0 / file_count as f64
+            },
             directory_count: directory_count.max(0) as u64,
             returned: items.len(),
             items,
@@ -991,14 +1066,16 @@ fn import_mft_snapshot(
         tx.execute("DELETE FROM indexed_roots WHERE root=?1", params![volume])?;
         tx.execute(
             r#"
-            WITH RECURSIVE tree(frn,path,parent,name,extension,is_dir) AS (
+            WITH RECURSIVE tree(frn,path,parent,name,extension,is_dir,size_bytes,size_known) AS (
               SELECT r.file_reference, ?1, ?1, r.name, r.extension,
-                     (r.file_attributes & 16) != 0
+                     (r.file_attributes & 16) != 0,
+                     COALESCE(r.estimated_size_bytes,0), r.size_known
                 FROM mft_snapshot.records r
                WHERE r.file_reference = r.parent_reference
               UNION ALL
               SELECT r.file_reference, ?1 || r.name, ?1, r.name, r.extension,
-                     (r.file_attributes & 16) != 0
+                     (r.file_attributes & 16) != 0,
+                     COALESCE(r.estimated_size_bytes,0), r.size_known
                 FROM mft_snapshot.records r
                WHERE r.file_reference != r.parent_reference
                  AND NOT EXISTS (
@@ -1011,16 +1088,17 @@ fn import_mft_snapshot(
                           THEN ?1 || child.name
                           ELSE parent.path || '/' || child.name END,
                      parent.path, child.name, child.extension,
-                     (child.file_attributes & 16) != 0
+                     (child.file_attributes & 16) != 0,
+                     COALESCE(child.estimated_size_bytes,0), child.size_known
                 FROM tree parent
                 JOIN mft_snapshot.records child
                   ON child.parent_reference = parent.frn
                  AND child.file_reference != child.parent_reference
             )
             INSERT OR REPLACE INTO files(
-              path,root,parent,name,extension,is_dir,size_bytes,modified
+              path,root,parent,name,extension,is_dir,size_bytes,size_known,modified
             )
-            SELECT path,?1,parent,name,extension,is_dir,0,0
+            SELECT path,?1,parent,name,extension,is_dir,size_bytes,size_known,0
               FROM tree WHERE path != ?1
             "#,
             params![volume],
@@ -1032,7 +1110,7 @@ fn import_mft_snapshot(
         )?;
         tx.execute(
             "INSERT INTO indexed_roots(root,indexed_at,item_count,metadata_level)
-             VALUES(?1,?2,?3,'names_only')",
+             VALUES(?1,?2,?3,'estimated')",
             params![volume, crate::db::now_str(), count],
         )?;
         tx.execute(
@@ -1259,8 +1337,8 @@ fn upsert_incremental_path(
             .map(|duration| duration.as_secs() as i64)
             .unwrap_or(0);
         let was_inserted = tx.execute(
-            "INSERT OR IGNORE INTO files(path,root,parent,name,extension,is_dir,size_bytes,modified)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            "INSERT OR IGNORE INTO files(path,root,parent,name,extension,is_dir,size_bytes,size_known,modified)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,1,?8)",
             params![
                 path_text,
                 root,
@@ -1274,7 +1352,7 @@ fn upsert_incremental_path(
         )?;
         if was_inserted == 0 {
             tx.execute(
-                "UPDATE files SET root=?2,parent=?3,name=?4,extension=?5,is_dir=?6,size_bytes=?7,modified=?8 WHERE path=?1",
+                "UPDATE files SET root=?2,parent=?3,name=?4,extension=?5,is_dir=?6,size_bytes=?7,size_known=1,modified=?8 WHERE path=?1",
                 params![
                     path_text,
                     root,
@@ -1332,6 +1410,7 @@ fn init_db(path: &Path) -> Result<()> {
           extension TEXT NOT NULL DEFAULT '',
           is_dir INTEGER NOT NULL,
           size_bytes INTEGER NOT NULL DEFAULT 0,
+          size_known INTEGER NOT NULL DEFAULT 0,
           modified INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_files_root ON files(root);
@@ -1367,6 +1446,27 @@ fn init_db(path: &Path) -> Result<()> {
             [],
         )?;
     }
+    let has_size_known = {
+        let mut stmt = conn.prepare("PRAGMA table_info(files)")?;
+        let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let found = columns
+            .filter_map(|column| column.ok())
+            .any(|name| name == "size_known");
+        found
+    };
+    if !has_size_known {
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN size_known INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        // Existing full indexes already contain sizes collected from metadata.
+        conn.execute(
+            "UPDATE files SET size_known=1 WHERE root IN (
+               SELECT root FROM indexed_roots WHERE metadata_level='full'
+             )",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -1391,8 +1491,8 @@ fn build_index(
         )?;
     }
     let mut insert = tx.prepare_cached(
-        "INSERT OR REPLACE INTO files(path,root,parent,name,extension,is_dir,size_bytes,modified)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        "INSERT OR REPLACE INTO files(path,root,parent,name,extension,is_dir,size_bytes,size_known,modified)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,1,?8)",
     )?;
 
     for root in roots {
@@ -1516,6 +1616,18 @@ fn normalize_input_path(path: &str) -> String {
     }
 }
 
+fn metadata_level_satisfies(actual: &str, required: &str) -> bool {
+    fn rank(level: &str) -> u8 {
+        match level {
+            "full" => 2,
+            "estimated" => 1,
+            "names_only" | "unknown" => 0,
+            _ => 0,
+        }
+    }
+    rank(actual) >= rank(required)
+}
+
 fn escape_like(text: &str) -> String {
     // SQLite LIKE has no escape character unless explicitly declared. Treating
     // user wildcards as wildcards is useful for an Everything-like search.
@@ -1582,7 +1694,10 @@ mod tests {
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].metadata_level, "full");
 
-        let summary = index.summarize_usage(&display_path(&root), 10).unwrap();
+        let summary = index
+            .summarize_usage(&display_path(&root), 10, true)
+            .unwrap();
+        assert_eq!(summary.accuracy, "exact");
         assert_eq!(summary.total_size_bytes, 2053);
         assert_eq!(summary.file_count, 2);
         let docs = summary
@@ -1639,7 +1754,7 @@ mod tests {
     fn imports_mft_parent_graph_into_paths() {
         let base = std::env::temp_dir().join(format!("shiguang-mft-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&base).unwrap();
-        let index_db = base.join("index.db");
+        let index_db = base.join("file_index.db");
         let snapshot_db = base.join("snapshot.db");
         init_db(&index_db).unwrap();
         let snapshot = Connection::open(&snapshot_db).unwrap();
@@ -1650,11 +1765,13 @@ mod tests {
                    parent_reference INTEGER NOT NULL,
                    name TEXT NOT NULL,
                    extension TEXT NOT NULL,
-                   file_attributes INTEGER NOT NULL
+                   file_attributes INTEGER NOT NULL,
+                   estimated_size_bytes INTEGER,
+                   size_known INTEGER NOT NULL
                  );
-                 INSERT INTO records VALUES(5,5,'.','',16);
-                 INSERT INTO records VALUES(10,5,'Users','',16);
-                 INSERT INTO records VALUES(11,10,'report.pdf','pdf',0);",
+                 INSERT INTO records VALUES(5,5,'.','',16,0,1);
+                 INSERT INTO records VALUES(10,5,'Users','',16,0,1);
+                 INSERT INTO records VALUES(11,10,'report.pdf','pdf',0,4096,1);",
             )
             .unwrap();
         drop(snapshot);
@@ -1680,7 +1797,14 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(metadata_level, "names_only");
+        assert_eq!(metadata_level, "estimated");
+        let summary = FileIndex::new(&base)
+            .unwrap()
+            .summarize_usage("C:/", 10, false)
+            .unwrap();
+        assert_eq!(summary.accuracy, "estimated");
+        assert_eq!(summary.total_size_bytes, 4096);
+        assert_eq!(summary.missing_size_count, 0);
         assert_eq!(
             load_journal_checkpoints(&index_db).unwrap(),
             vec![checkpoint]

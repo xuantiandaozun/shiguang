@@ -96,6 +96,52 @@ pub struct ChatMsg {
     pub created_at: String,
 }
 
+/// 一次主代理工具调用。通过 request_message_id / response_message_id 与原聊天消息组成完整调用链。
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolCallRecord {
+    pub id: i64,
+    pub session_id: i64,
+    pub request_message_id: i64,
+    pub response_message_id: Option<i64>,
+    pub round_index: i64,
+    pub call_index: i64,
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub arguments_json: String,
+    pub result_json: Option<String>,
+    pub status: String,
+    pub assistant_content: String,
+    pub reasoning_content: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub session_title: String,
+    pub request_content: String,
+    pub response_content: Option<String>,
+}
+
+fn tool_call_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCallRecord> {
+    Ok(ToolCallRecord {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        request_message_id: row.get(2)?,
+        response_message_id: row.get(3)?,
+        round_index: row.get(4)?,
+        call_index: row.get(5)?,
+        tool_call_id: row.get(6)?,
+        tool_name: row.get(7)?,
+        arguments_json: row.get(8)?,
+        result_json: row.get(9)?,
+        status: row.get(10)?,
+        assistant_content: row.get(11)?,
+        reasoning_content: row.get(12)?,
+        started_at: row.get(13)?,
+        completed_at: row.get(14)?,
+        session_title: row.get(15)?,
+        request_content: row.get(16)?,
+        response_content: row.get(17)?,
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionInfo {
     pub id: i64,
@@ -203,6 +249,33 @@ impl Db {
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS chat_tool_calls(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_id INTEGER NOT NULL,
+              request_message_id INTEGER NOT NULL,
+              response_message_id INTEGER,
+              round_index INTEGER NOT NULL,
+              call_index INTEGER NOT NULL,
+              tool_call_id TEXT NOT NULL,
+              tool_name TEXT NOT NULL,
+              arguments_json TEXT NOT NULL,
+              result_json TEXT,
+              status TEXT NOT NULL CHECK(status IN ('running', 'done', 'error')),
+              assistant_content TEXT NOT NULL DEFAULT '',
+              reasoning_content TEXT NOT NULL DEFAULT '',
+              started_at TEXT NOT NULL,
+              completed_at TEXT,
+              FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE,
+              FOREIGN KEY(request_message_id) REFERENCES chat_messages(id) ON DELETE CASCADE,
+              FOREIGN KEY(response_message_id) REFERENCES chat_messages(id) ON DELETE SET NULL,
+              UNIQUE(request_message_id, round_index, call_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_tool_calls_session_id
+              ON chat_tool_calls(session_id, id);
+            CREATE INDEX IF NOT EXISTS idx_chat_tool_calls_request_message_id
+              ON chat_tool_calls(request_message_id, round_index, call_index);
+            CREATE INDEX IF NOT EXISTS idx_chat_tool_calls_tool_name
+              ON chat_tool_calls(tool_name, id);
             CREATE TABLE IF NOT EXISTS workflows(
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               site TEXT NOT NULL DEFAULT '',
@@ -236,6 +309,20 @@ impl Db {
         if !cols.iter().any(|c| c == "session_id") {
             conn.execute_batch(
                 "ALTER TABLE chat_messages ADD COLUMN session_id INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        // Preserve reasoning content needed to reconstruct provider-specific tool rounds.
+        let tool_call_cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(chat_tool_calls)")?;
+            let collected = stmt
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            collected
+        };
+        if !tool_call_cols.iter().any(|c| c == "reasoning_content") {
+            conn.execute_batch(
+                "ALTER TABLE chat_tool_calls
+                 ADD COLUMN reasoning_content TEXT NOT NULL DEFAULT '';",
             )?;
         }
         // 老库迁移：todos 增加 remind_mode 列
@@ -885,6 +972,164 @@ impl Db {
         Ok(rows)
     }
 
+    /// 执行工具前先写入 running 记录。如果触发消息不属于该会话，拒绝执行，
+    /// 避免工具动作已发生却无法和对话对应。
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_tool_call(
+        &self,
+        session_id: i64,
+        request_message_id: i64,
+        round_index: usize,
+        call_index: usize,
+        tool_call_id: &str,
+        tool_name: &str,
+        arguments_json: &str,
+        assistant_content: &str,
+        reasoning_content: &str,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "INSERT INTO chat_tool_calls(
+               session_id, request_message_id, round_index, call_index,
+               tool_call_id, tool_name, arguments_json, status, assistant_content,
+               reasoning_content, started_at
+             )
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running', ?8, ?9, ?10
+             FROM chat_messages
+             WHERE id=?2 AND session_id=?1 AND role='user'",
+            params![
+                session_id,
+                request_message_id,
+                round_index as i64,
+                call_index as i64,
+                tool_call_id,
+                tool_name,
+                arguments_json,
+                assistant_content,
+                reasoning_content,
+                now_str(),
+            ],
+        )?;
+        anyhow::ensure!(changed == 1, "工具调用无法关联到当前用户消息");
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// 工具返回后落库完整结果；失败结果同样保留，便于之后复盘。
+    pub fn finish_tool_call(&self, id: i64, status: &str, result_json: &str) -> Result<()> {
+        anyhow::ensure!(matches!(status, "done" | "error"), "无效工具状态");
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE chat_tool_calls
+             SET status=?1, result_json=?2, completed_at=?3
+             WHERE id=?4 AND status='running'",
+            params![status, result_json, now_str(), id],
+        )?;
+        anyhow::ensure!(changed == 1, "工具调用记录不存在或已完成");
+        Ok(())
+    }
+
+    /// 最终 AI 回复落库后，把该用户请求下的所有工具调用关联到回复消息。
+    pub fn link_tool_calls_response(
+        &self,
+        session_id: i64,
+        request_message_id: i64,
+        response_message_id: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let valid_response: bool = conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM chat_messages
+               WHERE id=?1 AND session_id=?2 AND role='assistant'
+             )",
+            params![response_message_id, session_id],
+            |r| r.get(0),
+        )?;
+        anyhow::ensure!(valid_response, "工具调用无法关联到最终 AI 回复");
+        conn.execute(
+            "UPDATE chat_tool_calls SET response_message_id=?1
+             WHERE session_id=?2 AND request_message_id=?3",
+            params![response_message_id, session_id, request_message_id],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn query_tool_calls(
+        &self,
+        session_id: Option<i64>,
+        tool_name: Option<&str>,
+        status: Option<&str>,
+        query: Option<&str>,
+        before_id: Option<i64>,
+        limit: usize,
+        include_history_queries: bool,
+    ) -> Result<Vec<ToolCallRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let query_pattern = query.map(|value| format!("%{}%", value));
+        let include_history_queries = if include_history_queries { 1 } else { 0 };
+        let mut stmt = conn.prepare(
+            "SELECT
+               t.id, t.session_id, t.request_message_id, t.response_message_id,
+               t.round_index, t.call_index, t.tool_call_id, t.tool_name,
+               t.arguments_json, t.result_json, t.status, t.assistant_content,
+               t.reasoning_content, t.started_at, t.completed_at, s.title,
+               req.content, resp.content
+             FROM chat_tool_calls t
+             JOIN chat_sessions s ON s.id=t.session_id
+             JOIN chat_messages req ON req.id=t.request_message_id
+             LEFT JOIN chat_messages resp ON resp.id=t.response_message_id
+             WHERE (?1 IS NULL OR t.session_id=?1)
+               AND (?2 IS NULL OR t.tool_name=?2)
+               AND (?3 IS NULL OR t.status=?3)
+               AND (?4 IS NULL OR t.id<?4)
+               AND (?5 IS NULL
+                    OR t.tool_name LIKE ?5
+                    OR t.arguments_json LIKE ?5
+                    OR COALESCE(t.result_json, '') LIKE ?5
+                    OR req.content LIKE ?5
+                    OR COALESCE(resp.content, '') LIKE ?5)
+               AND (?6=1 OR t.tool_name<>'get_tool_call_history')
+             ORDER BY t.id DESC
+             LIMIT ?7",
+        )?;
+        let mapped = stmt.query_map(
+            params![
+                session_id,
+                tool_name,
+                status,
+                before_id,
+                query_pattern,
+                include_history_queries,
+                limit.clamp(1, 100) as i64,
+            ],
+            tool_call_record_from_row,
+        )?;
+        let mut rows: Vec<ToolCallRecord> = mapped.collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.reverse();
+        Ok(rows)
+    }
+
+    pub fn get_tool_call(&self, id: i64) -> Result<Option<ToolCallRecord>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT
+               t.id, t.session_id, t.request_message_id, t.response_message_id,
+               t.round_index, t.call_index, t.tool_call_id, t.tool_name,
+               t.arguments_json, t.result_json, t.status, t.assistant_content,
+               t.reasoning_content, t.started_at, t.completed_at, s.title,
+               req.content, resp.content
+             FROM chat_tool_calls t
+             JOIN chat_sessions s ON s.id=t.session_id
+             JOIN chat_messages req ON req.id=t.request_message_id
+             LEFT JOIN chat_messages resp ON resp.id=t.response_message_id
+             WHERE t.id=?1",
+            params![id],
+            tool_call_record_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn clear_chat(&self, session_id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -1080,5 +1325,177 @@ impl Db {
             })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+}
+
+#[cfg(test)]
+mod tool_call_tests {
+    use super::*;
+
+    fn test_db() -> (Db, std::path::PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("shiguang-tool-history-{}.db", uuid::Uuid::new_v4()));
+        (Db::new(&path).unwrap(), path)
+    }
+
+    fn cleanup(db: Db, path: &Path) {
+        drop(db);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn tool_calls_keep_order_and_link_both_chat_messages() {
+        let (db, path) = test_db();
+        let session_id = db.current_session_id().unwrap();
+        let request_id = db
+            .save_chat(session_id, "user", "打开网页并完成设置")
+            .unwrap();
+
+        let failed_id = db
+            .start_tool_call(
+                session_id,
+                request_id,
+                0,
+                0,
+                "call-1",
+                "browser_click",
+                r#"{"ref":12}"#,
+                "",
+                "",
+            )
+            .unwrap();
+        db.finish_tool_call(failed_id, "error", r#"{"error":"元素已失效"}"#)
+            .unwrap();
+
+        let recovered_id = db
+            .start_tool_call(
+                session_id,
+                request_id,
+                1,
+                0,
+                "call-2",
+                "browser_snapshot",
+                "{}",
+                "我先重新观察页面。",
+                "先判断原 ref 已失效。",
+            )
+            .unwrap();
+        db.finish_tool_call(recovered_id, "done", r#"{"ok":true,"ref":27}"#)
+            .unwrap();
+
+        let response_id = db
+            .save_chat(session_id, "assistant", "已重新定位控件并完成设置。")
+            .unwrap();
+        db.link_tool_calls_response(session_id, request_id, response_id)
+            .unwrap();
+
+        let calls = db
+            .query_tool_calls(Some(session_id), None, None, None, None, 20, false)
+            .unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, failed_id);
+        assert_eq!(calls[0].status, "error");
+        assert_eq!(calls[1].id, recovered_id);
+        assert_eq!(calls[1].status, "done");
+        assert_eq!(calls[1].request_message_id, request_id);
+        assert_eq!(calls[1].response_message_id, Some(response_id));
+        assert_eq!(calls[1].request_content, "打开网页并完成设置");
+        assert_eq!(
+            calls[1].response_content.as_deref(),
+            Some("已重新定位控件并完成设置。")
+        );
+
+        let exact = db.get_tool_call(failed_id).unwrap().unwrap();
+        assert_eq!(
+            exact.result_json.as_deref(),
+            Some(r#"{"error":"元素已失效"}"#)
+        );
+
+        cleanup(db, &path);
+    }
+
+    #[test]
+    fn recalling_request_cascades_to_its_tool_history() {
+        let (db, path) = test_db();
+        let session_id = db.current_session_id().unwrap();
+        let request_id = db.save_chat(session_id, "user", "测试撤回").unwrap();
+        let call_id = db
+            .start_tool_call(
+                session_id,
+                request_id,
+                0,
+                0,
+                "call-recall",
+                "browser_status",
+                "{}",
+                "",
+                "",
+            )
+            .unwrap();
+        db.finish_tool_call(call_id, "done", r#"{"ok":true}"#)
+            .unwrap();
+        let response_id = db.save_chat(session_id, "assistant", "完成").unwrap();
+        db.link_tool_calls_response(session_id, request_id, response_id)
+            .unwrap();
+
+        db.recall_message(request_id).unwrap();
+
+        assert!(db.get_tool_call(call_id).unwrap().is_none());
+        assert!(db.load_chat(session_id, 10).unwrap().is_empty());
+
+        cleanup(db, &path);
+    }
+
+    #[test]
+    fn clearing_chat_cascades_to_all_tool_history_in_the_session() {
+        let (db, path) = test_db();
+        let session_id = db.current_session_id().unwrap();
+        let request_id = db.save_chat(session_id, "user", "清空会话").unwrap();
+        let call_id = db
+            .start_tool_call(
+                session_id,
+                request_id,
+                0,
+                0,
+                "call-clear",
+                "browser_status",
+                "{}",
+                "",
+                "",
+            )
+            .unwrap();
+        db.finish_tool_call(call_id, "done", r#"{"ok":true}"#)
+            .unwrap();
+
+        db.clear_chat(session_id).unwrap();
+
+        assert!(db.get_tool_call(call_id).unwrap().is_none());
+        cleanup(db, &path);
+    }
+
+    #[test]
+    fn tool_call_requires_a_user_message_in_the_same_session() {
+        let (db, path) = test_db();
+        let session_id = db.current_session_id().unwrap();
+        let assistant_id = db
+            .save_chat(session_id, "assistant", "不是用户消息")
+            .unwrap();
+
+        let result = db.start_tool_call(
+            session_id,
+            assistant_id,
+            0,
+            0,
+            "call-invalid",
+            "browser_status",
+            "{}",
+            "",
+            "",
+        );
+
+        assert!(result.is_err());
+        cleanup(db, &path);
     }
 }

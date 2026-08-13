@@ -493,6 +493,7 @@ export default function ChatPanel() {
 /** 工具调用提示的友好文案（原始工具名 → 用户可读的进行式描述） */
 const TOOL_LABELS: Record<string, string> = {
   discover_capabilities: "发现所需能力",
+  get_tool_call_history: "查询工具调用历史",
   scan_desktop: "扫描目录",
   search_files: "搜索本机文件",
   read_file: "读取文件",

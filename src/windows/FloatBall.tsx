@@ -46,13 +46,6 @@ export default function FloatBall() {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
 
-    // 重启后窗口尺寸被 window-state 插件还原：宽度明显小于球径说明上次停在长条形态
-    Promise.all([win.outerSize(), win.scaleFactor()])
-      .then(([s, sc]) => {
-        if (!cancelled && s.width < BALL * sc * 0.8) switchMode("bar");
-      })
-      .catch(() => {});
-
     const evaluate = async (pos: PhysicalPosition, settling: boolean) => {
       const [mon, scale, size] = await Promise.all([
         currentMonitor(),
@@ -134,7 +127,19 @@ export default function FloatBall() {
       })
       .then((u) => {
         if (cancelled) u();
-        else unlisten = u;
+        else {
+          unlisten = u;
+          // window-state 对非 resizable 窗口的尺寸恢复不一定可靠，位置则会保留。
+          // 监听器就绪后立即用实际位置做一次“停放”判定，
+          // 这样重启时靠边的球会恢复为长条，旧版保存的长条尺寸也能兼容。
+          Promise.all([win.outerPosition(), win.outerSize(), win.scaleFactor()])
+            .then(([pos, size, scale]) => {
+              if (cancelled) return;
+              if (size.width < BALL * scale * 0.8) switchMode("bar");
+              handle(pos, true);
+            })
+            .catch(() => {});
+        }
       });
 
     return () => {
