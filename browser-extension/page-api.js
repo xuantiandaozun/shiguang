@@ -1,5 +1,6 @@
 // 拾光页面操作 API（单一实现，两个通道共用）：
-// - 浏览器扩展：由 background.js 通过 chrome.scripting 注入（隔离世界）
+// - 浏览器扩展 debugger：由 background.js 通过 chrome.debugger 注入（主世界，默认）
+// - 浏览器扩展 scripting：chrome.scripting 注入（隔离世界，debugger 无法附着时降级）
 // - CDP 通道：由桌面端 Rust 代码 include_str! 嵌入后通过 Page.evaluate 注入（主世界）
 // 幂等：同版本重复注入直接返回；版本升级时覆盖旧引用重新注入。
 //

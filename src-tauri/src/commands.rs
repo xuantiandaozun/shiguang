@@ -5,11 +5,34 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+/// 一套可切换的大模型接口配置（供应商 / Key / 模型）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmProfile {
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    #[serde(default)]
+    pub thinking_enabled: bool,
+    #[serde(default = "default_reasoning_effort")]
+    pub reasoning_effort: String,
+}
+
+fn default_reasoning_effort() -> String {
+    "high".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    /// 已保存的多套大模型配置；当前对话使用 active_llm_profile_id 那一套
+    #[serde(default)]
+    pub llm_profiles: Vec<LlmProfile>,
+    #[serde(default)]
+    pub active_llm_profile_id: String,
     pub organize_root: String,
     pub auto_organize: bool,
     pub autostart: bool,
@@ -115,12 +138,112 @@ pub fn load_settings(db: &Db) -> Settings {
         profile_phone: get("profile_phone", ""),
         profile_email: get("profile_email", ""),
         profile_city: get("profile_city", ""),
+        llm_profiles: Vec::new(),
+        active_llm_profile_id: String::new(),
         temp_path: default_temp_path(),
     };
     if let Some(new_root) = migrate_legacy_root(db, &desktop, &settings.organize_root) {
         settings.organize_root = new_root;
     }
+    hydrate_llm_profiles(db, &mut settings);
     settings
+}
+
+fn infer_provider_name(base_url: &str) -> String {
+    let u = base_url.to_lowercase();
+    if u.contains("deepseek") {
+        "DeepSeek".into()
+    } else if u.contains("dashscope") || u.contains("aliyuncs") {
+        "通义千问".into()
+    } else if u.contains("/coding") {
+        "火山 Coding Plan".into()
+    } else if u.contains("volces.com") || u.contains("volcengine") {
+        "火山 Agent Plan".into()
+    } else if u.contains("openai.com") {
+        "OpenAI".into()
+    } else if u.contains("bigmodel") {
+        "智谱 GLM".into()
+    } else if u.contains("moonshot") {
+        "Kimi".into()
+    } else if u.contains("siliconflow") {
+        "硅基流动".into()
+    } else if u.contains("openrouter") {
+        "OpenRouter".into()
+    } else if u.contains("minimax") {
+        "MiniMax".into()
+    } else if u.contains("hunyuan") {
+        "腾讯混元".into()
+    } else {
+        "当前配置".into()
+    }
+}
+
+fn apply_active_llm_profile(settings: &mut Settings) {
+    let id = settings.active_llm_profile_id.clone();
+    let Some(p) = settings.llm_profiles.iter().find(|p| p.id == id) else {
+        return;
+    };
+    settings.base_url = p.base_url.clone();
+    settings.api_key = p.api_key.clone();
+    settings.model = p.model.clone();
+    settings.thinking_enabled = p.thinking_enabled;
+    let effort = p.reasoning_effort.trim();
+    settings.reasoning_effort = match effort {
+        "low" | "high" | "max" => effort.to_string(),
+        _ => "high".to_string(),
+    };
+}
+
+/// 把旧的单套 base_url/api_key/model 迁成可切换档案；之后以档案为源，回写到生效字段。
+fn hydrate_llm_profiles(db: &Db, settings: &mut Settings) {
+    let raw = db
+        .get_setting("llm_profiles")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let mut profiles: Vec<LlmProfile> = if raw.trim().is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str(&raw).unwrap_or_default()
+    };
+    let stored_active = db
+        .get_setting("active_llm_profile_id")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
+    if profiles.is_empty() {
+        let id = "legacy".to_string();
+        profiles.push(LlmProfile {
+            id: id.clone(),
+            name: infer_provider_name(&settings.base_url),
+            base_url: settings.base_url.clone(),
+            api_key: settings.api_key.clone(),
+            model: settings.model.clone(),
+            thinking_enabled: settings.thinking_enabled,
+            reasoning_effort: settings.reasoning_effort.clone(),
+        });
+        settings.llm_profiles = profiles;
+        settings.active_llm_profile_id = id;
+        persist_llm_profiles(db, settings);
+        return;
+    }
+
+    settings.llm_profiles = profiles;
+    settings.active_llm_profile_id = if settings.llm_profiles.iter().any(|p| p.id == stored_active)
+    {
+        stored_active
+    } else {
+        settings.llm_profiles[0].id.clone()
+    };
+    apply_active_llm_profile(settings);
+}
+
+fn persist_llm_profiles(db: &Db, settings: &Settings) {
+    if let Ok(json) = serde_json::to_string(&settings.llm_profiles) {
+        let _ = db.set_setting("llm_profiles", &json);
+    }
+    let _ = db.set_setting("active_llm_profile_id", &settings.active_llm_profile_id);
 }
 
 fn default_temp_path() -> String {
@@ -308,13 +431,30 @@ pub fn stop_chat_message(state: State<AppState>) -> Result<(), String> {
     }
 }
 
+fn messages_for_ui(messages: Vec<ChatMsg>) -> Vec<ChatMsg> {
+    messages
+        .into_iter()
+        .filter_map(|mut msg| {
+            if msg.role != "user" {
+                msg.content = llm::agent::visible_assistant_content(&msg.content);
+                if msg.content.is_empty() {
+                    return None;
+                }
+            }
+            Some(msg)
+        })
+        .collect()
+}
+
 #[tauri::command]
 pub fn get_current_session(state: State<AppState>) -> Result<SessionView, String> {
     let session_id = state.db.current_session_id().map_err(|e| e.to_string())?;
-    let messages = state
-        .db
-        .load_chat(session_id, 50)
-        .map_err(|e| e.to_string())?;
+    let messages = messages_for_ui(
+        state
+            .db
+            .load_chat(session_id, 50)
+            .map_err(|e| e.to_string())?,
+    );
     Ok(SessionView {
         session_id,
         messages,
@@ -350,7 +490,7 @@ pub fn switch_session(
         .db
         .set_current_session(id)
         .map_err(|e| e.to_string())?;
-    let messages = state.db.load_chat(id, 50).map_err(|e| e.to_string())?;
+    let messages = messages_for_ui(state.db.load_chat(id, 50).map_err(|e| e.to_string())?);
     let _ = app.emit("sessions-changed", ());
     Ok(SessionView {
         session_id: id,
@@ -365,10 +505,12 @@ pub fn delete_session(
     id: i64,
 ) -> Result<SessionView, String> {
     let new_current = state.db.delete_session(id).map_err(|e| e.to_string())?;
-    let messages = state
-        .db
-        .load_chat(new_current, 50)
-        .map_err(|e| e.to_string())?;
+    let messages = messages_for_ui(
+        state
+            .db
+            .load_chat(new_current, 50)
+            .map_err(|e| e.to_string())?,
+    );
     let _ = app.emit("sessions-changed", ());
     Ok(SessionView {
         session_id: new_current,
@@ -384,10 +526,12 @@ pub fn recall_message(state: State<AppState>, id: i64) -> Result<(), String> {
 #[tauri::command]
 pub fn load_chat_history(state: State<AppState>) -> Result<Vec<ChatMsg>, String> {
     let session_id = state.db.current_session_id().map_err(|e| e.to_string())?;
-    state
-        .db
-        .load_chat(session_id, 50)
-        .map_err(|e| e.to_string())
+    Ok(messages_for_ui(
+        state
+            .db
+            .load_chat(session_id, 50)
+            .map_err(|e| e.to_string())?,
+    ))
 }
 
 #[tauri::command]
@@ -711,6 +855,28 @@ pub fn save_settings(
 ) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt;
     let db = &state.db;
+    let mut settings = settings;
+    if settings.llm_profiles.is_empty() {
+        settings.llm_profiles.push(LlmProfile {
+            id: "legacy".into(),
+            name: infer_provider_name(&settings.base_url),
+            base_url: settings.base_url.clone(),
+            api_key: settings.api_key.clone(),
+            model: settings.model.clone(),
+            thinking_enabled: settings.thinking_enabled,
+            reasoning_effort: settings.reasoning_effort.clone(),
+        });
+        settings.active_llm_profile_id = "legacy".into();
+    }
+    if !settings
+        .llm_profiles
+        .iter()
+        .any(|p| p.id == settings.active_llm_profile_id)
+    {
+        settings.active_llm_profile_id = settings.llm_profiles[0].id.clone();
+    }
+    apply_active_llm_profile(&mut settings);
+    persist_llm_profiles(db, &settings);
     for (k, v) in [
         ("base_url", settings.base_url.trim()),
         ("api_key", settings.api_key.trim()),
@@ -959,4 +1125,69 @@ pub fn sync_skills_cmd(
 #[tauri::command]
 pub fn read_skill_content(state: State<AppState>, name: String) -> Result<String, String> {
     state.skills.read_raw(&name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_llm_usage_stats(state: State<AppState>) -> Result<crate::db::LlmUsageSnapshot, String> {
+    state.db.llm_usage_snapshot().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod llm_profile_tests {
+    use super::*;
+    use crate::db::Db;
+
+    fn test_db() -> (Db, std::path::PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("shiguang-llm-profile-{}.db", uuid::Uuid::new_v4()));
+        (Db::new(&path).unwrap(), path)
+    }
+
+    fn cleanup(db: Db, path: &std::path::Path) {
+        drop(db);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn migrates_legacy_single_config_into_a_profile() {
+        let (db, path) = test_db();
+        db.set_setting("base_url", "https://api.deepseek.com/v1")
+            .unwrap();
+        db.set_setting("api_key", "sk-test").unwrap();
+        db.set_setting("model", "deepseek-chat").unwrap();
+
+        let s = load_settings(&db);
+        assert_eq!(s.llm_profiles.len(), 1);
+        assert_eq!(s.llm_profiles[0].name, "DeepSeek");
+        assert_eq!(s.llm_profiles[0].api_key, "sk-test");
+        assert_eq!(s.active_llm_profile_id, s.llm_profiles[0].id);
+        assert_eq!(s.base_url, "https://api.deepseek.com/v1");
+        assert_eq!(s.model, "deepseek-chat");
+        cleanup(db, &path);
+    }
+
+    #[test]
+    fn active_profile_overrides_flattened_fields() {
+        let (db, path) = test_db();
+        db.set_setting("base_url", "https://api.deepseek.com/v1")
+            .unwrap();
+        db.set_setting("api_key", "sk-old").unwrap();
+        db.set_setting("model", "deepseek-chat").unwrap();
+        db.set_setting(
+            "llm_profiles",
+            r#"[{"id":"a","name":"火山 Agent Plan","base_url":"https://ark.cn-beijing.volces.com/api/v3","api_key":"sk-ark","model":"doubao-seed-2.0-pro","thinking_enabled":false,"reasoning_effort":"high"},{"id":"b","name":"DeepSeek","base_url":"https://api.deepseek.com/v1","api_key":"sk-old","model":"deepseek-chat","thinking_enabled":true,"reasoning_effort":"high"}]"#,
+        )
+        .unwrap();
+        db.set_setting("active_llm_profile_id", "a").unwrap();
+
+        let s = load_settings(&db);
+        assert_eq!(s.active_llm_profile_id, "a");
+        assert_eq!(s.base_url, "https://ark.cn-beijing.volces.com/api/v3");
+        assert_eq!(s.api_key, "sk-ark");
+        assert_eq!(s.model, "doubao-seed-2.0-pro");
+        assert!(!s.thinking_enabled);
+        cleanup(db, &path);
+    }
 }

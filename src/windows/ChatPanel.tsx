@@ -8,12 +8,50 @@ import type { UiMessage } from "../stores/chat";
 import Markdown from "../components/Markdown";
 import appIcon from "../assets/app-icon.png";
 
-const mapRow = (r: ChatMsg): UiMessage => ({
-  id: `h-${r.id}`,
-  dbId: r.id,
-  role: r.role === "user" ? "user" : "assistant",
-  content: r.content,
-});
+const TOOL_DIGEST_MARKERS = [
+  "【中断前已完成的工具调用与结果】",
+  "【工具预算耗尽前已完成的工具调用与结果】",
+];
+
+function visibleAssistantContent(content: string): string {
+  let cut = content.length;
+  for (const marker of TOOL_DIGEST_MARKERS) {
+    const i = content.indexOf(marker);
+    if (i >= 0) cut = Math.min(cut, i);
+  }
+  let text = content.slice(0, cut).trimEnd();
+  for (const footer of [
+    "（回复被用户中断；以上资料已收集完毕，继续时请直接基于它们推进，不要重复收集）",
+    "（以上资料已收集完毕，用户说「继续」时请直接基于它们推进，不要重复收集）",
+  ]) {
+    const i = text.indexOf(footer);
+    if (i >= 0) text = text.slice(0, i).trimEnd();
+  }
+  if (
+    !text &&
+    (content.includes("【中断前已完成的工具调用与结果】") || content.includes("回复被用户中断"))
+  ) {
+    return "（已中断）";
+  }
+  return text;
+}
+
+const mapRow = (r: ChatMsg): UiMessage | null => {
+  const content = r.role === "user" ? r.content : visibleAssistantContent(r.content);
+  if (r.role !== "user" && !content) return null;
+  return {
+    id: `h-${r.id}`,
+    dbId: r.id,
+    role: r.role === "user" ? "user" : "assistant",
+    content,
+  };
+};
+
+const mapHistory = (rows: ChatMsg[]): UiMessage[] =>
+  rows.flatMap((r) => {
+    const m = mapRow(r);
+    return m ? [m] : [];
+  });
 
 const fileName = (p: string) => p.replace(/\\/g, "/").split("/").pop() || p;
 
@@ -161,27 +199,31 @@ export default function ChatPanel() {
     });
     add("sessions-changed", refreshSessions);
 
-    Promise.all([
-      ipc.getCurrentSession().catch(() => null),
-      ipc.getPendingPlan().catch(() => null),
-    ]).then(([view, plan]) => {
-      if (view) {
-        setCurrentSessionId(view.session_id);
-        const msgs: UiMessage[] = view.messages.map(mapRow);
-        if (plan) {
-          setPendingPlan(plan);
-          msgs.push({
-            id: "pending-plan",
-            role: "assistant",
-            content: "你还有一个待确认的整理方案：",
-            plan,
-          });
-        }
-        if (msgs.length > 0) setMessages(msgs);
-      } else if (plan) {
-        setPendingPlan(plan);
-      }
-    });
+    const hydrate = (attempt = 0) => {
+      Promise.all([ipc.getCurrentSession(), ipc.getPendingPlan().catch(() => null)])
+        .then(([view, plan]) => {
+          if (disposed) return;
+          setCurrentSessionId(view.session_id);
+          const msgs: UiMessage[] = mapHistory(view.messages);
+          if (plan) {
+            setPendingPlan(plan);
+            msgs.push({
+              id: "pending-plan",
+              role: "assistant",
+              content: "你还有一个待确认的整理方案：",
+              plan,
+            });
+          } else {
+            setPendingPlan(null);
+          }
+          setMessages(msgs);
+        })
+        .catch(() => {
+          if (disposed || attempt >= 20) return;
+          window.setTimeout(() => hydrate(attempt + 1), 100);
+        });
+    };
+    hydrate();
     refreshSessions();
 
     return () => {
@@ -259,7 +301,7 @@ export default function ChatPanel() {
     try {
       const view = await ipc.switchSession(id);
       setCurrentSessionId(view.session_id);
-      setMessages(view.messages.map(mapRow));
+      setMessages(mapHistory(view.messages));
       setShowSessions(false);
     } catch (e) {
       addMessage({ role: "system", content: `切换会话失败：${String(e)}` });
@@ -271,7 +313,7 @@ export default function ChatPanel() {
       const view = await ipc.deleteSession(id);
       if (id === currentSessionId) {
         setCurrentSessionId(view.session_id);
-        setMessages(view.messages.map(mapRow));
+        setMessages(mapHistory(view.messages));
         setPendingPlan(null);
       }
       refreshSessions();
@@ -529,9 +571,11 @@ const TOOL_LABELS: Record<string, string> = {
   run_subagent: "子代理处理子任务",
   run_command: "执行命令",
   run_command_background: "后台执行命令",
+  await_task: "等待任务结束",
   check_task: "查询后台任务",
   list_tasks: "列出后台任务",
   stop_task: "停止后台任务",
+  lookup_cache: "读写参考缓存",
   get_system_info: "查询本机信息",
   list_skills: "列出 Skills",
   load_skill: "加载 Skill",

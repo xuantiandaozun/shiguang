@@ -3,10 +3,12 @@
 
 pub mod browser;
 pub mod builtin_skills;
+pub mod cli_json;
 pub mod commands;
 pub mod db;
 pub mod file_index;
 pub mod llm;
+pub mod lookup_cache;
 pub mod machine;
 pub mod ntfs_helper;
 pub mod ntfs_usn;
@@ -42,6 +44,8 @@ pub struct AppState {
     pub file_index: file_index::FileIndex,
     /// Agent Skills（app_data/skills/）
     pub skills: skills::SkillStore,
+    /// 外部 CLI/API 的稳定对照数据缓存
+    pub lookup_cache: lookup_cache::LookupCache,
 }
 
 pub fn notify_user(app: &tauri::AppHandle, title: &str, body: &str) {
@@ -120,7 +124,15 @@ pub fn run() {
                 tasks: tasks::TaskManager::new(&app_dir),
                 file_index: file_index::FileIndex::new(&app_dir)?,
                 skills: skills::SkillStore::new(&app_dir),
+                lookup_cache: lookup_cache::LookupCache::new(&app_dir),
             });
+            // 每次进程启动开空白会话（已有空会话则复用），与聊天窗欢迎态一致。
+            {
+                let state = app.state::<AppState>();
+                if let Err(e) = state.db.start_fresh_session_if_needed() {
+                    log::warn!("启动时创建新会话失败: {}", e);
+                }
+            }
             // Catch up NTFS changes that occurred while the app was closed.
             // This runs in the background; the previous index remains searchable.
             app.state::<AppState>().file_index.recover_usn_async();
@@ -186,6 +198,7 @@ pub fn run() {
             commands::scan_external_skills,
             commands::sync_skills_cmd,
             commands::read_skill_content,
+            commands::get_llm_usage_stats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running shiguang");

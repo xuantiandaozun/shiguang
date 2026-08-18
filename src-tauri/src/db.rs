@@ -119,6 +119,21 @@ pub struct ToolCallRecord {
     pub response_content: Option<String>,
 }
 
+/// 回放到下一轮 LLM messages 的精简工具记录（不含会话标题等展示字段）。
+#[derive(Debug, Clone)]
+pub struct ToolCallReplay {
+    pub request_message_id: i64,
+    pub round_index: i64,
+    pub call_index: i64,
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub arguments_json: String,
+    pub result_json: Option<String>,
+    pub status: String,
+    pub assistant_content: String,
+    pub reasoning_content: String,
+}
+
 fn tool_call_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCallRecord> {
     Ok(ToolCallRecord {
         id: row.get(0)?,
@@ -140,6 +155,66 @@ fn tool_call_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCa
         request_content: row.get(16)?,
         response_content: row.get(17)?,
     })
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct LlmUsageTotals {
+    pub requests: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub cache_hit_tokens: i64,
+    pub cache_miss_tokens: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LlmUsageBySource {
+    pub source: String,
+    pub requests: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub cache_hit_tokens: i64,
+    pub cache_miss_tokens: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LlmUsageDay {
+    pub day: String,
+    pub requests: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub cache_hit_tokens: i64,
+    pub cache_miss_tokens: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct LlmUsagePeriod {
+    pub totals: LlmUsageTotals,
+    pub by_source: Vec<LlmUsageBySource>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LlmUsageSnapshot {
+    pub today: LlmUsagePeriod,
+    pub last_7d: LlmUsagePeriod,
+    pub all: LlmUsagePeriod,
+    pub daily: Vec<LlmUsageDay>,
+    pub recent: Vec<LlmUsageRequest>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LlmUsageRequest {
+    pub id: i64,
+    pub source: String,
+    pub model: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub cache_hit_tokens: i64,
+    pub cache_miss_tokens: i64,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -294,6 +369,21 @@ impl Db {
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS llm_usage(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              source TEXT NOT NULL,
+              model TEXT NOT NULL DEFAULT '',
+              prompt_tokens INTEGER NOT NULL DEFAULT 0,
+              completion_tokens INTEGER NOT NULL DEFAULT 0,
+              total_tokens INTEGER NOT NULL DEFAULT 0,
+              cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
+              cache_miss_tokens INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_llm_usage_created_at
+              ON llm_usage(created_at);
+            CREATE INDEX IF NOT EXISTS idx_llm_usage_source
+              ON llm_usage(source, created_at);
             "#,
         )?;
 
@@ -860,6 +950,26 @@ impl Db {
         self.set_setting("current_session_id", &id.to_string())
     }
 
+    /// 应用冷启动：当前会话已有消息则新开空白会话。
+    /// 上次对话仍留在历史列表，避免界面是空的、模型却带着旧上下文。
+    pub fn start_fresh_session_if_needed(&self) -> Result<i64> {
+        let current = self.current_session_id()?;
+        let n: i64 = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_messages WHERE session_id=?1",
+                params![current],
+                |r| r.get(0),
+            )?
+        };
+        if n == 0 {
+            return Ok(current);
+        }
+        let id = self.create_session()?;
+        self.set_current_session(id)?;
+        Ok(id)
+    }
+
     /// 用首条用户消息为未命名会话生成标题
     pub fn auto_title_session(&self, id: i64, first_text: &str) -> Result<()> {
         let title: String = first_text.chars().take(16).collect();
@@ -1109,6 +1219,49 @@ impl Db {
         Ok(rows)
     }
 
+    /// 按用户消息 id 取出工具调用，供下一轮对话按协议回放（assistant.tool_calls + role=tool）。
+    pub fn load_tool_calls_for_messages(
+        &self,
+        session_id: i64,
+        request_message_ids: &[i64],
+    ) -> Result<Vec<ToolCallReplay>> {
+        if request_message_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let placeholders = vec!["?"; request_message_ids.len()].join(",");
+        let sql = format!(
+            "SELECT request_message_id, round_index, call_index, tool_call_id, tool_name,
+                    arguments_json, result_json, status, assistant_content, reasoning_content
+             FROM chat_tool_calls
+             WHERE session_id=? AND request_message_id IN ({placeholders})
+             ORDER BY request_message_id, round_index, call_index, id"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut params: Vec<&dyn rusqlite::ToSql> =
+            Vec::with_capacity(request_message_ids.len() + 1);
+        params.push(&session_id);
+        for id in request_message_ids {
+            params.push(id);
+        }
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            Ok(ToolCallReplay {
+                request_message_id: r.get(0)?,
+                round_index: r.get(1)?,
+                call_index: r.get(2)?,
+                tool_call_id: r.get(3)?,
+                tool_name: r.get(4)?,
+                arguments_json: r.get(5)?,
+                result_json: r.get(6)?,
+                status: r.get(7)?,
+                assistant_content: r.get(8)?,
+                reasoning_content: r.get(9)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     pub fn get_tool_call(&self, id: i64) -> Result<Option<ToolCallRecord>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
@@ -1326,6 +1479,217 @@ impl Db {
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
+
+    // ---------- LLM 用量 ----------
+
+    pub fn insert_llm_usage(
+        &self,
+        source: &str,
+        model: &str,
+        prompt_tokens: i64,
+        completion_tokens: i64,
+        total_tokens: i64,
+        cache_hit_tokens: i64,
+        cache_miss_tokens: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO llm_usage(
+                source, model, prompt_tokens, completion_tokens, total_tokens,
+                cache_hit_tokens, cache_miss_tokens, created_at
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                source,
+                model,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                cache_hit_tokens,
+                cache_miss_tokens,
+                now_str()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn llm_usage_snapshot(&self) -> Result<LlmUsageSnapshot> {
+        let today = chrono::Local::now().date_naive();
+        let today_start = format!("{} 00:00:00", today.format("%Y-%m-%d"));
+        let week_start = format!(
+            "{} 00:00:00",
+            (today - chrono::Duration::days(6)).format("%Y-%m-%d")
+        );
+        let daily_start = format!(
+            "{} 00:00:00",
+            (today - chrono::Duration::days(13)).format("%Y-%m-%d")
+        );
+        Ok(LlmUsageSnapshot {
+            today: self.llm_usage_period(Some(&today_start))?,
+            last_7d: self.llm_usage_period(Some(&week_start))?,
+            all: self.llm_usage_period(None)?,
+            daily: self.llm_usage_daily(&daily_start, today)?,
+            recent: self.llm_usage_recent(20)?,
+        })
+    }
+
+    fn llm_usage_period(&self, since: Option<&str>) -> Result<LlmUsagePeriod> {
+        Ok(LlmUsagePeriod {
+            totals: self.llm_usage_totals(since)?,
+            by_source: self.llm_usage_by_source(since)?,
+        })
+    }
+
+    fn llm_usage_totals(&self, since: Option<&str>) -> Result<LlmUsageTotals> {
+        let conn = self.conn.lock().unwrap();
+        let row = match since {
+            Some(ts) => conn.query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(prompt_tokens), 0),
+                        COALESCE(SUM(completion_tokens), 0),
+                        COALESCE(SUM(total_tokens), 0),
+                        COALESCE(SUM(cache_hit_tokens), 0),
+                        COALESCE(SUM(cache_miss_tokens), 0)
+                 FROM llm_usage WHERE created_at >= ?1",
+                params![ts],
+                Self::row_to_usage_totals,
+            )?,
+            None => conn.query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(prompt_tokens), 0),
+                        COALESCE(SUM(completion_tokens), 0),
+                        COALESCE(SUM(total_tokens), 0),
+                        COALESCE(SUM(cache_hit_tokens), 0),
+                        COALESCE(SUM(cache_miss_tokens), 0)
+                 FROM llm_usage",
+                [],
+                Self::row_to_usage_totals,
+            )?,
+        };
+        Ok(row)
+    }
+
+    fn row_to_usage_totals(row: &rusqlite::Row) -> rusqlite::Result<LlmUsageTotals> {
+        Ok(LlmUsageTotals {
+            requests: row.get(0)?,
+            prompt_tokens: row.get(1)?,
+            completion_tokens: row.get(2)?,
+            total_tokens: row.get(3)?,
+            cache_hit_tokens: row.get(4)?,
+            cache_miss_tokens: row.get(5)?,
+        })
+    }
+
+    fn llm_usage_by_source(&self, since: Option<&str>) -> Result<Vec<LlmUsageBySource>> {
+        let conn = self.conn.lock().unwrap();
+        let sql_all = "SELECT source,
+                COUNT(*),
+                COALESCE(SUM(prompt_tokens), 0),
+                COALESCE(SUM(completion_tokens), 0),
+                COALESCE(SUM(total_tokens), 0),
+                COALESCE(SUM(cache_hit_tokens), 0),
+                COALESCE(SUM(cache_miss_tokens), 0)
+         FROM llm_usage GROUP BY source ORDER BY SUM(total_tokens) DESC";
+        let sql_since = "SELECT source,
+                COUNT(*),
+                COALESCE(SUM(prompt_tokens), 0),
+                COALESCE(SUM(completion_tokens), 0),
+                COALESCE(SUM(total_tokens), 0),
+                COALESCE(SUM(cache_hit_tokens), 0),
+                COALESCE(SUM(cache_miss_tokens), 0)
+         FROM llm_usage WHERE created_at >= ?1
+         GROUP BY source ORDER BY SUM(total_tokens) DESC";
+        let map_row = |r: &rusqlite::Row| {
+            Ok(LlmUsageBySource {
+                source: r.get(0)?,
+                requests: r.get(1)?,
+                prompt_tokens: r.get(2)?,
+                completion_tokens: r.get(3)?,
+                total_tokens: r.get(4)?,
+                cache_hit_tokens: r.get(5)?,
+                cache_miss_tokens: r.get(6)?,
+            })
+        };
+        let rows = if let Some(ts) = since {
+            let mut stmt = conn.prepare(sql_since)?;
+            let mapped = stmt.query_map(params![ts], map_row)?;
+            mapped.filter_map(|r| r.ok()).collect()
+        } else {
+            let mut stmt = conn.prepare(sql_all)?;
+            let mapped = stmt.query_map([], map_row)?;
+            mapped.filter_map(|r| r.ok()).collect()
+        };
+        Ok(rows)
+    }
+
+    fn llm_usage_daily(&self, since: &str, today: chrono::NaiveDate) -> Result<Vec<LlmUsageDay>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT substr(created_at, 1, 10),
+                    COUNT(*),
+                    COALESCE(SUM(prompt_tokens), 0),
+                    COALESCE(SUM(completion_tokens), 0),
+                    COALESCE(SUM(total_tokens), 0),
+                    COALESCE(SUM(cache_hit_tokens), 0),
+                    COALESCE(SUM(cache_miss_tokens), 0)
+             FROM llm_usage WHERE created_at >= ?1
+             GROUP BY substr(created_at, 1, 10)",
+        )?;
+        let mapped = stmt.query_map(params![since], |r| {
+            Ok(LlmUsageDay {
+                day: r.get(0)?,
+                requests: r.get(1)?,
+                prompt_tokens: r.get(2)?,
+                completion_tokens: r.get(3)?,
+                total_tokens: r.get(4)?,
+                cache_hit_tokens: r.get(5)?,
+                cache_miss_tokens: r.get(6)?,
+            })
+        })?;
+        let mut by_day: std::collections::HashMap<String, LlmUsageDay> = mapped
+            .filter_map(|r| r.ok())
+            .map(|d| (d.day.clone(), d))
+            .collect();
+        let start = today - chrono::Duration::days(13);
+        let mut days = Vec::with_capacity(14);
+        for offset in 0..14 {
+            let day = (start + chrono::Duration::days(offset))
+                .format("%Y-%m-%d")
+                .to_string();
+            days.push(by_day.remove(&day).unwrap_or(LlmUsageDay {
+                day: day.clone(),
+                requests: 0,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                cache_hit_tokens: 0,
+                cache_miss_tokens: 0,
+            }));
+        }
+        Ok(days)
+    }
+
+    fn llm_usage_recent(&self, limit: usize) -> Result<Vec<LlmUsageRequest>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, source, model, prompt_tokens, completion_tokens, total_tokens,
+                    cache_hit_tokens, cache_miss_tokens, created_at
+             FROM llm_usage ORDER BY id DESC LIMIT ?1",
+        )?;
+        let mapped = stmt.query_map(params![limit.clamp(1, 50) as i64], |r| {
+            Ok(LlmUsageRequest {
+                id: r.get(0)?,
+                source: r.get(1)?,
+                model: r.get(2)?,
+                prompt_tokens: r.get(3)?,
+                completion_tokens: r.get(4)?,
+                total_tokens: r.get(5)?,
+                cache_hit_tokens: r.get(6)?,
+                cache_miss_tokens: r.get(7)?,
+                created_at: r.get(8)?,
+            })
+        })?;
+        Ok(mapped.filter_map(|r| r.ok()).collect())
+    }
 }
 
 #[cfg(test)]
@@ -1413,6 +1777,20 @@ mod tool_call_tests {
             Some(r#"{"error":"元素已失效"}"#)
         );
 
+        let replay = db
+            .load_tool_calls_for_messages(session_id, &[request_id])
+            .unwrap();
+        assert_eq!(replay.len(), 2);
+        assert_eq!(replay[0].tool_name, "browser_click");
+        assert_eq!(replay[0].round_index, 0);
+        assert_eq!(replay[1].tool_name, "browser_snapshot");
+        assert_eq!(replay[1].round_index, 1);
+        assert_eq!(replay[1].reasoning_content, "先判断原 ref 已失效。");
+        assert!(db
+            .load_tool_calls_for_messages(session_id, &[])
+            .unwrap()
+            .is_empty());
+
         cleanup(db, &path);
     }
 
@@ -1496,6 +1874,90 @@ mod tool_call_tests {
         );
 
         assert!(result.is_err());
+        cleanup(db, &path);
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    fn test_db() -> (Db, std::path::PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("shiguang-session-{}.db", uuid::Uuid::new_v4()));
+        (Db::new(&path).unwrap(), path)
+    }
+
+    fn cleanup(db: Db, path: &Path) {
+        drop(db);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn launch_opens_fresh_session_when_last_one_has_messages() {
+        let (db, path) = test_db();
+        let old = db.current_session_id().unwrap();
+        db.save_chat(old, "user", "昨天的对话").unwrap();
+
+        let fresh = db.start_fresh_session_if_needed().unwrap();
+        assert_ne!(fresh, old);
+        assert!(db.load_chat(fresh, 10).unwrap().is_empty());
+        assert_eq!(db.current_session_id().unwrap(), fresh);
+        assert_eq!(db.load_chat(old, 10).unwrap().len(), 1);
+
+        let again = db.start_fresh_session_if_needed().unwrap();
+        assert_eq!(again, fresh);
+        cleanup(db, &path);
+    }
+}
+
+#[cfg(test)]
+mod llm_usage_tests {
+    use super::*;
+
+    fn test_db() -> (Db, std::path::PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("shiguang-llm-usage-{}.db", uuid::Uuid::new_v4()));
+        (Db::new(&path).unwrap(), path)
+    }
+
+    fn cleanup(db: Db, path: &Path) {
+        drop(db);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn usage_snapshot_aggregates_tokens_and_cache() {
+        let (db, path) = test_db();
+        db.insert_llm_usage("chat", "deepseek-chat", 1000, 80, 1080, 800, 200)
+            .unwrap();
+        db.insert_llm_usage("subagent", "deepseek-chat", 400, 20, 420, 300, 100)
+            .unwrap();
+        db.insert_llm_usage("vision", "qwen-vl-max", 200, 50, 250, 0, 200)
+            .unwrap();
+
+        let snap = db.llm_usage_snapshot().unwrap();
+        assert_eq!(snap.all.totals.requests, 3);
+        assert_eq!(snap.all.totals.prompt_tokens, 1600);
+        assert_eq!(snap.all.totals.completion_tokens, 150);
+        assert_eq!(snap.all.totals.total_tokens, 1750);
+        assert_eq!(snap.all.totals.cache_hit_tokens, 1100);
+        assert_eq!(snap.all.totals.cache_miss_tokens, 500);
+        assert_eq!(snap.today.totals.requests, 3);
+        assert_eq!(snap.last_7d.totals.total_tokens, 1750);
+        assert_eq!(snap.all.by_source.len(), 3);
+        assert_eq!(snap.all.by_source[0].source, "chat");
+        assert_eq!(snap.daily.len(), 14);
+        assert_eq!(snap.daily.last().unwrap().requests, 3);
+        assert_eq!(snap.recent.len(), 3);
+        assert_eq!(snap.recent[0].source, "vision");
+        assert_eq!(snap.recent[0].cache_hit_tokens, 0);
+        assert_eq!(snap.recent[2].source, "chat");
+
         cleanup(db, &path);
     }
 }

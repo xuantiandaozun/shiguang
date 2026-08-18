@@ -7,11 +7,13 @@ use base64::Engine as _;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
+use tokio_util::sync::CancellationToken;
 
 /// check_task 默认返回的尾部字符数
 const DEFAULT_TAIL_CHARS: usize = 2000;
@@ -363,6 +365,23 @@ impl TaskManager {
         Ok((join_head_tail(&head, &tail), true))
     }
 
+    /// 从日志开头读取解码后的文本，供 JSON 解析使用（JSON 不能从尾部截取）。
+    pub fn read_decoded(&self, id: &str, max_bytes: u64) -> Result<(String, bool)> {
+        let info = self.get(id).ok_or_else(|| anyhow!("任务不存在: {}", id))?;
+        let meta_len = std::fs::metadata(&info.log_path)?.len();
+        let truncated = meta_len > max_bytes;
+        let bytes = if truncated {
+            let mut file = std::fs::File::open(&info.log_path)?;
+            let mut buf = vec![0u8; max_bytes as usize];
+            let n = file.read(&mut buf)?;
+            buf.truncate(n);
+            buf
+        } else {
+            std::fs::read(&info.log_path)?
+        };
+        Ok((decode_log(&bytes), truncated))
+    }
+
     /// 读取日志中含 pattern 的最近若干行（最多回读 2MB）
     pub fn grep(&self, id: &str, pattern: &str) -> Result<Vec<String>> {
         let info = self.get(id).ok_or_else(|| anyhow!("任务不存在: {}", id))?;
@@ -407,6 +426,40 @@ impl TaskManager {
                 return Ok(cur);
             }
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    }
+
+    /// 挂起直到后台任务结束、等待超时或用户中断。等待期间不消耗模型工具轮次。
+    /// 等待超时不杀进程；用户中断对话时会停止该任务。
+    pub async fn wait_for(
+        &self,
+        app: &AppHandle,
+        id: &str,
+        timeout_secs: u64,
+        cancel: &CancellationToken,
+    ) -> Result<(TaskInfo, &'static str)> {
+        let timeout_secs = timeout_secs.clamp(5, 86_400);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
+        loop {
+            let Some(cur) = self.get(id) else {
+                bail!("任务不存在: {}", id);
+            };
+            if cur.status != "running" {
+                return Ok((cur, "completed"));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok((cur, "timeout"));
+            }
+            let slice = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let slice = slice.min(std::time::Duration::from_millis(400));
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    let _ = self.stop(app, id);
+                    let info = self.get(id).ok_or_else(|| anyhow!("任务不存在: {}", id))?;
+                    return Ok((info, "cancelled"));
+                }
+                _ = tokio::time::sleep(slice) => {}
+            }
         }
     }
 }

@@ -23,6 +23,11 @@ fn mime_of(path: &Path) -> Option<&'static str> {
 
 /// 调用视觉模型识别图片内容（OpenAI 兼容多模态格式，非流式一次性返回）。
 /// 与聊天模型完全独立：独立的 base_url / api_key / model。
+pub struct VisionResult {
+    pub content: String,
+    pub usage: crate::llm::client::TokenUsage,
+}
+
 pub async fn recognize_image(
     client: &reqwest::Client,
     base_url: &str,
@@ -30,7 +35,7 @@ pub async fn recognize_image(
     model: &str,
     path: &Path,
     question: Option<&str>,
-) -> Result<String> {
+) -> Result<VisionResult> {
     let mime = mime_of(path)
         .ok_or_else(|| anyhow!("不支持的图片格式（支持 png / jpg / jpeg / gif / webp / bmp）"))?;
     let bytes = std::fs::read(path).map_err(|e| anyhow!("读取图片失败: {}", e))?;
@@ -93,5 +98,8 @@ pub async fn recognize_image(
     if content.is_empty() {
         bail!("视觉模型未返回有效内容");
     }
-    Ok(content)
+    Ok(VisionResult {
+        content,
+        usage: crate::llm::client::TokenUsage::from_response(&v),
+    })
 }

@@ -9,8 +9,8 @@ use tauri::{AppHandle, Emitter, Manager};
 
 pub const DISCOVER_TOOL: &str = "discover_capabilities";
 
-/// 初始只暴露能力发现与 Skill 加载。其余工具由模型围绕当前目标按需激活，
-/// 避免几十个无关 schema 同时挤占注意力。
+/// 工具清单每轮都发全量定义（稳定前缀以命中上下文缓存）。
+/// discover_capabilities 负责检索 Skill、给出建议组合和批量文件索引策略，不再负责「激活才能调用」。
 pub fn core_tool_names() -> Vec<String> {
     vec![
         DISCOVER_TOOL.to_string(),
@@ -58,9 +58,11 @@ fn tools_for_category(category: &str) -> &'static [&'static str] {
         "commands" => &[
             "run_command",
             "run_command_background",
+            "await_task",
             "check_task",
             "list_tasks",
             "stop_task",
+            "lookup_cache",
         ],
         "system" => &["get_system_info"],
         "delegation" => &["run_subagent"],
@@ -93,7 +95,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "discover_capabilities",
-                "description": "围绕当前目标发现并激活完成任务所需的工具，同时检索可能相关的 Skills。当前可见工具不足、你不确定该用什么、或需要换一种实现路径时调用；它不是执行任务本身。一次选齐所有明显相关的能力类别，避免逐个试探。发现后相关工具会从下一轮起可用。",
+                "description": "围绕当前目标检索可能相关的 Skills，并给出建议使用的工具组合与批量文件索引策略。全部工具已经可用，不必等待激活。先根据目标判断 Skills 目录是否已有对应能力；命中则 load_skill。路径不确定、需要换实现方式、或批量文件任务需要索引策略时调用。一次选齐所有明显相关的能力类别。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -104,7 +106,7 @@ pub fn definitions() -> Value {
                                 "type": "string",
                                 "enum": ["files", "browser", "organize", "todos", "profile", "commands", "system", "delegation", "skills"]
                             },
-                            "description": "要激活的能力：files=本地文件/图片，browser=网页，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，system=硬件与进程，delegation=只读子任务，skills=管理技能"
+                            "description": "要检索的能力：files=本地文件/图片，browser=网页，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，system=硬件与进程，delegation=只读子任务，skills=管理技能"
                         }
                     },
                     "required": ["query", "categories"]
@@ -212,7 +214,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "create_file",
-                "description": "创建文本/代码文件（txt/md/log/json/csv/xml/yaml/html/css/js/ts/py/java/go/rs/sql/sh/bat/ps1 等文本类格式）；普通文本以 UTF-8 写入，新建 .ps1 自动带 Windows PowerShell 5.1 兼容的 UTF-8 BOM。父目录不存在时自动创建。相对路径默认写入应用临时目录（禁止把草稿/中间产物堆到桌面）；用户明确要求交付到桌面时用绝对路径或 desktop/文件名；也可写 temp/文件名。目标已存在时默认报错，overwrite=true 才会覆盖（覆盖前自动备份原文件）。JSON 等结构化参数可写到临时目录，再把返回路径作为 run_command 的 argv 一项传入。一般 PowerShell 操作优先直接用 run_command 的 shell=powershell，无需创建中间脚本。不能创建 exe/docx/xlsx/pdf 等二进制或 Office 格式。要修改已有文件请用 edit_file。",
+                "description": "创建文本/代码文件（txt/md/log/json/csv/xml/yaml/html/css/js/ts/py/java/go/rs/sql/sh/bat/ps1 等文本类格式）；普通文本以 UTF-8 写入，新建 .ps1 自动带 Windows PowerShell 5.1 兼容的 UTF-8 BOM。父目录不存在时自动创建。相对路径默认写入应用临时目录（禁止把草稿/中间产物堆到桌面）；用户明确要求交付到桌面时用绝对路径或 desktop/文件名；也可写 temp/文件名。目标已存在时默认报错，overwrite=true 才会覆盖（覆盖前自动备份原文件）。给 CLI 的 JSON 入参加 run_command 的 files 或 stdin，不要先 create_file 再读；本工具只用于用户要留存的文本。一般 PowerShell 操作优先直接用 run_command 的 shell=powershell，无需创建中间脚本。不能创建 exe/docx/xlsx/pdf 等二进制或 Office 格式。要修改已有文件请用 edit_file。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -408,7 +410,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "browser_evaluate",
-                "description": "在当前页面执行 AI 动态生成的 JavaScript 并返回结构化结果，是 click/type/scroll 在复杂组件、虚拟列表、画布或页面语义不足时的通用补充能力，不绑定特定网站。优先先 snapshot 观察真实状态；先用只读脚本检查 DOM/ARIA/滚动尺寸/候选，再生成最小改动脚本，派发页面需要的事件，并在返回值中报告执行前后状态以便核验。可传 ref，此时表达式中可用 `$el` 引用该快照元素、用 `$args` 读取结构化参数；复杂逻辑写成 `async` IIFE。复用 ref 时必须沿用 snapshot 返回的通道：extension-debugger 对应 debugger，cdp 对应 cdp；页面导航、刷新或切换通道后须重新 snapshot。CSP 受限站点会自动降级到调试通道。",
+                "description": "在当前页面执行 AI 动态生成的 JavaScript 并返回结构化结果，是 click/type/scroll 在复杂组件、虚拟列表、画布或页面语义不足时的通用补充能力，不绑定特定网站。优先先 snapshot 观察真实状态；先用只读脚本检查 DOM/ARIA/滚动尺寸/候选，再生成最小改动脚本，派发页面需要的事件，并在返回值中报告执行前后状态以便核验。可传 ref，此时表达式中可用 `$el` 引用该快照元素、用 `$args` 读取结构化参数；复杂逻辑写成 `async` IIFE。复用 ref 时必须沿用 snapshot 返回的通道：extension-debugger 对应 debugger，cdp 对应 cdp；页面导航、刷新或切换通道后须重新 snapshot。默认走扩展 debugger 主世界；无法附着时降级到 scripting 隔离世界。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -418,7 +420,7 @@ pub fn definitions() -> Value {
                         "channel": {
                             "type": "string",
                             "enum": ["auto", "extension", "debugger", "cdp"],
-                            "description": "执行通道，默认 auto（扩展优先，失败自动降级）。extension=仅扩展 scripting（不降级）；debugger=扩展内嵌调试通道（同标签绕过 CSP，会显示调试提示条）；cdp=独立 CDP 调试实例（9222/9223，可能无登录态）"
+                            "description": "执行通道，默认 auto（扩展 debugger 主世界优先，失败再降 scripting，再不行独立 CDP）。extension=仅扩展 scripting（不降级）；debugger=扩展内嵌调试通道（同标签主世界，绕过 CSP，会显示调试提示条）；cdp=独立 CDP 调试实例（9222/9223，可能无登录态）"
                         }
                     },
                     "required": ["expression"]
@@ -634,22 +636,43 @@ pub fn definitions() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "lookup_cache",
+                "description": "本地缓存外部 CLI/API 的稳定对照数据（id↔名称、字段定义、选项列表、资源目录），避免每次任务都把大段实时输出灌进对话。不绑定某一家 CLI。读对照表用 get；没有或过期再调用外部命令，把提炼后的短表 put 回来。当天日程、最新一条记录等会变的数据不要缓存；密钥/token 不要写入。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["get", "put", "list", "delete"], "description": "get 读取；put 写入提炼后的对照表；list 只返回目录不含正文；delete 删除" },
+                        "key": { "type": "string", "description": "稳定键名，建议 来源.对象.用途，如 lark.base.T1O7.projects、aliyun.ecs.regions" },
+                        "value": { "type": "string", "description": "action=put 时必填。只放提炼后的对照表（JSON/短文本），不要放 CLI 原始大段输出" },
+                        "source": { "type": "string", "description": "可选来源标签，如 lark-cli、aliyun；put 时写入，list 时可过滤" },
+                        "summary": { "type": "string", "description": "put 时的一句话摘要，会出现在缓存目录里" },
+                        "ttl_secs": { "type": "integer", "description": "put 时的有效期秒数，默认 7 天；0 表示直到手动删除" }
+                    },
+                    "required": ["action"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "run_command",
-                "description": "同步执行一条 Windows 命令并等待结束（默认 60 秒超时）。调用外部程序时优先用 argv：每个参数独立一项，JSON/空格/中文不必转义；系统直启进程，按 PATHEXT 解析 exe/cmd，不会命中同名 .ps1。结构化正文放 stdin，或先 create_file 再把路径作为 argv 的一项。只有 cmd 内建命令或 PowerShell 语法（$变量、管道、对象）才用 command+shell。PowerShell 走 EncodedCommand，动态值放 script_args（脚本里 $DHArgs），不要再包 powershell -Command，也不要把 JSON 拼进一条命令字符串。PowerShell 管道无匹配时是 $null，取 .Count 前用 @()。失败时按 guidance 修正，不能声称成功。耗时改用 run_command_background。破坏性操作须征得同意。整盘、跨目录或大量文件扫描优先 search_files。",
+                "description": "同步执行一条 Windows 命令并等待结束（默认 60 秒超时）。调用外部程序时优先用 argv：每个参数独立一项，JSON/空格/中文不必转义；系统直启进程，按 PATHEXT 解析 exe/cmd，不会命中同名 .ps1。JSON 入参放 stdin 或 files（工作目录文件，argv 里写 @文件名）；不要拼进命令字符串，也不必先 create_file。stdout 若是 JSON 会自动解析：小结果在 json 字段，大结果给 json_summary（必要时 json_file），不要再重定向到文件后 read_file；只要子集时用 json_pointer。只有 cmd 内建命令或 PowerShell 语法（$变量、管道、对象）才用 command+shell。PowerShell 走 EncodedCommand，动态值放 script_args（脚本里 $DHArgs），不要再包 powershell -Command。PowerShell 管道无匹配时是 $null，取 .Count 前用 @()。失败时按 guidance 修正，不能声称成功。预计超过几十秒的命令、安装、构建或自己写的脚本，改用 run_command_background 并 await=true，不要用 check_task 轮询。破坏性操作须征得同意。整盘、跨目录或大量文件扫描优先 search_files。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "argv": { "type": "array", "items": { "type": "string" }, "description": "推荐。外部程序+参数，每项一个参数，例如 [\"git\", \"status\", \"-sb\"]。第一项只放程序名，不要把整条命令塞进一项" },
                         "command": { "type": "string", "description": "cmd 内建命令或 PowerShell 脚本正文。有 argv 时忽略。PowerShell 模式直接写 `$dirs=...`，不要再包 powershell -Command" },
                         "stdin": { "type": "string", "description": "写入子进程标准输入的文本（UTF-8）。JSON/长文本优先放这里，不要拼进命令行" },
+                        "files": { "type": "object", "description": "在工作目录先写入若干文件再执行。键为文件名（仅字母数字 . - _），值为字符串或 JSON 对象/数组（自动序列化）。适合要求 @file 的 CLI 入参；未指定 workdir 时自动用应用临时目录。不要为此单独 create_file" },
+                        "json_pointer": { "type": "string", "description": "可选。RFC 6901 指针，例如 /data/items。仅当 stdout 为 JSON 时生效，用来只取子集" },
                         "shell": { "type": "string", "enum": ["auto", "cmd", "powershell"], "description": "仅 command 使用，默认 auto。cmd 内建选 cmd；`$变量`/管道/对象/多行脚本选 powershell。有 argv 时忽略" },
                         "powershell_strict": { "type": "boolean", "description": "PowerShell 是否启用严格变量检查和错误即停，默认 true。管道无匹配时是 $null，取 .Count 前用 @()；不要为了 Count 关闭严格模式" },
                         "success_exit_codes": { "type": "array", "items": { "type": "integer" }, "description": "被视为成功的退出码，默认 [0]；仅按目标程序文档扩展，例如某些同步/差异工具" },
                         "script_args": { "description": "PowerShell 的结构化 JSON 参数；脚本中通过 `$DHArgs` 读取。用户提供的路径、关键词、文本等动态数据优先放这里，不要拼入脚本字符串" },
                         "environment": { "type": "object", "additionalProperties": { "type": "string" }, "description": "可选环境变量键值；适合向 CLI 安全传递配置，避免把动态值拼进命令。不得包含敏感信息，除非当前任务确实需要" },
-                        "workdir": { "type": "string", "description": "工作目录（绝对路径）。默认桌面；若命令会写中间文件，必须设为系统提示词中的临时目录" },
+                        "workdir": { "type": "string", "description": "工作目录（绝对路径）。默认桌面；有 files 时默认改为应用临时目录。命令会写中间文件时必须设为系统提示词中的临时目录" },
                         "timeout_secs": { "type": "integer", "description": "超时秒数，默认 60，上限 600；超时自动终止" },
-                        "tail_chars": { "type": "integer", "description": "返回输出的末尾字符数，默认 2000，上限 8000" }
+                        "tail_chars": { "type": "integer", "description": "非 JSON 输出时返回的末尾字符数，默认 2000，上限 8000。stdout 为 JSON 时忽略，改走自动解析" }
                     },
                     "required": []
                 }
@@ -659,20 +682,23 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "run_command_background",
-                "description": "在后台执行 Windows 命令或 PowerShell 脚本（构建、下载、批量处理、启动服务等耗时任务），立即返回 task_id。argv / stdin / command / shell 的选择规则与 run_command 相同：外部程序用 argv，结构化正文用 stdin，脚本才用 command。输出写入 UTF-8/GB18030 自适应日志；之后用 check_task 查询状态和必要片段，并检查 status、exit_code 与 guidance。破坏性命令必须先向用户说明并征得同意。",
+                "description": "在后台执行 Windows 命令或 PowerShell 脚本（构建、下载、批量处理、启动服务、自己写的脚本等耗时任务），立即返回 task_id。argv / stdin / command / shell 的选择规则与 run_command 相同：外部程序用 argv，结构化正文用 stdin，脚本才用 command。预计会跑很久时必须 await=true：当前对话会挂起、不消耗工具轮次去轮询，任务结束后带着结果自动继续。不要用 check_task 反复查询。破坏性命令必须先向用户说明并征得同意。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "argv": { "type": "array", "items": { "type": "string" }, "description": "推荐。外部程序+参数，每项一个参数；第一项只放程序名" },
                         "command": { "type": "string", "description": "cmd 内建命令或 PowerShell 脚本正文；有 argv 时忽略" },
                         "stdin": { "type": "string", "description": "写入子进程标准输入的文本（UTF-8）" },
+                        "files": { "type": "object", "description": "在工作目录先写入若干文件再执行；规则与 run_command 相同" },
                         "shell": { "type": "string", "enum": ["auto", "cmd", "powershell"], "description": "仅 command 使用，默认 auto；cmd 内建选 cmd，PowerShell 语法和 `$变量` 选 powershell" },
                         "powershell_strict": { "type": "boolean", "description": "PowerShell 严格模式，默认 true。管道无匹配时取 .Count 前用 @()；不要为了 Count 关闭严格模式" },
                         "success_exit_codes": { "type": "array", "items": { "type": "integer" }, "description": "成功退出码，默认 [0]；只依据目标程序的退出码语义扩展" },
                         "script_args": { "description": "PowerShell 结构化 JSON 参数，脚本中通过 `$DHArgs` 读取；避免拼接动态文本" },
                         "environment": { "type": "object", "additionalProperties": { "type": "string" }, "description": "传给子进程的环境变量键值" },
                         "label": { "type": "string", "description": "任务备注名（如「构建前端」），方便用户识别" },
-                        "workdir": { "type": "string", "description": "工作目录（绝对路径）。默认桌面；若命令会写中间文件，必须设为系统提示词中的临时目录" }
+                        "workdir": { "type": "string", "description": "工作目录（绝对路径）。默认桌面；有 files 时默认改为应用临时目录。命令会写中间文件时必须设为系统提示词中的临时目录" },
+                        "await": { "type": "boolean", "description": "true：启动后挂起当前对话直到任务结束，完成后自动继续。长时间命令和自己写的脚本都应设为 true。不要用 check_task 轮询" },
+                        "timeout_secs": { "type": "integer", "description": "仅 await=true 时生效：最长等待秒数，默认 7200（2 小时），上限 86400。超时不杀进程，可再 await_task" }
                     },
                     "required": []
                 }
@@ -681,14 +707,32 @@ pub fn definitions() -> Value {
         {
             "type": "function",
             "function": {
-                "name": "check_task",
-                "description": "查询后台任务的状态与输出。默认只返回输出的末尾 tail_chars 字符；给 pattern 时只返回包含该关键字的最近 50 行——按需要取片段，不要把整个日志拉进上下文。任务未完成时稍后可再次查询。",
+                "name": "await_task",
+                "description": "挂起当前对话，直到指定后台任务结束，再带着输出继续。等待期间不消耗工具调用轮次。长时间命令、安装、构建、自己写的脚本在 run_command_background 之后应立刻调用本工具（或直接给 background 设 await=true）。不要用 check_task 反复查询。用户中断对话会停止该任务。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "task_id": { "type": "string", "description": "run_command_background 返回的 task_id" },
-                        "tail_chars": { "type": "integer", "description": "返回输出末尾字符数，默认 2000，上限 8000" },
-                        "pattern": { "type": "string", "description": "可选：只取包含该关键字的行（如 error、失败、完成），与 tail_chars 二选一" }
+                        "timeout_secs": { "type": "integer", "description": "最长等待秒数，默认 7200（2 小时），上限 86400。超时不杀进程" },
+                        "json_pointer": { "type": "string", "description": "可选。任务结束后若 stdout 为 JSON，按 RFC 6901 取子集" },
+                        "tail_chars": { "type": "integer", "description": "非 JSON 输出时返回末尾字符数，默认 2000，上限 8000" }
+                    },
+                    "required": ["task_id"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "check_task",
+                "description": "查看已结束任务的输出片段，或确认当前状态。不要用它轮询尚未结束的长时间任务，那会很快耗尽工具轮次；应改用 await_task，或给 run_command_background 设 await=true，任务结束后对话会自动继续。stdout 若是 JSON 会自动解析；可用 json_pointer 取子集。非 JSON 时默认返回末尾 tail_chars 字符。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string", "description": "run_command_background 返回的 task_id" },
+                        "tail_chars": { "type": "integer", "description": "非 JSON 输出时返回末尾字符数，默认 2000，上限 8000" },
+                        "pattern": { "type": "string", "description": "可选：只取包含该关键字的行（如 error、失败、完成）；与 json_pointer 同时出现时以 json_pointer 为准" },
+                        "json_pointer": { "type": "string", "description": "可选。从该任务 stdout 的 JSON 里取子集（RFC 6901），不必重跑 CLI" }
                     },
                     "required": ["task_id"]
                 }
@@ -755,7 +799,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "load_skill",
-                "description": "加载某个 Skill 的完整 SKILL.md。任务匹配目录中的项时先调用再执行。内部技能只读；不要凭摘要猜步骤。",
+                "description": "加载某个 Skill 的完整 SKILL.md。目录描述与当前目标相符时先调用再执行。内部技能只读；不要凭摘要猜步骤。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -901,16 +945,30 @@ pub async fn execute(
                 .as_ref()
                 .map(|intent| build_file_scan_policy(&state.file_index, intent))
                 .transpose()?;
-            let next = if let Some(policy) = file_scan_policy.as_ref() {
+            let next = if has_matched_skills {
+                let names: Vec<&str> = matched_skills
+                    .iter()
+                    .filter_map(|item| item.get("name").and_then(Value::as_str))
+                    .collect();
+                let skill_hint = format!(
+                    "可能相关的 Skills：{}。请判断是否真正命中当前目标，命中则先 load_skill。",
+                    names.join("、")
+                );
+                match file_scan_policy
+                    .as_ref()
+                    .and_then(|policy| policy.get("next").and_then(Value::as_str))
+                {
+                    Some(file_next) => format!("{} {}", skill_hint, file_next),
+                    None => skill_hint,
+                }
+            } else if let Some(policy) = file_scan_policy.as_ref() {
                 policy
                     .get("next")
                     .and_then(Value::as_str)
                     .unwrap_or("批量文件任务优先使用 search_files。")
                     .to_string()
-            } else if has_matched_skills {
-                "相关工具已激活。若某个 Skill 与当前目标匹配，先 load_skill；再结合当前情境选择最小工具组合。".to_string()
             } else {
-                "相关工具已激活。请选择满足目标的最小工具组合；若仍不足，可再次发现其它类别或用 commands 查看本地帮助并组合实现。".to_string()
+                "相关工具已可用。请选择满足目标的最小工具组合；若仍不足，可再次发现其它类别或用 commands 查看本地帮助并组合实现。".to_string()
             };
             Ok(json!({
                 "query": query,
@@ -1343,7 +1401,7 @@ pub async fn execute(
                 bail!("尚未配置视觉模型 API Key。纯提取文字可改用 ocr_image（本地免费）；要看图理解请在「设置 → 图像识别」填写视觉 Key。");
             }
             let http = reqwest::Client::new();
-            let text = crate::llm::vision::recognize_image(
+            let recognized = crate::llm::vision::recognize_image(
                 &http,
                 &settings.vision_base_url,
                 &settings.vision_api_key,
@@ -1352,10 +1410,11 @@ pub async fn execute(
                 question,
             )
             .await?;
+            crate::llm::persist_usage(app, "vision", &settings.vision_model, &recognized.usage);
             Ok(json!({
                 "path": path.to_string_lossy().replace('\\', "/"),
                 "model": settings.vision_model,
-                "result": text,
+                "result": recognized.content,
             }))
         }
         "ocr_image" => {
@@ -1547,6 +1606,7 @@ pub async fn execute(
         }
         n @ ("run_command"
         | "run_command_background"
+        | "await_task"
         | "check_task"
         | "list_tasks"
         | "stop_task") => {
@@ -1555,7 +1615,7 @@ pub async fn execute(
                     "命令执行功能未启用。请用户在主窗口「设置 → 后台任务与命令执行」中打开开关。"
                 );
             }
-            command_tool(app, n, args).await
+            command_tool(app, n, args, cancel).await
         }
         "get_system_info" => {
             let category = args
@@ -1573,6 +1633,7 @@ pub async fn execute(
                 .clamp(1, 50) as usize;
             crate::machine::query(category, sort_by, limit).await
         }
+        "lookup_cache" => lookup_cache_tool(app, args),
         "list_skills" => {
             let skills = app.state::<crate::AppState>().skills.list();
             Ok(json!({ "count": skills.len(), "skills": skills }))
@@ -1678,6 +1739,51 @@ pub async fn execute(
     }
 }
 
+fn lookup_cache_tool(app: &AppHandle, args: &Value) -> Result<Value> {
+    let action = args
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("缺少 action"))?;
+    let cache = &app.state::<crate::AppState>().lookup_cache;
+    match action {
+        "get" => {
+            let key = args
+                .get("key")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("get 需要 key"))?;
+            cache.get(key)
+        }
+        "put" => {
+            let key = args
+                .get("key")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("put 需要 key"))?;
+            let value = args
+                .get("value")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("put 需要 value"))?;
+            let source = args.get("source").and_then(Value::as_str);
+            let summary = args.get("summary").and_then(Value::as_str);
+            let ttl_secs = args.get("ttl_secs").and_then(Value::as_i64);
+            cache.put(key, value, source, summary, ttl_secs)
+        }
+        "list" => {
+            let source = args.get("source").and_then(Value::as_str);
+            cache.list(source)
+        }
+        "delete" => {
+            let key = args
+                .get("key")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("delete 需要 key"))?;
+            cache.delete(key)
+        }
+        other => bail!("未知 action: {}，可用 get/put/list/delete", other),
+    }
+}
+
 fn string_array(args: &Value, key: &str) -> Vec<String> {
     args.get(key)
         .and_then(Value::as_array)
@@ -1708,9 +1814,9 @@ fn parse_argv(args: &Value) -> Result<Vec<String>> {
             }
             Ok(out)
         }
-        Some(Value::String(_)) => bail!(
-            "argv 必须是字符串数组，例如 [\"git\", \"status\"]，不要把整条命令写成一个字符串"
-        ),
+        Some(Value::String(_)) => {
+            bail!("argv 必须是字符串数组，例如 [\"git\", \"status\"]，不要把整条命令写成一个字符串")
+        }
         _ => bail!("argv 必须是字符串数组"),
     }
 }
@@ -1957,7 +2063,7 @@ fn prioritize_index_tools(active_tools: &mut Vec<String>) {
     active_tools.retain(|name| {
         !matches!(
             name.as_str(),
-            "scan_desktop" | "run_command" | "run_command_background"
+            "scan_desktop" | "run_command" | "run_command_background" | "await_task"
         )
     });
     if !active_tools.iter().any(|name| name == "search_files") {
@@ -2209,6 +2315,7 @@ mod capability_tests {
         let active = activate_categories(&["files".to_string(), "commands".to_string()]);
         assert!(active.iter().any(|name| name == "read_file"));
         assert!(active.iter().any(|name| name == "run_command"));
+        assert!(active.iter().any(|name| name == "lookup_cache"));
         assert!(!active.iter().any(|name| name == "browser_click"));
     }
 
@@ -2233,6 +2340,7 @@ mod capability_tests {
         assert!(!active.iter().any(|name| name == "scan_desktop"));
         assert!(!active.iter().any(|name| name == "run_command"));
         assert!(!active.iter().any(|name| name == "run_command_background"));
+        assert!(!active.iter().any(|name| name == "await_task"));
     }
 
     #[test]
@@ -2299,6 +2407,22 @@ mod capability_tests {
     }
 
     #[test]
+    fn yesterday_daily_report_query_recalls_feishu_skill_not_files() {
+        let desc =
+            "用户的日报记在飞书多维表格的日报表中。当目标是撰写、查询或参考已提交的日报时使用。";
+        let found = rank_skills(
+            "帮我写个日报参考昨天我发的",
+            vec![
+                skill("daily-report-feishu-base", desc),
+                skill("desktop-organize", "整理桌面文件时加载"),
+                skill("windows-cli", "在 Windows 上用 run_command 执行命令"),
+            ],
+            5,
+        );
+        assert_eq!(found[0]["name"], "daily-report-feishu-base");
+    }
+
+    #[test]
     fn browser_evaluate_accepts_snapshot_ref_and_structured_args() {
         let definitions = definitions_for(&["browser_evaluate"]);
         let tool = &definitions.as_array().unwrap()[0];
@@ -2316,6 +2440,45 @@ mod capability_tests {
     }
 
     #[test]
+    fn lookup_cache_is_defined() {
+        let definitions = definitions();
+        let found = definitions.as_array().unwrap().iter().any(|tool| {
+            tool.pointer("/function/name").and_then(Value::as_str) == Some("lookup_cache")
+        });
+        assert!(found);
+    }
+
+    #[test]
+    fn command_tools_expose_await_instead_of_polling() {
+        let definitions = definitions_for(&["run_command_background", "await_task", "check_task"]);
+        let bg = definitions.as_array().unwrap().iter().find(|tool| {
+            tool.pointer("/function/name").and_then(Value::as_str) == Some("run_command_background")
+        }).unwrap();
+        assert!(bg
+            .pointer("/function/parameters/properties/await")
+            .is_some());
+        let await_tool = definitions.as_array().unwrap().iter().find(|tool| {
+            tool.pointer("/function/name").and_then(Value::as_str) == Some("await_task")
+        }).unwrap();
+        let await_desc = await_tool
+            .pointer("/function/description")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(await_desc.contains("不消耗"));
+        assert!(!await_desc.contains("lark-cli"));
+        let check_desc = definitions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("check_task"))
+            .unwrap()
+            .pointer("/function/description")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(check_desc.contains("await_task"));
+    }
+
+    #[test]
     fn command_tools_expose_preventive_shell_controls() {
         let definitions = definitions_for(&["run_command", "run_command_background"]);
         for tool in definitions.as_array().unwrap() {
@@ -2326,6 +2489,7 @@ mod capability_tests {
             for field in [
                 "argv",
                 "stdin",
+                "files",
                 "shell",
                 "powershell_strict",
                 "success_exit_codes",
@@ -2424,6 +2588,15 @@ mod capability_tests {
             assert!(tool
                 .pointer("/function/parameters/properties/stdin")
                 .is_some());
+            if tool.pointer("/function/name").and_then(Value::as_str) == Some("run_command") {
+                assert!(tool
+                    .pointer("/function/parameters/properties/files")
+                    .is_some());
+                assert!(tool
+                    .pointer("/function/parameters/properties/json_pointer")
+                    .is_some());
+                assert!(description.contains("json_pointer") || description.contains("JSON"));
+            }
         }
     }
 
@@ -2465,7 +2638,12 @@ fn optional_local_timestamp(args: &Value, key: &str) -> Result<Option<i64>> {
 }
 
 /// 后台任务/命令类工具的统一入口（都走 TaskManager，输出落日志文件）
-async fn command_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value> {
+async fn command_tool(
+    app: &AppHandle,
+    name: &str,
+    args: &Value,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Value> {
     let state = app.state::<crate::AppState>();
     let tasks = &state.tasks;
     match name {
@@ -2476,7 +2654,7 @@ async fn command_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
                 bail!("请提供 argv（推荐，调用外部程序）或 command（cmd / PowerShell 脚本）");
             }
             let stdin = args.get("stdin").and_then(|v| v.as_str());
-            let workdir = args.get("workdir").and_then(|v| v.as_str());
+            let (workdir, input_files) = prepare_workdir_and_files(app, args)?;
             let shell = args.get("shell").and_then(|v| v.as_str());
             let powershell_strict = args
                 .get("powershell_strict")
@@ -2491,6 +2669,10 @@ async fn command_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
                 .unwrap_or(60)
                 .clamp(5, 600);
             let tail_chars = args.get("tail_chars").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let json_pointer = args
+                .get("json_pointer")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let info = tasks
                 .run_sync(
                     app,
@@ -2499,7 +2681,7 @@ async fn command_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
                         argv: &argv,
                         stdin,
                         label: None,
-                        workdir,
+                        workdir: workdir.as_deref(),
                         shell,
                         powershell_strict,
                         success_exit_codes: &success_exit_codes,
@@ -2509,24 +2691,15 @@ async fn command_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
                     timeout,
                 )
                 .await?;
-            let (output, truncated) = tasks.head_tail(&info.id, tail_chars).unwrap_or_default();
-            let guidance = command_guidance(&info.status, info.exit_code, &output, &info.shell);
-            Ok(json!({
-                "ok": info.status == "done",
-                "task_id": info.id,
-                "status": info.status,
-                "exit_code": info.exit_code,
-                "output": output.trim(),
-                "truncated": truncated,
-                "execution_context": command_execution_context(&info),
-                "guidance": guidance,
-                "note": if truncated {
-                    "输出超长，已截取开头与结尾片段（中间省略）；完整输出在日志文件中，可用 check_task 按 pattern 关键字过滤取需要的部分。"
-                } else {
-                    "以上是完整输出。"
-                },
-                "log_path": info.log_path,
-            }))
+            Ok(command_result_with_json(
+                app,
+                tasks,
+                &info,
+                tail_chars,
+                json_pointer,
+                input_files,
+                workdir.as_deref(),
+            )?)
         }
         "run_command_background" => {
             let argv = parse_argv(args)?;
@@ -2536,7 +2709,7 @@ async fn command_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
             }
             let stdin = args.get("stdin").and_then(|v| v.as_str());
             let label = args.get("label").and_then(|v| v.as_str());
-            let workdir = args.get("workdir").and_then(|v| v.as_str());
+            let (workdir, input_files) = prepare_workdir_and_files(app, args)?;
             let shell = args.get("shell").and_then(|v| v.as_str());
             let powershell_strict = args
                 .get("powershell_strict")
@@ -2552,7 +2725,7 @@ async fn command_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
                     argv: &argv,
                     stdin,
                     label,
-                    workdir,
+                    workdir: workdir.as_deref(),
                     shell,
                     powershell_strict,
                     success_exit_codes: &success_exit_codes,
@@ -2560,13 +2733,63 @@ async fn command_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
                     environment: &environment,
                 },
             )?;
-            Ok(json!({
+            let wait_now = args.get("await").and_then(|v| v.as_bool()).unwrap_or(false);
+            if wait_now {
+                let timeout = args
+                    .get("timeout_secs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(7200);
+                let tail_chars =
+                    args.get("tail_chars").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let json_pointer = args.get("json_pointer").and_then(|v| v.as_str()).unwrap_or("");
+                return awaited_task_result(
+                    app,
+                    tasks,
+                    &info.id,
+                    timeout,
+                    cancel,
+                    tail_chars,
+                    json_pointer,
+                    input_files,
+                    workdir.as_deref(),
+                )
+                .await;
+            }
+            let mut result = json!({
                 "task_id": info.id,
                 "pid": info.pid,
                 "status": info.status,
                 "execution_context": command_execution_context(&info),
-                "message": "命令已在后台执行，输出写入日志文件、不占对话上下文。用 check_task 查询状态并只取需要的输出片段（末尾或按关键字过滤）；用 stop_task 停止。",
-            }))
+                "message": "命令已在后台执行。长时间任务请立刻 await_task，或下次启动时设 await=true；不要用 check_task 轮询，那会耗尽工具轮次。",
+            });
+            attach_input_files(&mut result, &input_files, workdir.as_deref());
+            Ok(result)
+        }
+        "await_task" => {
+            let id = args
+                .get("task_id")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow!("缺少 task_id"))?;
+            let timeout = args
+                .get("timeout_secs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(7200);
+            let tail_chars = args.get("tail_chars").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let json_pointer = args.get("json_pointer").and_then(|v| v.as_str()).unwrap_or("");
+            awaited_task_result(
+                app,
+                tasks,
+                id,
+                timeout,
+                cancel,
+                tail_chars,
+                json_pointer,
+                Vec::new(),
+                None,
+            )
+            .await
         }
         "check_task" => {
             let id = args
@@ -2580,6 +2803,31 @@ async fn command_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
             let tail_chars = args.get("tail_chars").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let json_pointer = args
+                .get("json_pointer")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let prefer_json = !json_pointer.is_empty() || pattern.is_none();
+            if prefer_json {
+                if let Some(mut result) = try_command_json_result(app, tasks, &info, json_pointer)?
+                {
+                    if let Some(obj) = result.as_object_mut() {
+                        obj.insert("label".into(), json!(info.label));
+                        obj.insert("started_at".into(), json!(info.started_at));
+                        obj.insert("finished_at".into(), json!(info.finished_at));
+                        obj.insert("output_mode".into(), json!("json"));
+                        obj.insert(
+                            "hint".into(),
+                            json!(if info.status == "running" {
+                                "任务仍在运行。不要反复 check_task；改用 await_task 挂起直到结束。"
+                            } else {
+                                "任务已结束。stdout 已按 JSON 解析；只要子集时带 json_pointer 再查，不必重跑命令。"
+                            }),
+                        );
+                    }
+                    return Ok(result);
+                }
+            }
             let (mode, output) = match pattern {
                 Some(p) => {
                     let hits = tasks.grep(id, p)?;
@@ -2607,7 +2855,7 @@ async fn command_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
                 "guidance": command_guidance(&info.status, info.exit_code, &output, &info.shell),
                 "log_path": info.log_path,
                 "hint": if info.status == "running" {
-                    "任务仍在运行，可稍后再次 check_task；输出只取了片段，完整内容在日志文件中。"
+                    "任务仍在运行。不要反复 check_task；改用 await_task 挂起直到结束。"
                 } else {
                     "任务已结束；如需更多输出，用不同 pattern 或更大 tail_chars 再查，完整内容在日志文件中。"
                 },
@@ -2629,6 +2877,180 @@ async fn command_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
     }
 }
 
+fn prepare_workdir_and_files(
+    app: &AppHandle,
+    args: &Value,
+) -> Result<(Option<String>, Vec<String>)> {
+    let files = args.get("files");
+    let mut workdir = args
+        .get("workdir")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    if files.is_some() && workdir.is_none() {
+        workdir = Some(
+            crate::tempfs::ensure_temp_dir(app)?
+                .to_string_lossy()
+                .replace('\\', "/"),
+        );
+    }
+    let mut written = Vec::new();
+    if let Some(files) = files {
+        let dir = std::path::PathBuf::from(
+            workdir
+                .as_deref()
+                .ok_or_else(|| anyhow!("files 需要有效的工作目录"))?,
+        );
+        std::fs::create_dir_all(&dir)?;
+        written = crate::cli_json::write_workdir_files(&dir, files)?;
+    }
+    Ok((workdir, written))
+}
+
+fn attach_input_files(result: &mut Value, input_files: &[String], workdir: Option<&str>) {
+    if input_files.is_empty() {
+        return;
+    }
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert("input_files".into(), json!(input_files));
+        if let Some(dir) = workdir {
+            obj.insert("workdir".into(), json!(dir));
+        }
+    }
+}
+
+fn try_command_json_result(
+    app: &AppHandle,
+    tasks: &crate::tasks::TaskManager,
+    info: &crate::tasks::TaskInfo,
+    json_pointer: &str,
+) -> Result<Option<Value>> {
+    let (full_text, source_truncated) = tasks
+        .read_decoded(&info.id, crate::cli_json::MAX_JSON_LOG_BYTES)
+        .unwrap_or_default();
+    if full_text.trim().is_empty() {
+        return Ok(None);
+    }
+    let save_dir = crate::tempfs::ensure_temp_dir(app)?;
+    let Some(captured) = crate::cli_json::capture_stdout_json(
+        &full_text,
+        source_truncated,
+        json_pointer,
+        &save_dir,
+        &info.id,
+    )?
+    else {
+        return Ok(None);
+    };
+    let output = captured.leftover;
+    let guidance = command_guidance(&info.status, info.exit_code, &output, &info.shell);
+    let mut result = json!({
+        "ok": info.status == "done" || info.status == "running",
+        "task_id": info.id,
+        "status": info.status,
+        "exit_code": info.exit_code,
+        "output": output,
+        "truncated": false,
+        "json_summary": captured.summary,
+        "json_chars": captured.chars,
+        "execution_context": command_execution_context(info),
+        "guidance": guidance,
+        "note": captured.note,
+        "log_path": info.log_path,
+    });
+    if let Some(obj) = result.as_object_mut() {
+        if let Some(value) = captured.value {
+            obj.insert("json".into(), value);
+        }
+        if let Some(path) = captured.file {
+            obj.insert("json_file".into(), json!(path));
+        }
+        if let Some(err) = captured.pointer_error {
+            obj.insert("json_pointer_error".into(), json!(err));
+        }
+    }
+    Ok(Some(result))
+}
+
+fn command_result_with_json(
+    app: &AppHandle,
+    tasks: &crate::tasks::TaskManager,
+    info: &crate::tasks::TaskInfo,
+    tail_chars: usize,
+    json_pointer: &str,
+    input_files: Vec<String>,
+    workdir: Option<&str>,
+) -> Result<Value> {
+    if let Some(mut result) = try_command_json_result(app, tasks, info, json_pointer)? {
+        attach_input_files(&mut result, &input_files, workdir);
+        return Ok(result);
+    }
+    let (output, truncated) = tasks.head_tail(&info.id, tail_chars).unwrap_or_default();
+    let guidance = command_guidance(&info.status, info.exit_code, &output, &info.shell);
+    let mut result = json!({
+        "ok": info.status == "done",
+        "task_id": info.id,
+        "status": info.status,
+        "exit_code": info.exit_code,
+        "output": output.trim(),
+        "truncated": truncated,
+        "execution_context": command_execution_context(info),
+        "guidance": guidance,
+        "note": if truncated {
+            "输出超长，已截取开头与结尾片段（中间省略）；完整输出在日志文件中，可用 check_task 按 pattern 关键字过滤取需要的部分。"
+        } else {
+            "以上是完整输出。"
+        },
+        "log_path": info.log_path,
+    });
+    attach_input_files(&mut result, &input_files, workdir);
+    Ok(result)
+}
+
+async fn awaited_task_result(
+    app: &AppHandle,
+    tasks: &crate::tasks::TaskManager,
+    task_id: &str,
+    timeout_secs: u64,
+    cancel: &tokio_util::sync::CancellationToken,
+    tail_chars: usize,
+    json_pointer: &str,
+    input_files: Vec<String>,
+    workdir: Option<&str>,
+) -> Result<Value> {
+    let (info, wait) = tasks.wait_for(app, task_id, timeout_secs, cancel).await?;
+    let mut result =
+        command_result_with_json(app, tasks, &info, tail_chars, json_pointer, input_files, workdir)?;
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert("wait".into(), json!(wait));
+        match wait {
+            "timeout" if info.status == "running" => {
+                obj.insert("ok".into(), json!(false));
+                obj.insert("wait_timed_out".into(), json!(true));
+                obj.insert(
+                    "note".into(),
+                    json!("等待超时，任务仍在运行。不要 check_task 轮询；再次 await_task，或 stop_task 结束它。"),
+                );
+            }
+            "cancelled" => {
+                obj.insert("ok".into(), json!(false));
+                obj.insert(
+                    "note".into(),
+                    json!("用户中断了等待，已尝试停止该任务。"),
+                );
+            }
+            _ => {
+                obj.insert(
+                    "note".into(),
+                    json!("后台任务已结束，对话自动继续。以上是完整结果，不必再 check_task。"),
+                );
+            }
+        }
+    }
+    Ok(result)
+}
+
 fn command_execution_context(info: &crate::tasks::TaskInfo) -> Value {
     let mut context = json!({
         "os": "Windows",
@@ -2641,7 +3063,10 @@ fn command_execution_context(info: &crate::tasks::TaskInfo) -> Value {
     });
     if let Some(obj) = context.as_object_mut() {
         if info.shell == "direct" {
-            obj.insert("launch".into(), json!("CreateProcess argv，不经过 cmd/PowerShell"));
+            obj.insert(
+                "launch".into(),
+                json!("CreateProcess argv，不经过 cmd/PowerShell"),
+            );
             obj.insert(
                 "quoting".into(),
                 json!("每个 argv 项是独立参数；JSON、空格、中文无需转义"),
@@ -2676,7 +3101,7 @@ fn command_guidance(
 ) -> Vec<String> {
     let mut hints = Vec::new();
     if status == "timeout" {
-        hints.push("命令已超时终止。确认它是否本应长时间运行；是则改用 run_command_background，否则缩小任务范围。".to_string());
+        hints.push("命令已超时终止。确认它是否本应长时间运行；是则改用 run_command_background 并 await=true，否则缩小任务范围。".to_string());
     } else if matches!(status, "failed" | "cancelled") {
         hints.push(format!(
             "命令未成功{}。先根据输出定位根因并修正，再决定是否重试；不要把本次执行当作成功。",
@@ -2697,7 +3122,7 @@ fn command_guidance(
         hints.push("PowerShell 超长脚本的安全传输引导层失败，用户脚本可能尚未开始运行。检查临时文件访问、执行环境或引导错误；不要改回多层命令行引号。".to_string());
     }
     if output.contains('\u{fffd}') || output.contains("��") {
-        hints.push("输出仍含乱码替代字符，不能据此做中文名称匹配。优先让命令输出 UTF-8 文件，再用 read_file 核对；必要时查询该 CLI 的编码参数。".to_string());
+        hints.push("输出仍含乱码替代字符，不能据此做中文名称匹配。优先让命令输出 JSON（run_command 会自动解析）；必要时查询该 CLI 的编码参数。".to_string());
     }
     if lower.contains("not recognized as an internal or external command")
         || output.contains("不是内部或外部命令")
@@ -2734,7 +3159,8 @@ fn cli_recovery_hints(output: &str, shell: &str) -> Vec<String> {
     }
     if lower.contains("unknown subcommand") || lower.contains("unknown command") {
         hints.push(
-            "子命令不存在。不要猜测名称；对该程序及其父命令执行 --help，改用帮助里的真实子命令。".to_string(),
+            "子命令不存在。不要猜测名称；对该程序及其父命令执行 --help，改用帮助里的真实子命令。"
+                .to_string(),
         );
     }
     if lower.contains("selected field does not exist")
@@ -2765,12 +3191,13 @@ fn cli_recovery_hints(output: &str, shell: &str) -> Vec<String> {
             || lower.contains(">="))
     {
         hints.push(
-            "该字段类型不支持当前过滤运算符。按报错列出的合法运算符改写，不要换一个同义写法硬试。".to_string(),
+            "该字段类型不支持当前过滤运算符。按报错列出的合法运算符改写，不要换一个同义写法硬试。"
+                .to_string(),
         );
     }
     if looks_like_garbled_cli_text(output) {
         hints.push(
-            "输出中文已乱码，不能用来做名称匹配。改用该程序的 JSON/机器可读输出，或把输出重定向到文件再 read_file。".to_string(),
+            "输出中文已乱码，不能用来做名称匹配。改用该程序的 JSON/机器可读输出（run_command 会自动解析 JSON）；不要把乱码表格当依据，也不必再重定向到文件后 read_file。".to_string(),
         );
     }
     hints

@@ -90,6 +90,7 @@ async fn run_inner(
         }
         let body = request_body(&cfg, &settings, &messages);
         let resp = client::stream_chat(&http, &cfg, &body, cancel, |_| {}, |_| {}).await?;
+        crate::llm::persist_usage(app, "subagent", &cfg.model, &resp.usage);
 
         if resp.interrupted {
             return Ok("（子代理已被用户中断，子任务未完成）".to_string());
@@ -172,6 +173,7 @@ fn request_body(
         "model": cfg.model,
         "messages": messages,
         "stream": true,
+        "stream_options": { "include_usage": true },
         "temperature": 0.2,
         "tools": tools::definitions_for(ALLOWED_TOOLS),
         "tool_choice": "auto",

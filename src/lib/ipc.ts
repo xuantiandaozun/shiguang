@@ -57,10 +57,22 @@ export interface BatchSummary {
   paths: BatchPath[];
 }
 
+export interface LlmProfile {
+  id: string;
+  name: string;
+  base_url: string;
+  api_key: string;
+  model: string;
+  thinking_enabled: boolean;
+  reasoning_effort: string;
+}
+
 export interface Settings {
   base_url: string;
   api_key: string;
   model: string;
+  llm_profiles: LlmProfile[];
+  active_llm_profile_id: string;
   organize_root: string;
   auto_organize: boolean;
   autostart: boolean;
@@ -172,6 +184,60 @@ export interface ExecResult {
   skipped: number;
 }
 
+export interface LlmUsageTotals {
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cache_hit_tokens: number;
+  cache_miss_tokens: number;
+}
+
+export interface LlmUsageBySource {
+  source: string;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cache_hit_tokens: number;
+  cache_miss_tokens: number;
+}
+
+export interface LlmUsageDay {
+  day: string;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cache_hit_tokens: number;
+  cache_miss_tokens: number;
+}
+
+export interface LlmUsagePeriod {
+  totals: LlmUsageTotals;
+  by_source: LlmUsageBySource[];
+}
+
+export interface LlmUsageSnapshot {
+  today: LlmUsagePeriod;
+  last_7d: LlmUsagePeriod;
+  all: LlmUsagePeriod;
+  daily: LlmUsageDay[];
+  recent: LlmUsageRequest[];
+}
+
+export interface LlmUsageRequest {
+  id: number;
+  source: string;
+  model: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cache_hit_tokens: number;
+  cache_miss_tokens: number;
+  created_at: string;
+}
+
 export const ipc = {
   sendChat: (text: string, attachments?: string[]) =>
     invoke<number>("send_chat_message", { text, attachments: attachments ?? null }),
@@ -259,6 +325,7 @@ export const ipc = {
       overwrite: overwrite ?? false,
     }),
   readSkillContent: (name: string) => invoke<string>("read_skill_content", { name }),
+  getLlmUsageStats: () => invoke<LlmUsageSnapshot>("get_llm_usage_stats"),
 };
 
 export function onEvent<T>(name: string, cb: (payload: T) => void): Promise<() => void> {

@@ -1,7 +1,9 @@
 use crate::commands::load_settings;
+use crate::db::{ChatMsg, ToolCallReplay};
 use crate::llm::{client, prompts, tools};
 use anyhow::Result;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use tauri::{AppHandle, Emitter, Manager};
 
 /// 单次任务的工具调用轮次预算。浏览器类任务动辄 10+ 轮，给足余量。
@@ -45,7 +47,7 @@ pub async fn run_chat(
         return Ok(());
     }
 
-    let (history, profile_block) = {
+    let (history, profile_block, replay_calls, skills_block, lookup_block) = {
         let state = app.state::<crate::AppState>();
         let history = state.db.load_chat(session_id, 30)?;
         let latest_user = history
@@ -54,6 +56,14 @@ pub async fn run_chat(
             .find(|m| m.role == "user")
             .map(|m| m.content.clone())
             .unwrap_or_default();
+        let request_ids: Vec<i64> = history
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| m.id)
+            .collect();
+        let replay_calls = state
+            .db
+            .load_tool_calls_for_messages(session_id, &request_ids)?;
         // 个人信息按需注入：命中求职/发帖等场景或用户主动要求时才加载
         let profile = if crate::llm::profile::should_inject(&latest_user) {
             let entries = state.db.pf_list().unwrap_or_default();
@@ -61,30 +71,32 @@ pub async fn run_chat(
         } else {
             None
         };
-        (history, profile)
+        let skills_block = state.skills.catalog_block();
+        let lookup_block = state.lookup_cache.catalog_block();
+        (history, profile, replay_calls, skills_block, lookup_block)
     };
 
-    // 上下文缓存优化：系统提示词 + 历史消息构成逐字节稳定的前缀（命中缓存计费极低）；
-    // 秒级时间、Skills 目录等每轮都变的内容放在末尾的系统消息里，只有尾巴不命中
+    // 上下文缓存：系统提示 + 历史（含回放的 tool 记录）必须逐字节稳定。
+    // 当前时间插在历史之后、本轮工具轮之前：同一轮只往后面追加 assistant/tool，
+    // 才能走 DeepSeek「A+B → A+B+C」前缀命中；不要每轮把时间挪到最后。
     let sys = prompts::system_prompt(&settings);
     let mut messages: Vec<Value> = vec![json!({
         "role": "system",
         "content": sys,
     })];
-    for msg in history {
-        let role = if msg.role == "user" {
-            "user"
-        } else {
-            "assistant"
-        };
-        messages.push(json!({ "role": role, "content": msg.content }));
-    }
+    messages.extend(history_with_tool_replay(&history, &replay_calls));
     let mut tail = format!(
         "当前时间：{}",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S %A")
     );
     if let Some(pb) = &profile_block {
         tail.push_str(pb);
+    }
+    if let Some(sb) = &skills_block {
+        tail.push_str(sb);
+    }
+    if let Some(lb) = &lookup_block {
+        tail.push_str(lb);
     }
     messages.push(json!({
         "role": "system",
@@ -101,7 +113,6 @@ pub async fn run_chat(
         model: settings.model.clone(),
     };
     let mut text_call_retries = 0usize;
-    let mut active_tools = tools::core_tool_names();
 
     for round in 0..MAX_TOOL_ROUNDS {
         if cancel.is_cancelled() {
@@ -115,7 +126,7 @@ pub async fn run_chat(
             }));
         }
         trim_context(&mut messages);
-        let body = request_body(&cfg, &settings, &messages, Some(&active_tools));
+        let body = request_body(&cfg, &settings, &messages, true);
 
         let resp = stream_filtered(&http, &cfg, &body, &cancel, &app).await?;
 
@@ -231,9 +242,6 @@ pub async fn run_chat(
                 Ok(v) => v,
                 Err(e) => json!({ "error": e.to_string() }),
             };
-            if call.name == tools::DISCOVER_TOOL {
-                activate_discovered_tools(&mut active_tools, &result);
-            }
             let tool_status = if is_failed_tool_result(&result) {
                 "error"
             } else {
@@ -286,35 +294,24 @@ fn is_failed_tool_result(result: &Value) -> bool {
     )
 }
 
-fn activate_discovered_tools(active_tools: &mut Vec<String>, result: &Value) {
-    let Some(names) = result.get("activated_tools").and_then(Value::as_array) else {
-        return;
-    };
-    for name in names.iter().filter_map(Value::as_str) {
-        if !active_tools.iter().any(|active| active == name) {
-            active_tools.push(name.to_string());
-        }
-    }
-}
-
-/// 构造请求体。DeepSeek 思考模式参数（thinking / reasoning_effort）只对 DeepSeek 接口附加，
-/// 其它 OpenAI 兼容服务收到未知字段可能直接 400；v4 模型思考默认开启，关闭需显式声明。
+/// 构造请求体。工具定义每轮都发同一份全量清单，避免中途增删打断前缀缓存。
+/// 收尾轮次仍带上同一份 tools，只用 tool_choice=none 禁止再调。
+/// DeepSeek 思考模式参数只对 DeepSeek 接口附加，其它兼容服务收到未知字段可能 400。
 fn request_body(
     cfg: &client::LlmConfig,
     settings: &crate::commands::Settings,
     messages: &[Value],
-    active_tools: Option<&[String]>,
+    allow_tools: bool,
 ) -> Value {
     let mut body = json!({
         "model": cfg.model,
         "messages": messages,
         "stream": true,
+        "stream_options": { "include_usage": true },
         "temperature": 0.3,
+        "tools": tools::definitions(),
+        "tool_choice": if allow_tools { json!("auto") } else { json!("none") },
     });
-    if let Some(active_tools) = active_tools {
-        body["tools"] = tools::definitions_for(active_tools);
-        body["tool_choice"] = json!("auto");
-    }
     if cfg.base_url.contains("deepseek") {
         if settings.thinking_enabled {
             body["thinking"] = json!({ "type": "enabled" });
@@ -337,18 +334,13 @@ async fn finalize_cancelled(
     tool_log: &[String],
 ) -> Result<()> {
     let cleaned = strip_tool_call_text(partial);
-    let mut saved = cleaned.clone();
-    if !tool_log.is_empty() {
-        if !saved.is_empty() {
-            saved.push_str("\n\n");
-        }
-        saved.push_str("【中断前已完成的工具调用与结果】\n");
-        saved.push_str(&digest_of(tool_log));
-    }
+    // 工具参数/结果已在 chat_tool_calls，不要写进可见正文，否则加载历史会把调用参数渲染出来。
+    let saved = if cleaned.is_empty() && !tool_log.is_empty() {
+        "（已中断）".to_string()
+    } else {
+        cleaned.clone()
+    };
     if !saved.is_empty() {
-        saved.push_str(
-            "\n（回复被用户中断；以上资料已收集完毕，继续时请直接基于它们推进，不要重复收集）",
-        );
         let state = app.state::<crate::AppState>();
         let response_message_id = state.db.save_chat(session_id, "assistant", &saved)?;
         state
@@ -379,21 +371,6 @@ fn brief(s: &str, n: usize) -> String {
     }
 }
 
-/// 工具清单总预算 4000 字符，超出部分省略（最近的调用通常最相关，保留靠前的轮次）
-fn digest_of(log: &[String]) -> String {
-    const BUDGET: usize = 4000;
-    let mut out = String::new();
-    for (i, entry) in log.iter().enumerate() {
-        if out.len() + entry.len() > BUDGET {
-            out.push_str(&format!("- …（其余 {} 条工具结果已省略）\n", log.len() - i));
-            break;
-        }
-        out.push_str(entry);
-        out.push('\n');
-    }
-    out
-}
-
 /// 工具预算耗尽：不再给工具，让模型基于已有信息做阶段性收尾。
 /// 收尾内容会存入聊天记录，用户说「继续」时模型能看到进展，而不是从零开始。
 async fn finalize_with_summary(
@@ -409,10 +386,10 @@ async fn finalize_with_summary(
 ) -> Result<()> {
     messages.push(json!({
         "role": "system",
-        "content": "工具调用轮次已用完，你现在没有任何工具可用。请基于已获得的信息，直接用自然语言给出阶段性回答：1) 已完成的部分；2) 卡在什么地方；3) 如果用户说「继续」，你接下来打算怎么做。不要声称完成了并未完成的步骤。严禁输出任何工具调用语法（例如 <tool_call>…</tool_call>、<｜tool▁call▁begin｜>…、<｜｜DSML｜｜tool_calls>…</｜｜DSML｜｜tool_calls>、或带 \"name\"/\"arguments\" 字段的 JSON 代码块），只能输出给用户看的自然语言。",
+        "content": "工具调用轮次已用完。请基于已获得的信息，直接用自然语言给出阶段性回答：1) 已完成的部分；2) 卡在什么地方；3) 如果用户说「继续」，你接下来打算怎么做。不要声称完成了并未完成的步骤。严禁输出任何工具调用语法（例如 <tool_call>…</tool_call>、<｜tool▁call▁begin｜>…、<｜｜DSML｜｜tool_calls>…</｜｜DSML｜｜tool_calls>、或带 \"name\"/\"arguments\" 字段的 JSON 代码块），只能输出给用户看的自然语言。",
     }));
     trim_context(&mut messages);
-    let body = request_body(cfg, settings, &messages, None);
+    let body = request_body(cfg, settings, &messages, false);
     let resp = stream_filtered(http, cfg, &body, cancel, app).await;
     match resp {
         Ok(r) if r.interrupted => {
@@ -420,41 +397,21 @@ async fn finalize_with_summary(
         }
         Ok(r) => {
             let cleaned = strip_tool_call_text(&r.content);
-            // 与中断路径一致：收尾正文之外把本轮工具清单一起入库，
-            // 否则用户说「继续」时上一轮收集的资料全部丢失，只能从头再来
-            let mut saved = cleaned.clone();
-            if !tool_log.is_empty() {
-                if !saved.is_empty() {
-                    saved.push_str("\n\n");
-                }
-                saved.push_str("【工具预算耗尽前已完成的工具调用与结果】\n");
-                saved.push_str(&digest_of(tool_log));
-                saved.push_str(
-                    "（以上资料已收集完毕，用户说「继续」时请直接基于它们推进，不要重复收集）",
-                );
-            }
-            if saved.is_empty() {
-                let _ = app.emit(
-                    "llm-error",
-                    json!({ "message": "工具调用轮次已用完，且收尾总结为空。可直接说「继续」重试。" }),
-                );
+            // 工具结果已在 chat_tool_calls 回放，不要把参数摘要写进聊天正文。
+            let display = if cleaned.is_empty() {
+                "（工具调用轮次已用完，本轮进展已保存。说「继续」即可接着推进。）".to_string()
             } else {
-                let state = app.state::<crate::AppState>();
-                let response_message_id = state.db.save_chat(session_id, "assistant", &saved)?;
-                state.db.link_tool_calls_response(
-                    session_id,
-                    request_message_id,
-                    response_message_id,
-                )?;
-                // 收尾正文可能整段跑偏成文本工具调用而被清空，此时给用户一句兜底提示
-                let display = if cleaned.is_empty() {
-                    "（工具调用轮次已用完，本轮进展已保存。说「继续」即可接着推进。）".to_string()
-                } else {
-                    cleaned
-                };
-                let _ = app.emit("llm-message-done", json!({ "content": display }));
-                let _ = app.emit("sessions-changed", ());
-            }
+                cleaned
+            };
+            let state = app.state::<crate::AppState>();
+            let response_message_id = state.db.save_chat(session_id, "assistant", &display)?;
+            state.db.link_tool_calls_response(
+                session_id,
+                request_message_id,
+                response_message_id,
+            )?;
+            let _ = app.emit("llm-message-done", json!({ "content": display }));
+            let _ = app.emit("sessions-changed", ());
         }
         Err(e) => {
             let _ = app.emit(
@@ -497,6 +454,7 @@ async fn stream_filtered(
         },
     )
     .await?;
+    crate::llm::persist_usage(app, "chat", &cfg.model, &resp.usage);
     if let Ok(mut f) = filter.lock() {
         let tail = f.flush();
         if !tail.is_empty() {
@@ -688,6 +646,116 @@ fn looks_like_tool_json(block: &str) -> bool {
     }
 }
 
+/// 把持久化的工具调用按 OpenAI 协议插回 user 与最终 assistant 之间，
+/// 这样下一轮既看得到已做的事，也能接上上一轮请求的缓存前缀。
+fn history_with_tool_replay(history: &[ChatMsg], tool_calls: &[ToolCallReplay]) -> Vec<Value> {
+    let mut by_request: BTreeMap<i64, Vec<&ToolCallReplay>> = BTreeMap::new();
+    for call in tool_calls {
+        by_request
+            .entry(call.request_message_id)
+            .or_default()
+            .push(call);
+    }
+    let mut messages = Vec::new();
+    for msg in history {
+        if msg.role == "user" {
+            messages.push(json!({ "role": "user", "content": msg.content }));
+            if let Some(calls) = by_request.get(&msg.id) {
+                append_replayed_tool_rounds(&mut messages, calls);
+            }
+            continue;
+        }
+        let content = strip_persisted_tool_digest(&msg.content);
+        if content.is_empty() {
+            continue;
+        }
+        messages.push(json!({ "role": "assistant", "content": content }));
+    }
+    messages
+}
+
+fn append_replayed_tool_rounds(messages: &mut Vec<Value>, calls: &[&ToolCallReplay]) {
+    let mut i = 0;
+    while i < calls.len() {
+        let round = calls[i].round_index;
+        let mut round_calls = Vec::new();
+        while i < calls.len() && calls[i].round_index == round {
+            round_calls.push(calls[i]);
+            i += 1;
+        }
+        let first = round_calls[0];
+        let tool_calls_json: Vec<Value> = round_calls
+            .iter()
+            .map(|c| {
+                json!({
+                    "id": c.tool_call_id,
+                    "type": "function",
+                    "function": { "name": c.tool_name, "arguments": c.arguments_json },
+                })
+            })
+            .collect();
+        let content = first.assistant_content.trim();
+        let mut assistant_msg = json!({
+            "role": "assistant",
+            "content": if content.is_empty() { Value::Null } else { json!(content) },
+            "tool_calls": tool_calls_json,
+        });
+        if !first.reasoning_content.is_empty() {
+            assistant_msg["reasoning_content"] = json!(first.reasoning_content);
+        }
+        messages.push(assistant_msg);
+        for c in round_calls {
+            let content = match c.result_json.as_deref() {
+                Some(result) if !result.is_empty() => result.to_string(),
+                _ if c.status == "running" => "（调用未完成）".to_string(),
+                _ => "{}".to_string(),
+            };
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": c.tool_call_id,
+                "content": content,
+            }));
+        }
+    }
+}
+
+/// 入库时为中断/预算耗尽附带的工具摘要，回放真实 tool 记录后不再送给模型，避免重复。
+fn strip_persisted_tool_digest(content: &str) -> String {
+    const MARKERS: &[&str] = &[
+        "【中断前已完成的工具调用与结果】",
+        "【工具预算耗尽前已完成的工具调用与结果】",
+    ];
+    let mut cut = content.len();
+    for marker in MARKERS {
+        if let Some(i) = content.find(marker) {
+            cut = cut.min(i);
+        }
+    }
+    content[..cut].trim_end().to_string()
+}
+
+const MODEL_ONLY_FOOTERS: &[&str] = &[
+    "（回复被用户中断；以上资料已收集完毕，继续时请直接基于它们推进，不要重复收集）",
+    "（以上资料已收集完毕，用户说「继续」时请直接基于它们推进，不要重复收集）",
+];
+
+/// 给界面看的助手正文：去掉内部工具摘要和写给模型的续跑说明。
+pub(crate) fn visible_assistant_content(content: &str) -> String {
+    let mut text = strip_persisted_tool_digest(content);
+    for footer in MODEL_ONLY_FOOTERS {
+        if let Some(i) = text.find(footer) {
+            text = text[..i].trim_end().to_string();
+        }
+    }
+    if text.is_empty()
+        && (content.contains("【中断前已完成的工具调用与结果】")
+            || content.contains("回复被用户中断"))
+    {
+        return "（已中断）".to_string();
+    }
+    text
+}
+
 /// 上下文保护：对话过长时，把较早的工具结果替换成占位符（保留最近几条完整内容）。
 /// tool 消息必须与 assistant 的 tool_calls 配对保留，只压缩其 content。
 fn trim_context(messages: &mut [Value]) {
@@ -731,16 +799,133 @@ mod tests {
         assert!(!is_failed_tool_result(&json!({ "status": "done" })));
     }
 
+    fn chat_msg(id: i64, role: &str, content: &str) -> ChatMsg {
+        ChatMsg {
+            id,
+            role: role.to_string(),
+            content: content.to_string(),
+            created_at: String::new(),
+        }
+    }
+
+    fn replay_call(
+        request_message_id: i64,
+        round_index: i64,
+        call_index: i64,
+        tool_call_id: &str,
+        tool_name: &str,
+        arguments_json: &str,
+        result_json: &str,
+        assistant_content: &str,
+        reasoning_content: &str,
+    ) -> ToolCallReplay {
+        ToolCallReplay {
+            request_message_id,
+            round_index,
+            call_index,
+            tool_call_id: tool_call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            arguments_json: arguments_json.to_string(),
+            result_json: Some(result_json.to_string()),
+            status: "done".to_string(),
+            assistant_content: assistant_content.to_string(),
+            reasoning_content: reasoning_content.to_string(),
+        }
+    }
+
     #[test]
-    fn discovered_tools_are_added_once() {
-        let mut active = tools::core_tool_names();
-        activate_discovered_tools(
-            &mut active,
-            &json!({ "activated_tools": ["read_file", "run_command", "read_file"] }),
-        );
-        assert!(active.iter().any(|name| name == "read_file"));
-        assert!(active.iter().any(|name| name == "run_command"));
-        assert_eq!(active.iter().filter(|name| *name == "read_file").count(), 1);
+    fn history_replays_tool_rounds_between_user_and_final_assistant() {
+        let history = vec![
+            chat_msg(1, "user", "打开网页"),
+            chat_msg(
+                2,
+                "assistant",
+                "已完成。\n\n【中断前已完成的工具调用与结果】\n- browser_snapshot",
+            ),
+            chat_msg(3, "user", "继续"),
+        ];
+        let calls = vec![
+            replay_call(
+                1,
+                0,
+                0,
+                "call-1",
+                "browser_snapshot",
+                "{}",
+                r#"{"ok":true}"#,
+                "先看页面",
+                "观察 DOM",
+            ),
+            replay_call(
+                1,
+                0,
+                1,
+                "call-2",
+                "browser_click",
+                r#"{"ref":1}"#,
+                "{}",
+                "",
+                "",
+            ),
+        ];
+        let messages = history_with_tool_replay(&history, &calls);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "先看页面");
+        assert_eq!(messages[1]["reasoning_content"], "观察 DOM");
+        assert_eq!(messages[1]["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "call-1");
+        assert_eq!(messages[3]["role"], "tool");
+        assert_eq!(messages[3]["tool_call_id"], "call-2");
+        assert_eq!(messages[4]["role"], "assistant");
+        assert_eq!(messages[4]["content"], "已完成。");
+        assert_eq!(messages[5]["role"], "user");
+        assert_eq!(messages[5]["content"], "继续");
+    }
+
+    #[test]
+    fn request_body_keeps_full_tools_even_when_choice_is_none() {
+        let settings = crate::commands::Settings {
+            base_url: "https://api.openai.com/v1".into(),
+            api_key: String::new(),
+            model: "test".into(),
+            organize_root: String::new(),
+            auto_organize: false,
+            autostart: false,
+            desktop_path: String::new(),
+            thinking_enabled: false,
+            reasoning_effort: "low".into(),
+            vision_base_url: String::new(),
+            vision_api_key: String::new(),
+            vision_model: String::new(),
+            subagent_thinking_enabled: false,
+            subagent_reasoning_effort: "low".into(),
+            subagent_model: String::new(),
+            command_tools_enabled: true,
+            llm_profiles: vec![],
+            active_llm_profile_id: String::new(),
+            profile_name: String::new(),
+            profile_alias: String::new(),
+            profile_gender: String::new(),
+            profile_birth: String::new(),
+            profile_phone: String::new(),
+            profile_email: String::new(),
+            profile_city: String::new(),
+            temp_path: String::new(),
+        };
+        let cfg = client::LlmConfig {
+            base_url: settings.base_url.clone(),
+            api_key: String::new(),
+            model: "test".into(),
+        };
+        let auto = request_body(&cfg, &settings, &[], true);
+        let none = request_body(&cfg, &settings, &[], false);
+        assert_eq!(auto["tools"], tools::definitions());
+        assert_eq!(none["tools"], tools::definitions());
+        assert_eq!(auto["tool_choice"], "auto");
+        assert_eq!(none["tool_choice"], "none");
+        assert_eq!(auto["tools"], none["tools"]);
     }
 
     #[test]
@@ -856,5 +1041,16 @@ mod tests {
         assert!(!contains_tool_call_text(
             "```json\n{\"title\":\"你好\"}\n```"
         ));
+    }
+
+    #[test]
+    fn visible_assistant_content_hides_tool_digest() {
+        let raw = "日报已写好。\n\n【工具预算耗尽前已完成的工具调用与结果】\n- run_command({\"argv\":[\"lark-cli\",\"base\",\"+record-list\"]}) → {\"ok\":true}\n（以上资料已收集完毕，用户说「继续」时请直接基于它们推进，不要重复收集）";
+        assert_eq!(visible_assistant_content(raw), "日报已写好。");
+
+        let interrupted = "【中断前已完成的工具调用与结果】\n- load_skill({\"name\":\"windows-cli\"}) → {}";
+        assert_eq!(visible_assistant_content(interrupted), "（已中断）");
+
+        assert_eq!(visible_assistant_content("普通回复"), "普通回复");
     }
 }

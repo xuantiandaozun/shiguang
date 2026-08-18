@@ -1,8 +1,8 @@
 //! 浏览器操作统一入口。
-//! 通道：已连接的拾光浏览器扩展（操作用户当前浏览器，内部含 scripting /
-//! chrome.debugger 双执行面）⇄ 独立 CDP（127.0.0.1:9222 手动调试 / 9223 托管实例）。
-//! 路由：默认扩展优先；命中「通道能力型错误」（CSP 拦截、注入被拒等）自动故障转移到
-//! CDP 并重试同一动作；params.channel 可强制指定（extension / debugger / cdp）。
+//! 通道：已连接的拾光浏览器扩展（操作用户当前浏览器，内部含 chrome.debugger
+//! 主世界 / scripting 隔离世界双执行面）⇄ 独立 CDP（127.0.0.1:9222 手动调试 / 9223 托管实例）。
+//! 路由：默认扩展 debugger 优先（主世界，AI 操控更稳）；无法附着时降级 scripting；
+//! 两者都失败才故障转移到独立 CDP。params.channel 可强制指定（extension / debugger / cdp）。
 //! 冷启动：扩展未连接且装过扩展时，先拉起系统默认浏览器（带登录态）等扩展接入，
 //! 接不上才回退独立 CDP 实例。
 
@@ -53,7 +53,7 @@ impl Hub {
             "extension_seen": self.ext_seen(),
             "cdp_connected": cdp_desc.is_some(),
             "cdp_channel": cdp_desc,
-            "hint": "默认走扩展（scripting 隔离世界）；浏览器未启动且装过扩展时自动拉起系统默认浏览器（带登录态）等扩展接入，接不上才回退独立 CDP。CSP 受限站点（如 X）自动降级：扩展内 debugger 通道 → 独立 CDP（9222 手动调试 / 9223 托管实例）。响应 channel 字段标识实际通道（extension / extension-debugger / cdp），channel 变化后快照编号失效需重新获取。browser_evaluate 可用 channel 参数强制指定通道。",
+            "hint": "默认走扩展 debugger 主世界（会显示调试提示条）；无法附着时降级到 scripting 隔离世界。浏览器未启动且装过扩展时自动拉起系统默认浏览器（带登录态）等扩展接入，接不上才回退独立 CDP。debugger 与 scripting 都失败时再降独立 CDP（9222 手动调试 / 9223 托管实例）。响应 channel 字段标识实际通道（extension-debugger / extension / cdp），channel 变化后快照编号失效需重新获取。browser_evaluate 可用 channel 参数强制指定通道。",
         })
     }
 
@@ -85,8 +85,7 @@ impl Hub {
                     if !is_channel_error(&e) {
                         return Err(e);
                     }
-                    // 扩展通道做不到（CSP/注入被拒，且扩展内 debugger 兜底也失败）：
-                    // 取当前活动页 URL，让 CDP 对齐到同一页面后重试
+                    // 扩展 debugger 与 scripting 都做不到：取当前活动页 URL，让 CDP 对齐后重试
                     let target_url =
                         self.ext.call("info", json!({})).await.ok().and_then(|i| {
                             i.get("url").and_then(|u| u.as_str()).map(str::to_string)

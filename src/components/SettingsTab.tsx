@@ -1,12 +1,138 @@
 import { useEffect, useState } from "react";
 import { ipc, onEvent } from "../lib/ipc";
-import type { ProfileEntry, Settings } from "../lib/ipc";
+import type { LlmProfile, ProfileEntry, Settings } from "../lib/ipc";
 
-const PRESETS: Array<{ name: string; baseUrl: string; model: string }> = [
-  { name: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-v4-flash" },
-  { name: "通义千问", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus" },
-  { name: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+type LlmPreset = {
+  name: string;
+  group: "国内" | "火山" | "国际";
+  baseUrl: string;
+  model: string;
+  models?: string[];
+  thinking?: boolean;
+  hint?: string;
+};
+
+const LLM_PRESETS: LlmPreset[] = [
+  {
+    name: "DeepSeek",
+    group: "国内",
+    baseUrl: "https://api.deepseek.com/v1",
+    model: "deepseek-v4-flash",
+    models: ["deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
+    thinking: true,
+  },
+  {
+    name: "通义千问",
+    group: "国内",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    model: "qwen-plus",
+    models: ["qwen-plus", "qwen-turbo", "qwen-max", "qwen-long"],
+  },
+  {
+    name: "智谱 GLM",
+    group: "国内",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    model: "glm-4-flash",
+    models: ["glm-4-flash", "glm-4.5", "glm-4.5-air", "glm-z1-air"],
+  },
+  {
+    name: "Kimi",
+    group: "国内",
+    baseUrl: "https://api.moonshot.cn/v1",
+    model: "kimi-k2.5",
+    models: ["kimi-k2.5", "moonshot-v1-auto", "moonshot-v1-128k"],
+  },
+  {
+    name: "硅基流动",
+    group: "国内",
+    baseUrl: "https://api.siliconflow.cn/v1",
+    model: "deepseek-ai/DeepSeek-V3",
+    models: ["deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-V3.1", "Qwen/Qwen3-235B-A22B"],
+  },
+  {
+    name: "腾讯混元",
+    group: "国内",
+    baseUrl: "https://api.hunyuan.cloud.tencent.com/v1",
+    model: "hunyuan-turbos-latest",
+    models: ["hunyuan-turbos-latest", "hunyuan-large", "hunyuan-lite"],
+  },
+  {
+    name: "MiniMax",
+    group: "国内",
+    baseUrl: "https://api.minimax.chat/v1",
+    model: "MiniMax-M2.5",
+    models: ["MiniMax-M2.5", "MiniMax-Text-01", "abab6.5s-chat"],
+  },
+  {
+    name: "火山 Agent Plan",
+    group: "火山",
+    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+    model: "doubao-seed-2.0-pro",
+    models: [
+      "doubao-seed-2.0-pro",
+      "doubao-seed-2.0-lite",
+      "doubao-seed-2.0-mini",
+      "doubao-seed-2.0-code",
+      "deepseek-v4-flash",
+      "glm-5.2",
+    ],
+    hint: "个人套餐 OpenAI 兼容接口。Key 在方舟控制台「开通管理」获取，请勿与 Coding Plan 混用。",
+  },
+  {
+    name: "火山 Coding Plan",
+    group: "火山",
+    baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
+    model: "doubao-seed-2.0-code",
+    models: ["doubao-seed-2.0-code", "doubao-seed-2.0-pro", "ark-code-latest", "glm-4.7", "kimi-k2.5"],
+    hint: "编程套餐必须走 /api/coding/v3，误用 /api/v3 会按量计费。",
+  },
+  {
+    name: "OpenAI",
+    group: "国际",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-4o-mini",
+    models: ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "o4-mini"],
+  },
+  {
+    name: "OpenRouter",
+    group: "国际",
+    baseUrl: "https://openrouter.ai/api/v1",
+    model: "openai/gpt-4o-mini",
+    models: ["openai/gpt-4o-mini", "anthropic/claude-sonnet-4", "deepseek/deepseek-chat", "google/gemini-2.5-flash"],
+  },
 ];
+
+function uniqueProfileName(base: string, profiles: LlmProfile[]): string {
+  if (!profiles.some((p) => p.name === base)) return base;
+  let i = 2;
+  while (profiles.some((p) => p.name === `${base} ${i}`)) i += 1;
+  return `${base} ${i}`;
+}
+
+function newProfileId(): string {
+  return typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `lp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function emptyProfile(name = "自定义"): LlmProfile {
+  return {
+    id: newProfileId(),
+    name,
+    base_url: "",
+    api_key: "",
+    model: "",
+    thinking_enabled: false,
+    reasoning_effort: "high",
+  };
+}
+
+function suggestedModels(profile: LlmProfile): string[] {
+  const hit = LLM_PRESETS.find(
+    (p) => p.baseUrl.replace(/\/+$/, "") === profile.base_url.replace(/\/+$/, "")
+  );
+  return hit?.models ?? [];
+}
 
 export default function SettingsTab() {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -16,7 +142,13 @@ export default function SettingsTab() {
   useEffect(() => {
     ipc
       .getSettings()
-      .then(setSettings)
+      .then((s) =>
+        setSettings({
+          ...s,
+          llm_profiles: s.llm_profiles ?? [],
+          active_llm_profile_id: s.active_llm_profile_id ?? "",
+        })
+      )
       .catch((e) => setError(String(e)));
   }, []);
 
@@ -41,70 +173,20 @@ export default function SettingsTab() {
 
   return (
     <div className="space-y-5 max-w-2xl">
-      <section className="space-y-2.5">
-        <div className="text-sm font-medium text-slate-100">大模型 API</div>
-        <div className="flex gap-2">
-          {PRESETS.map((p) => (
-            <button
-              key={p.name}
-              onClick={() => update({ base_url: p.baseUrl, model: p.model })}
-              className="px-3 py-1.5 rounded-full text-xs bg-slate-700/60 text-slate-300 hover:bg-slate-600 transition"
-            >
-              {p.name}
-            </button>
-          ))}
-        </div>
-        <label className="block">
-          <div className="text-xs text-slate-400 mb-1">Base URL（OpenAI 兼容接口）</div>
-          <input
-            value={settings.base_url}
-            onChange={(e) => update({ base_url: e.target.value })}
-            className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500"
-          />
-        </label>
-        <label className="block">
-          <div className="text-xs text-slate-400 mb-1">API Key（仅保存在本机 SQLite，不会上传）</div>
-          <input
-            type="password"
-            value={settings.api_key}
-            onChange={(e) => update({ api_key: e.target.value })}
-            placeholder="sk-..."
-            className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500 placeholder:text-slate-600"
-          />
-        </label>
-        <label className="block">
-          <div className="text-xs text-slate-400 mb-1">模型</div>
-          <input
-            value={settings.model}
-            onChange={(e) => update({ model: e.target.value })}
-            className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500"
-          />
-        </label>
-        <label className="flex items-center gap-2.5 text-sm text-slate-300 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={settings.thinking_enabled}
-            onChange={(e) => update({ thinking_enabled: e.target.checked })}
-            className="w-4 h-4 accent-sky-500"
-          />
-          启用思考模式
-          <span className="text-xs text-slate-500">先输出思维链再作答，复杂任务更准确；仅 DeepSeek 接口生效</span>
-        </label>
-        {settings.thinking_enabled && (
-          <label className="block">
-            <div className="text-xs text-slate-400 mb-1">思考强度</div>
-            <select
-              value={settings.reasoning_effort}
-              onChange={(e) => update({ reasoning_effort: e.target.value })}
-              className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500"
-            >
-              <option value="low">low — 最快，适合简单问答</option>
-              <option value="high">high — 默认，兼顾速度与质量</option>
-              <option value="max">max — 最深思考，慢但更准</option>
-            </select>
-          </label>
-        )}
-      </section>
+      <LlmProfilesSection
+        settings={settings}
+        update={update}
+        onActivate={async (next) => {
+          setError("");
+          try {
+            await ipc.saveSettings(next);
+            setSettings(next);
+            setSaved(true);
+          } catch (e) {
+            setError(String(e));
+          }
+        }}
+      />
 
       <section className="space-y-2.5">
         <div className="text-sm font-medium text-slate-100">
@@ -328,6 +410,328 @@ export default function SettingsTab() {
         {error && <span className="text-xs text-rose-400">{error}</span>}
       </div>
     </div>
+  );
+}
+
+function LlmProfilesSection({
+  settings,
+  update,
+  onActivate,
+}: {
+  settings: Settings;
+  update: (patch: Partial<Settings>) => void;
+  onActivate: (next: Settings) => Promise<void>;
+}) {
+  const profiles = settings.llm_profiles ?? [];
+  const [editingId, setEditingId] = useState<string | null>(
+    settings.active_llm_profile_id || profiles[0]?.id || null
+  );
+  const [localError, setLocalError] = useState("");
+  const editing = profiles.find((p) => p.id === editingId) ?? null;
+  const active = profiles.find((p) => p.id === settings.active_llm_profile_id) ?? null;
+  const models = editing ? suggestedModels(editing) : [];
+  const editingHint = LLM_PRESETS.find(
+    (p) => editing && p.baseUrl.replace(/\/+$/, "") === editing.base_url.replace(/\/+$/, "")
+  )?.hint;
+
+  const replaceProfiles = (next: LlmProfile[], extra: Partial<Settings> = {}) => {
+    const activeId = extra.active_llm_profile_id ?? settings.active_llm_profile_id;
+    const current = next.find((p) => p.id === activeId);
+    update({
+      llm_profiles: next,
+      ...extra,
+      ...(current
+        ? {
+            base_url: current.base_url,
+            api_key: current.api_key,
+            model: current.model,
+            thinking_enabled: current.thinking_enabled,
+            reasoning_effort: current.reasoning_effort,
+          }
+        : {}),
+    });
+  };
+
+  const patchProfile = (id: string, patch: Partial<LlmProfile>) => {
+    replaceProfiles(profiles.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+  };
+
+  const addFromPreset = (preset: LlmPreset) => {
+    const profile: LlmProfile = {
+      ...emptyProfile(uniqueProfileName(preset.name, profiles)),
+      base_url: preset.baseUrl,
+      model: preset.model,
+      thinking_enabled: Boolean(preset.thinking),
+      reasoning_effort: "high",
+    };
+    const next = [...profiles, profile];
+    replaceProfiles(next, profiles.length === 0 ? { active_llm_profile_id: profile.id } : {});
+    setEditingId(profile.id);
+    setLocalError("");
+  };
+
+  const addCustom = () => {
+    const profile = emptyProfile(uniqueProfileName("自定义", profiles));
+    const next = [...profiles, profile];
+    replaceProfiles(next, profiles.length === 0 ? { active_llm_profile_id: profile.id } : {});
+    setEditingId(profile.id);
+  };
+
+  const activate = async (id: string) => {
+    const p = profiles.find((x) => x.id === id);
+    if (!p) return;
+    if (!p.api_key.trim()) {
+      setLocalError("先填写这套配置的 API Key，再设为当前使用");
+      setEditingId(id);
+      return;
+    }
+    if (!p.base_url.trim() || !p.model.trim()) {
+      setLocalError("Base URL 和模型都不能为空");
+      setEditingId(id);
+      return;
+    }
+    setLocalError("");
+    const next: Settings = {
+      ...settings,
+      llm_profiles: profiles,
+      active_llm_profile_id: id,
+      base_url: p.base_url,
+      api_key: p.api_key,
+      model: p.model,
+      thinking_enabled: p.thinking_enabled,
+      reasoning_effort: p.reasoning_effort,
+    };
+    await onActivate(next);
+  };
+
+  const remove = (id: string) => {
+    if (profiles.length <= 1) {
+      setLocalError("至少保留一套配置");
+      return;
+    }
+    const next = profiles.filter((p) => p.id !== id);
+    const extra: Partial<Settings> = {};
+    if (id === settings.active_llm_profile_id) {
+      extra.active_llm_profile_id = next[0].id;
+    }
+    replaceProfiles(next, extra);
+    if (editingId === id) setEditingId(next[0].id);
+  };
+
+  const groups: Array<LlmPreset["group"]> = ["国内", "火山", "国际"];
+
+  return (
+    <section className="space-y-3">
+      <div>
+        <div className="text-sm font-medium text-slate-100">大模型 API</div>
+        <div className="text-xs text-slate-500 mt-1 leading-5">
+          可保存多套接口（不同供应商或 Key），手动选择当前对话用哪一套。Key 只存在本机。
+        </div>
+      </div>
+
+      <label className="block">
+        <div className="text-xs text-slate-400 mb-1">当前使用</div>
+        <select
+          value={settings.active_llm_profile_id}
+          onChange={(e) => activate(e.target.value)}
+          className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500"
+        >
+          {profiles.length === 0 && <option value="">尚未添加配置</option>}
+          {profiles.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+              {p.model ? ` · ${p.model}` : ""}
+              {p.api_key.trim() ? "" : "（未填 Key）"}
+            </option>
+          ))}
+        </select>
+        {active && (
+          <div className="text-[11px] text-slate-500 mt-1 truncate" title={active.base_url}>
+            {active.base_url || "尚未填写 Base URL"}
+          </div>
+        )}
+      </label>
+
+      <div className="space-y-1.5">
+        {profiles.map((p) => {
+          const isActive = p.id === settings.active_llm_profile_id;
+          const isEditing = p.id === editingId;
+          return (
+            <div
+              key={p.id}
+              className={`rounded-lg border px-3 py-2 ${
+                isActive
+                  ? "border-sky-500/40 bg-sky-500/10"
+                  : isEditing
+                    ? "border-slate-600 bg-slate-800/80"
+                    : "border-slate-700/60 bg-slate-800/40"
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingId(p.id)}
+                  className="flex-1 min-w-0 text-left"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-slate-100 truncate">{p.name || "未命名"}</span>
+                    {isActive && (
+                      <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] bg-sky-500/20 text-sky-300">
+                        使用中
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-0.5 truncate">
+                    {p.model || "未填模型"} · {p.api_key.trim() ? "已填 Key" : "未填 Key"}
+                  </div>
+                </button>
+                {!isActive && (
+                  <button
+                    type="button"
+                    onClick={() => activate(p.id)}
+                    className="shrink-0 px-2 py-1 rounded text-xs text-sky-300 hover:bg-sky-500/15 transition"
+                  >
+                    设为当前
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setEditingId(p.id)}
+                  className="shrink-0 px-2 py-1 rounded text-xs text-slate-400 hover:text-slate-200 transition"
+                >
+                  编辑
+                </button>
+                <button
+                  type="button"
+                  onClick={() => remove(p.id)}
+                  className="shrink-0 px-2 py-1 rounded text-xs text-slate-500 hover:text-rose-400 transition"
+                >
+                  删除
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {editing && (
+        <div className="rounded-lg border border-slate-700/60 bg-slate-800/30 p-3 space-y-2.5">
+          <div className="text-xs text-slate-400">编辑「{editing.name || "未命名"}」</div>
+          {editingHint && <div className="text-[11px] text-amber-300/90 leading-5">{editingHint}</div>}
+          <label className="block">
+            <div className="text-xs text-slate-400 mb-1">名称</div>
+            <input
+              value={editing.name}
+              onChange={(e) => patchProfile(editing.id, { name: e.target.value })}
+              className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500"
+            />
+          </label>
+          <label className="block">
+            <div className="text-xs text-slate-400 mb-1">Base URL（OpenAI 兼容接口）</div>
+            <input
+              value={editing.base_url}
+              onChange={(e) => patchProfile(editing.id, { base_url: e.target.value })}
+              className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500"
+            />
+          </label>
+          <label className="block">
+            <div className="text-xs text-slate-400 mb-1">API Key（仅保存在本机 SQLite，不会上传）</div>
+            <input
+              type="password"
+              value={editing.api_key}
+              onChange={(e) => patchProfile(editing.id, { api_key: e.target.value })}
+              placeholder="sk-..."
+              className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500 placeholder:text-slate-600"
+            />
+          </label>
+          <label className="block">
+            <div className="text-xs text-slate-400 mb-1">模型</div>
+            <input
+              list={`llm-models-${editing.id}`}
+              value={editing.model}
+              onChange={(e) => patchProfile(editing.id, { model: e.target.value })}
+              className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500"
+            />
+            {models.length > 0 && (
+              <datalist id={`llm-models-${editing.id}`}>
+                {models.map((m) => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
+            )}
+          </label>
+          <label className="flex items-center gap-2.5 text-sm text-slate-300 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={editing.thinking_enabled}
+              onChange={(e) => patchProfile(editing.id, { thinking_enabled: e.target.checked })}
+              className="w-4 h-4 accent-sky-500"
+            />
+            启用思考模式
+            <span className="text-xs text-slate-500">仅 DeepSeek 接口会附带该参数</span>
+          </label>
+          {editing.thinking_enabled && (
+            <label className="block">
+              <div className="text-xs text-slate-400 mb-1">思考强度</div>
+              <select
+                value={editing.reasoning_effort}
+                onChange={(e) => patchProfile(editing.id, { reasoning_effort: e.target.value })}
+                className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500"
+              >
+                <option value="low">low — 最快，适合简单问答</option>
+                <option value="high">high — 默认，兼顾速度与质量</option>
+                <option value="max">max — 最深思考，慢但更准</option>
+              </select>
+            </label>
+          )}
+        </div>
+      )}
+
+      <div className="space-y-2">
+        <div className="text-xs text-slate-400">快捷添加供应商</div>
+        {groups.map((g) => (
+          <div key={g} className="space-y-1.5">
+            <div className="text-[11px] text-slate-500">{g}</div>
+            <div className="flex flex-wrap gap-1.5">
+              {LLM_PRESETS.filter((p) => p.group === g).map((p) => (
+                <button
+                  key={p.name}
+                  type="button"
+                  title={p.hint || `添加 ${p.name}：${p.model}`}
+                  onClick={() => addFromPreset(p)}
+                  className="px-3 py-1.5 rounded-full text-xs bg-slate-700/60 text-slate-300 hover:bg-slate-600 transition"
+                >
+                  {p.name}
+                </button>
+              ))}
+            </div>
+            {g === "火山" && (
+              <div className="text-[11px] text-slate-500 leading-5">
+                Agent Plan 用 <span className="text-slate-400">/api/v3</span>
+                ，Coding Plan 必须带 <span className="text-slate-400">/coding</span>
+                。                接入说明见
+                <button
+                  type="button"
+                  onClick={() => ipc.openExternal("https://www.volcengine.com/docs/82379/2366394")}
+                  className="ml-1 text-sky-400 hover:text-sky-300"
+                >
+                  火山 Agent Plan 文档
+                </button>
+                。
+              </div>
+            )}
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={addCustom}
+          className="px-3 py-1.5 rounded-full text-xs border border-dashed border-slate-600 text-slate-400 hover:text-slate-200 hover:border-slate-400 transition"
+        >
+          + 自定义
+        </button>
+      </div>
+      {localError && <div className="text-xs text-rose-400">{localError}</div>}
+    </section>
   );
 }
 

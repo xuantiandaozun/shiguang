@@ -59,13 +59,18 @@ setInterval(() => {
 connect();
 
 // ---- 内嵌 CDP 通道（chrome.debugger）----
-// 用于 CSP 受限站点（如 X）：Runtime.evaluate 走 DevTools 特权，豁免页面 CSP。
-// 代价：附着期间 Chrome 顶部显示「正在调试此浏览器」提示条。
-// 会话按标签保持，避免每次调用 attach/detach 导致提示条闪烁；SW 重启后 Set 丢失，
-// 重新 attach 时报 "already attached" 视为成功即可。
+// 默认优先：Runtime.evaluate 走 DevTools 特权，进页面主世界，能碰到框架内部状态、
+// 绕过 CSP，AI 对复杂站点的操控更稳。代价：附着期间 Chrome 顶部显示调试提示条。
+// 无法附着时再降级到 scripting 隔离世界。会话按标签保持，避免提示条闪烁；
+// SW 重启后 Set 丢失，重新 attach 时报 "already attached" 视为成功即可。
 const attachedTabs = new Set();
+// 同一标签必须固定执行面，否则 snapshot 的 ref 和 click/evaluate 会落在不同世界。
+const tabExec = new Map();
 chrome.debugger.onDetach.addListener((source) => {
-  if (source && source.tabId) attachedTabs.delete(source.tabId);
+  if (source && source.tabId) {
+    attachedTabs.delete(source.tabId);
+    tabExec.delete(source.tabId);
+  }
 });
 
 async function ensureDebugger(tabId) {
@@ -182,19 +187,46 @@ async function runInTabViaDebugger(tabId, action, args) {
   return res;
 }
 
-// 默认隔离世界执行；命中通道能力型错误（CSP/注入被拒）时自动降级到 debugger 通道
-async function runInTabAuto(tabId, action, args) {
+function markDebugger(res) {
+  if (res && typeof res === "object" && !Array.isArray(res)) res.via = "debugger";
+  return res;
+}
+
+// 默认 debugger 主世界；无法附着时降级到 scripting 隔离世界。
+// 一旦某标签选定执行面就粘住，避免 ref 跨世界失效。channel 可强制指定。
+async function runInTabAuto(tabId, action, args, channel) {
+  const ch = channel || "auto";
+  const runDebugger = async () => {
+    const res = markDebugger(await runInTabViaDebugger(tabId, action, args));
+    tabExec.set(tabId, "debugger");
+    return res;
+  };
+  const runScript = async () => {
+    const res = await runInTab(tabId, action, args);
+    tabExec.set(tabId, "extension");
+    return res;
+  };
+  if (ch === "debugger") return runDebugger();
+  if (ch === "extension") return runScript();
+  if (tabExec.get(tabId) === "extension") return runScript();
   try {
-    return await runInTab(tabId, action, args);
+    return await runDebugger();
   } catch (e) {
     if (!isChannelError(e)) throw e;
-    const res = await runInTabViaDebugger(tabId, action, args);
-    if (res && typeof res === "object") res.via = "debugger";
-    return res;
+    return runScript();
   }
 }
 
-// 执行动态 JS：带 ref 时复用快照所在隔离世界；不带 ref 时进入页面主世界。
+async function evalViaDebugger(tabId, expression, ref, suppliedArgs) {
+  if (ref != null) {
+    const src = await getPageApiSrc();
+    const wrapped = `${src}\n;(async()=>{const $el=window.__dh.ref(${JSON.stringify(ref)});if(!$el)throw new Error(${JSON.stringify(`元素 [${ref}] 不存在或已失效，请在当前通道重新获取快照`)});const $args=${JSON.stringify(suppliedArgs)};return await (${expression});})()`;
+    return debuggerEval(tabId, wrapped);
+  }
+  return debuggerEval(tabId, expression);
+}
+
+// 执行动态 JS（scripting 降级路径）：带 ref 时复用快照所在隔离世界；不带 ref 时进入页面主世界。
 async function evalInPage(tabId, expression, ref, suppliedArgs) {
   // 带 ref 时必须与 snapshot 在同一隔离世界执行，才能安全复用元素引用。
   if (ref != null) {
@@ -253,20 +285,21 @@ async function handle(action, p) {
         await chrome.tabs.update(tab.id, { url: p.url });
       }
       await waitLoad(tab.id, 15000).catch(() => {});
-      return runInTabAuto(tab.id, "info", []);
+      tabExec.delete(tab.id);
+      return runInTabAuto(tab.id, "info", [], p.channel);
     }
     case "snapshot": {
       const t = await activeTab();
-      const snapshot = await runInTabAuto(t.id, "snapshot", [p.max_chars || 8000, p.scope ?? null]);
-      const info = await runInTabAuto(t.id, "info", []);
+      const snapshot = await runInTabAuto(t.id, "snapshot", [p.max_chars || 8000, p.scope ?? null], p.channel);
+      const info = await runInTabAuto(t.id, "info", [], p.channel);
       const out = { title: info.title, url: info.url, snapshot };
-      if (info.via === "debugger") out.via = "debugger";
+      if ((snapshot && snapshot.via === "debugger") || info.via === "debugger") out.via = "debugger";
       return out;
     }
     case "read": {
       const t = await activeTab();
-      const article = await runInTabAuto(t.id, "read", [p.max_chars || 12000]);
-      const info = await runInTabAuto(t.id, "info", []);
+      const article = await runInTabAuto(t.id, "read", [p.max_chars || 12000], p.channel);
+      const info = await runInTabAuto(t.id, "info", [], p.channel);
       const out = {
         url: info.url,
         title: article.title || info.title || "",
@@ -284,15 +317,15 @@ async function handle(action, p) {
     }
     case "click": {
       const t = await activeTab();
-      return runInTabAuto(t.id, "click", [p.ref]);
+      return runInTabAuto(t.id, "click", [p.ref], p.channel);
     }
     case "type": {
       const t = await activeTab();
-      return runInTabAuto(t.id, "type", [p.ref, p.text ?? "", p.clear !== false]);
+      return runInTabAuto(t.id, "type", [p.ref, p.text ?? "", p.clear !== false], p.channel);
     }
     case "scroll": {
       const t = await activeTab();
-      return runInTabAuto(t.id, "scroll", [p.direction || "down", p.amount || 600, p.ref ?? null]);
+      return runInTabAuto(t.id, "scroll", [p.direction || "down", p.amount || 600, p.ref ?? null], p.channel);
     }
     case "tabs": {
       const tabs = await chrome.tabs.query({});
@@ -317,28 +350,33 @@ async function handle(action, p) {
       const ref = p.ref ?? null;
       const suppliedArgs = p.args ?? null;
       const ch = p.channel || "auto";
-      // channel=debugger：跳过 scripting 直接走 CDP；channel=extension：禁止降级
-      if (ch === "debugger") {
-        if (ref != null) {
-          const src = await getPageApiSrc();
-          const wrapped = `${src}\n;(async()=>{const $el=window.__dh.ref(${JSON.stringify(ref)});if(!$el)throw new Error(${JSON.stringify(`元素 [${ref}] 不存在或已失效，请在当前通道重新获取快照`)});const $args=${JSON.stringify(suppliedArgs)};return await (${expr});})()`;
-          return { result: await debuggerEval(t.id, wrapped), via: "debugger" };
-        }
-        return { result: await debuggerEval(t.id, expr), via: "debugger" };
-      }
+      const runDebugger = async () => {
+        const result = await evalViaDebugger(t.id, expr, ref, suppliedArgs);
+        tabExec.set(t.id, "debugger");
+        return { result, via: "debugger" };
+      };
+      const runScript = async () => {
+        const result = await evalInPage(t.id, expr, ref, suppliedArgs);
+        tabExec.set(t.id, "extension");
+        return { result };
+      };
+      // channel=debugger：只走主世界；channel=extension：只走 scripting，不降级
+      if (ch === "debugger") return runDebugger();
+      if (ch === "extension") return runScript();
+      if (tabExec.get(t.id) === "extension") return runScript();
       try {
-        return { result: await evalInPage(t.id, expr, ref, suppliedArgs) };
+        return await runDebugger();
       } catch (e) {
-        if (ch === "extension" || !isChannelError(e)) throw e;
+        if (!isChannelError(e)) throw e;
         if (ref != null) {
-          throw new Error(`基于 ref 的动态脚本在当前扩展通道失败，且切换通道后编号会失效。请重新获取快照后再执行。原错误：${String((e && e.message) || e)}`);
+          throw new Error(`基于 ref 的动态脚本在调试通道失败，且切换通道后编号会失效。请重新获取快照后再执行。原错误：${String((e && e.message) || e)}`);
         }
-        return { result: await debuggerEval(t.id, expr), via: "debugger" };
+        return runScript();
       }
     }
     case "info": {
       const t = await activeTab();
-      return runInTabAuto(t.id, "info", []);
+      return runInTabAuto(t.id, "info", [], p.channel);
     }
     default:
       throw new Error("未知动作: " + action);

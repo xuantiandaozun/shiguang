@@ -176,6 +176,23 @@ impl SkillStore {
         out
     }
 
+    /// 注入对话尾部的启用技能目录（名称+描述）。系统提示保持稳定，目录随启用集变化。
+    pub fn catalog_block(&self) -> Option<String> {
+        let items: Vec<SkillInfo> = self.list().into_iter().filter(|s| s.enabled).collect();
+        if items.is_empty() {
+            return None;
+        }
+        let mut out = String::from(
+            "\n\n已启用 Skills（根据当前目标判断是否命中；命中则先 load_skill，按技能步骤执行，不要凭摘要猜步骤）：",
+        );
+        for skill in items {
+            let desc = collapse_ws(&skill.description);
+            let desc: String = desc.chars().take(180).collect();
+            out.push_str(&format!("\n- {}：{}", skill.name, desc));
+        }
+        Some(out)
+    }
+
     /// AI load_skill：禁用则拒绝
     pub fn load(&self, name: &str) -> Result<String> {
         let name = sanitize_name(name)?;
@@ -540,6 +557,10 @@ fn slugify(title: &str) -> String {
     s
 }
 
+fn collapse_ws(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 struct ParsedSkill {
     name: String,
     description: String,
@@ -792,6 +813,25 @@ mod tests {
         let store = SkillStore::new(&dir);
         let err = store.create("desktop-organize", "x", "# body").unwrap_err();
         assert!(err.to_string().contains("内部技能"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn catalog_block_lists_enabled_external_skills() {
+        let dir = std::env::temp_dir().join(format!("dh-skills-cat-{}", uuid::Uuid::new_v4()));
+        let _ = fs::create_dir_all(&dir);
+        let store = SkillStore::new(&dir);
+        store
+            .create(
+                "daily-report-feishu-base",
+                "用户的日报记在飞书多维表格里，撰写或参考已提交的日报时使用",
+                "# 日报",
+            )
+            .unwrap();
+        let block = store.catalog_block().expect("catalog");
+        assert!(block.contains("daily-report-feishu-base"));
+        assert!(block.contains("写日报"));
+        assert!(block.contains("load_skill"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -20,7 +20,7 @@ LLM 走 OpenAI 兼容接口（默认 DeepSeek），Function Calling + SSE 流式
   - `llm/` `agent.rs` 主代理循环 / `client.rs` SSE 客户端 / `tools.rs` 工具定义+执行 / `subagent.rs` 子代理 / `prompts.rs` 系统提示词 / `profile.rs` 个人信息 / `vision.rs` 视觉模型
   - `organizer/` 桌面整理：scanner / executor / rules / watcher
   - `browser/` 浏览器：扩展桥 ext + CDP cdp/launch；page-api + Readability（browser_read 抽正文）
-  - `tasks.rs` 后台命令；`machine.rs` 本机信息；`skills.rs` + `builtin_skills.rs` Agent Skills；`reader.rs` / `writer.rs`；`ocr.rs`
+  - `tasks.rs` 后台命令；`machine.rs` 本机信息；`lookup_cache.rs` 外部对照数据缓存；`skills.rs` + `builtin_skills.rs` Agent Skills；`reader.rs` / `writer.rs`；`ocr.rs`
 - `src-tauri/builtin-skills/` 内部 Skills 源文件（改完需重新编译打包才生效）
 
 ## 关键架构
@@ -28,14 +28,15 @@ LLM 走 OpenAI 兼容接口（默认 DeepSeek），Function Calling + SSE 流式
 2. **工具系统** `tools.rs`：新增工具四步 = definitions → execute → prompts（仅非显而易见约束）→ ChatPanel `TOOL_LABELS`。
 3. **子代理** `subagent.rs`：只读白名单 + 15 轮 + 5 分钟；`Box::pin` 打破异步递归。
 4. **后台任务** `tasks.rs`：`run_command` / `run_command_background` / `check_task` / `list_tasks` / `stop_task`；开关 `command_tools_enabled`；命令日志按 UTF-8/GBK 自适应解码。
-5. **待办提醒** `todo/scheduler.rs`：30s 轮询到期，按 `todos.remind_mode` 分发——`notify` 系统通知；`popup`/`popup_input` 发 `reminder-popup` 事件给 reminder 弹窗。`popup_input` 的输入作为聊天消息发给 AI（调 `send_chat_message`，不落本地），发完 `show_chat_window` 展开聊天窗；重复任务提醒即顺延、一次性任务标 reminded。
-6. **本机信息** `get_system_info`：便利封装，与 `run_command` 等价可选，不在系统提示词强制引导。
-7. **Agent Skills**（两类）
+5. **外部参考缓存** `lookup_cache`：按稳定 key 保存 CLI/API 提炼后的对照表（id↔名称、字段/选项），默认 7 天；目录注入对话末尾。不自动缓存原始命令输出。
+6. **待办提醒** `todo/scheduler.rs`：30s 轮询到期，按 `todos.remind_mode` 分发——`notify` 系统通知；`popup`/`popup_input` 发 `reminder-popup` 事件给 reminder 弹窗。`popup_input` 的输入作为聊天消息发给 AI（调 `send_chat_message`，不落本地），发完 `show_chat_window` 展开聊天窗；重复任务提醒即顺延、一次性任务标 reminded。
+7. **本机信息** `get_system_info`：便利封装，与 `run_command` 等价可选，不在系统提示词强制引导。
+8. **Agent Skills**（两类）
    - **internal**：`builtin_skills.rs` + `include_str!` 编译期嵌入；只读；AI/UI 禁 create/覆盖/删除；可启停。新增：在 `builtin-skills/<name>/SKILL.md` 写文件并在 `builtin_skills::ALL` 登记。现有：`desktop-organize`（整理原则）、`windows-cli`（Windows 下用 argv/stdin 调用外部程序，避免拼命令字符串）。
    - **external**：`app_data/skills/`；AI 可 create/覆盖/删除；可从 Claude/Codex/Cursor 同步；承接旧「工作流经验」一次性迁移（`migrate_workflows`，设置键 `workflows_migrated_to_skills`）。
    - 启用技能目录注入对话末尾；命中 `load_skill`。完整完成后用 `create_skill` 沉淀经验（取代旧 save_workflow）。
-8. **系统提示词**：只写产品约束；参数/细则放 tools 与 Skills。整理细则在内部 skill `desktop-organize`。
-9. **设置三处同步**：`commands.rs` ↔ `ipc.ts` ↔ `SettingsTab.tsx`。事件命名 `xxx-changed`。
+9. **系统提示词**：只写产品约束；参数/细则放 tools 与 Skills。整理细则在内部 skill `desktop-organize`。
+10. **设置三处同步**：`commands.rs` ↔ `ipc.ts` ↔ `SettingsTab.tsx`。事件命名 `xxx-changed`。
 
 ## DeepSeek 兼容要点
 - thinking / reasoning_effort 只对含 deepseek 的 base_url 附加。
@@ -56,4 +57,4 @@ LLM 走 OpenAI 兼容接口（默认 DeepSeek），Function Calling + SSE 流式
 - 打包：`npm run tauri:build`
 
 ## 数据位置
-`%APPDATA%/com.deskhelper.win/`：`deskhelper.db`、`tasks/`、`skills/`（仅外部）、`screenshots/`、`temp/`（AI 临时文件）、`file_backups/`。
+`%APPDATA%/com.deskhelper.win/`：`deskhelper.db`、`tasks/`、`skills/`（仅外部）、`lookup-cache.json`、`screenshots/`、`temp/`（AI 临时文件）、`file_backups/`。
