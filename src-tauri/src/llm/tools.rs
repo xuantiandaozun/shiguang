@@ -16,6 +16,8 @@ pub fn core_tool_names() -> Vec<String> {
         DISCOVER_TOOL.to_string(),
         "get_tool_call_history".to_string(),
         "load_skill".to_string(),
+        "ask_user".to_string(),
+        "todo_write".to_string(),
     ]
 }
 
@@ -45,6 +47,7 @@ fn tools_for_category(category: &str) -> &'static [&'static str] {
             "browser_evaluate",
             "browser_status",
         ],
+        "web" => &["web_search", "web_fetch"],
         "organize" => &[
             "scan_desktop",
             "propose_organization",
@@ -65,7 +68,7 @@ fn tools_for_category(category: &str) -> &'static [&'static str] {
             "lookup_cache",
         ],
         "system" => &["get_system_info"],
-        "delegation" => &["run_subagent"],
+        "delegation" => &["run_subagent", "await_subagent"],
         "skills" => &[
             "list_skills",
             "load_skill",
@@ -104,9 +107,9 @@ pub fn definitions() -> Value {
                             "type": "array",
                             "items": {
                                 "type": "string",
-                                "enum": ["files", "browser", "organize", "todos", "profile", "commands", "system", "delegation", "skills"]
+                                "enum": ["files", "browser", "web", "organize", "todos", "profile", "commands", "system", "delegation", "skills"]
                             },
-                            "description": "要检索的能力：files=本地文件/图片，browser=网页，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，system=硬件与进程，delegation=只读子任务，skills=管理技能"
+                            "description": "要检索的能力：files=本地文件/图片，browser=已打开的网页，web=公开网页搜索/抓取，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，system=硬件与进程，delegation=只读子任务，skills=管理技能"
                         }
                     },
                     "required": ["query", "categories"]
@@ -473,7 +476,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "add_todo",
-                "description": "新建待办事项/提醒。",
+                "description": "新建用户的提醒待办（到点通知或弹窗）。当前这次任务的步骤进度请用 todo_write，不要写到这里。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -492,7 +495,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "list_todos",
-                "description": "查询待办事项列表。",
+                "description": "查询用户的提醒待办列表。当前这次任务的步骤进度请用 todo_write，不要用本工具。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -622,14 +625,31 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "run_subagent",
-                "description": "把「需要多步操作、大量阅读」的子任务整体委托给子代理。子代理在独立上下文中工作（可用 scan_desktop/read_file/get_file_info/ocr_image/read_image/list_todos 等只读工具），你看不到它的中间过程，只能拿到它返回的最终结论——适合「读完这些文件给我汇总」「分析这个目录里的内容」这类会消耗大量对话上下文的任务。子任务描述必须具体、自包含（子代理看不到本对话）。子代理不能操作浏览器、不能写文件、不能再委托。",
+                "description": "把「需要多步阅读或分析」的子任务交给子代理。子代理在独立上下文中工作（只读文件/索引/公开网页等），你只能拿到结构化汇报（status=complete 或 blocked，含 findings/evidence/blockers）。适合会占掉大量对话上下文的汇总任务。子任务必须具体、自包含。不能操作浏览器、不能写文件、不能再委托。耗时任务设 run_in_background=true，主对话先继续，需要结论时 await_subagent；不要轮询。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "task": { "type": "string", "description": "子任务描述：具体、自包含，写清要做什么、结论里要包含什么" },
-                        "context": { "type": "string", "description": "可选：子代理需要的背景信息（关键文件路径、目标格式、用户偏好等）" }
+                        "context": { "type": "string", "description": "可选：子代理需要的背景信息（关键文件路径、目标格式、用户偏好等）" },
+                        "run_in_background": { "type": "boolean", "description": "true 时立即返回 job_id，子代理在后台跑。默认 false（同步等待汇报）" },
+                        "await": { "type": "boolean", "description": "仅 run_in_background=true 时有效：true 则挂起直到结束。默认 false" }
                     },
                     "required": ["task"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "await_subagent",
+                "description": "挂起当前对话，直到指定后台子代理结束，再带着结构化汇报继续。等待期间不消耗工具轮次。不要用它轮询仍在运行的任务。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": { "type": "string", "description": "run_subagent 返回的 job_id" },
+                        "timeout_secs": { "type": "integer", "description": "最长等待秒数，默认 300" }
+                    },
+                    "required": ["job_id"]
                 }
             }
         },
@@ -791,7 +811,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "list_skills",
-                "description": "列出已安装 Skills（含 scope=internal|external、启用状态）。目录通常已在对话末尾；需核对全量或确认某技能是否存在时调用。",
+                "description": "列出已安装 Skills（含 scope=internal|external、启用状态）。目录通常已在系统提示之后的 Skills 消息里；需核对全量、含未启用项、或确认某技能是否存在时调用。",
                 "parameters": { "type": "object", "properties": {}, "required": [] }
             }
         },
@@ -799,13 +819,108 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "load_skill",
-                "description": "加载某个 Skill 的完整 SKILL.md。目录描述与当前目标相符时先调用再执行。内部技能只读；不要凭摘要猜步骤。",
+                "description": "加载某个 Skill 的完整 SKILL.md。目录描述与当前目标相符时先调用再执行。对话里已有该技能的 <skill_content> 时不要再调用。内部技能只读；不要凭摘要猜步骤。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "name": { "type": "string", "description": "技能名（与目录中的 name 一致）" }
                     },
                     "required": ["name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ask_user",
+                "description": "需要用户确认、选择或补充信息时调用。会在聊天里弹出选项卡片并等待回答；在收到结果前不要继续执行有副作用的操作。问题用用户能听懂的话说清影响、是否可撤销、同意后会发生什么。选项写具体后果，不要只写「是/否」；若有建议，把该项放第一并在 label 末尾加「（建议）」。一次只问当前必须决定的事，最多 4 题。用户关掉卡片会返回 dismissed：继续等下一条消息，不要当成同意，也不要立刻再弹同一问题。整理方案仍用 propose_organization 的方案卡片，不要用本工具替代。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "questions": {
+                            "type": "array",
+                            "description": "要问的问题，1–4 个",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": { "type": "string", "description": "稳定 id，会随答案原样返回" },
+                                    "question": { "type": "string", "description": "问题正文" },
+                                    "header": { "type": "string", "description": "可选短标题，如「允许系统确认」" },
+                                    "options": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "label": { "type": "string", "description": "选项按钮上的短句" },
+                                                "description": { "type": "string", "description": "选项的补充说明，可空" }
+                                            },
+                                            "required": ["label"]
+                                        }
+                                    },
+                                    "multi_select": { "type": "boolean", "description": "是否可多选，默认 false。无选项时不要设为 true" }
+                                },
+                                "required": ["id", "question"]
+                            }
+                        }
+                    },
+                    "required": ["questions"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "todo_write",
+                "description": "更新当前这次回复里正在做的步骤进度，会在聊天窗显示进度条。每次传入完整列表（整表替换）。用于多步任务让你和用户都看清做到哪；不是提醒待办——用户要事后提醒才用 add_todo。条目 content 简短、互不重复；同一时刻最多一项 in_progress；完成一项就标 completed 并立刻更新。两三步以内的简单问答不必调用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "todos": {
+                            "type": "array",
+                            "description": "完整进度列表，1–12 项",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "content": { "type": "string", "description": "一步要做的事，最多 80 字" },
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["pending", "in_progress", "completed"],
+                                        "description": "pending 未开始，in_progress 正在做，completed 已完成"
+                                    }
+                                },
+                                "required": ["content", "status"]
+                            }
+                        }
+                    },
+                    "required": ["todos"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "搜索公开网页，返回标题和链接。需要某条结果的全文时再 web_fetch。用户已经打开的标签页用 browser_*，不要用本工具去操作浏览器。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "搜索词，尽量具体" }
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "web_fetch",
+                "description": "抓取一个 http/https 公开网页的正文。不要抓本机或带账号密码的网址。用户已经打开的页面用 browser_read / browser_snapshot。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "完整 http/https 网址" }
+                    },
+                    "required": ["url"]
                 }
             }
         },
@@ -1590,20 +1705,9 @@ pub async fn execute(
             let _ = app.emit("profile-changed", ());
             Ok(json!({ "ok": true, "deleted_id": id }))
         }
-        "run_subagent" => {
-            let task = args
-                .get("task")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow!("缺少 task"))?;
-            let context = args.get("context").and_then(|v| v.as_str());
-            let text = crate::llm::subagent::run(app, task, context, cancel).await?;
-            Ok(json!({
-                "result": text,
-                "note": "以上是子代理返回的最终结论；它的中间过程未占用本对话上下文。",
-            }))
-        }
+        "run_subagent" => crate::llm::subagent::execute(app, args, cancel).await,
+        "await_subagent" => crate::llm::subagent::await_job(app, args, cancel).await,
+        "web_search" | "web_fetch" => crate::web::execute(name, args, cancel).await,
         n @ ("run_command"
         | "run_command_background"
         | "await_task"
@@ -1648,10 +1752,12 @@ pub async fn execute(
             let content = app.state::<crate::AppState>().skills.load(name)?;
             Ok(json!({
                 "name": name,
-                "content": content,
-                "note": "以上是相关经验与约束。结合当前用户目标、环境证据和风险使用；保留仍适用的稳定约束，情境不符时调整方法并验证结果。",
+                "content": crate::skills::wrap_skill_content(name, &content),
+                "note": "以上是该技能的完整说明。结合当前用户目标、环境证据和风险使用；保留仍适用的稳定约束，情境不符时调整方法并验证。对话里已有这段 <skill_content> 后不要再 load_skill。",
             }))
         }
+        "ask_user" => crate::ask_user::execute(app, args, cancel).await,
+        "todo_write" => crate::session_todo::execute(app, args),
         "create_skill" => {
             let name = args
                 .get("name")
@@ -2300,12 +2406,14 @@ mod capability_tests {
             .iter()
             .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
             .collect();
-        assert_eq!(
+            assert_eq!(
             names,
             vec![
                 "discover_capabilities",
                 "get_tool_call_history",
-                "load_skill"
+                "load_skill",
+                "ask_user",
+                "todo_write"
             ]
         );
     }

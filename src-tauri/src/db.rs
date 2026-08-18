@@ -324,6 +324,13 @@ impl Db {
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS session_compacts(
+              session_id INTEGER PRIMARY KEY,
+              cover_until_id INTEGER NOT NULL,
+              summary TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS chat_tool_calls(
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               session_id INTEGER NOT NULL,
@@ -1006,6 +1013,7 @@ impl Db {
     /// 删除会话及其消息；若删的是当前会话则切换到最新会话（没有则新建），返回新的当前会话 id
     pub fn delete_session(&self, id: i64) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM session_compacts WHERE session_id=?1", params![id])?;
         conn.execute("DELETE FROM chat_messages WHERE session_id=?1", params![id])?;
         conn.execute("DELETE FROM chat_sessions WHERE id=?1", params![id])?;
         let cur: Option<String> = conn
@@ -1044,6 +1052,37 @@ impl Db {
             params![new_current.to_string()],
         )?;
         Ok(new_current)
+    }
+
+    pub fn get_session_compact(&self, session_id: i64) -> Result<Option<(i64, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT cover_until_id, summary FROM session_compacts WHERE session_id=?1",
+                params![session_id],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn put_session_compact(
+        &self,
+        session_id: i64,
+        cover_until_id: i64,
+        summary: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO session_compacts(session_id, cover_until_id, summary, created_at)
+             VALUES(?1, ?2, ?3, ?4)
+             ON CONFLICT(session_id) DO UPDATE SET
+               cover_until_id=excluded.cover_until_id,
+               summary=excluded.summary,
+               created_at=excluded.created_at",
+            params![session_id, cover_until_id, summary, now_str()],
+        )?;
+        Ok(())
     }
 
     pub fn save_chat(&self, session_id: i64, role: &str, content: &str) -> Result<i64> {

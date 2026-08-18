@@ -1,10 +1,12 @@
 // tools.rs 的 json! 工具定义较大，默认 128 递归上限不够
 #![recursion_limit = "256"]
 
+pub mod ask_user;
 pub mod browser;
 pub mod builtin_skills;
 pub mod cli_json;
 pub mod commands;
+pub mod compact;
 pub mod db;
 pub mod file_index;
 pub mod llm;
@@ -15,11 +17,15 @@ pub mod ntfs_usn;
 pub mod ocr;
 pub mod organizer;
 pub mod reader;
+pub mod repeat_guard;
+pub mod retention;
+pub mod session_todo;
 pub mod skills;
 pub mod tasks;
 pub mod tempfs;
 pub mod todo;
 pub mod tray;
+pub mod web;
 pub mod windows;
 pub mod writer;
 
@@ -46,6 +52,12 @@ pub struct AppState {
     pub skills: skills::SkillStore,
     /// 外部 CLI/API 的稳定对照数据缓存
     pub lookup_cache: lookup_cache::LookupCache,
+    /// 聊天内待确认的选择题（ask_user 工具）
+    pub ask_user: ask_user::AskUserHub,
+    /// 当前这次任务的进度清单（todo_write；与提醒待办分表）
+    pub session_todos: session_todo::SessionTodoHub,
+    /// 后台子代理任务
+    pub subagents: llm::subagent::SubagentHub,
 }
 
 pub fn notify_user(app: &tauri::AppHandle, title: &str, body: &str) {
@@ -125,6 +137,9 @@ pub fn run() {
                 file_index: file_index::FileIndex::new(&app_dir)?,
                 skills: skills::SkillStore::new(&app_dir),
                 lookup_cache: lookup_cache::LookupCache::new(&app_dir),
+                ask_user: ask_user::AskUserHub::new(),
+                session_todos: session_todo::SessionTodoHub::new(),
+                subagents: llm::subagent::SubagentHub::new(),
             });
             // 每次进程启动开空白会话（已有空会话则复用），与聊天窗欢迎态一致。
             {
@@ -174,6 +189,10 @@ pub fn run() {
             commands::get_pending_plan,
             commands::execute_plan_cmd,
             commands::cancel_plan,
+            commands::get_pending_ask,
+            commands::answer_ask_user,
+            commands::dismiss_ask_user,
+            commands::get_session_todos,
             commands::list_batches,
             commands::undo_batch_cmd,
             commands::list_rules,

@@ -2,7 +2,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ipc, onEvent } from "../lib/ipc";
-import type { Plan, ExecResult, ChatMsg, SessionInfo } from "../lib/ipc";
+import type {
+  Plan,
+  ExecResult,
+  ChatMsg,
+  SessionInfo,
+  AskUserPrompt,
+  AskAnswer,
+  AskQuestion,
+  SessionTodo,
+  SessionTodoSnapshot,
+} from "../lib/ipc";
 import { useChatStore } from "../stores/chat";
 import type { UiMessage } from "../stores/chat";
 import Markdown from "../components/Markdown";
@@ -53,6 +63,36 @@ const mapHistory = (rows: ChatMsg[]): UiMessage[] =>
     return m ? [m] : [];
   });
 
+function overlayPending(msgs: UiMessage[], plan: Plan | null, ask: AskUserPrompt | null): UiMessage[] {
+  const next = [...msgs];
+  if (plan && !next.some((m) => m.plan)) {
+    next.push({
+      id: "pending-plan",
+      role: "assistant",
+      content: "你还有一个待确认的整理方案：",
+      plan,
+    });
+  }
+  if (ask && !next.some((m) => m.ask && !m.askSettled)) {
+    next.push({
+      id: "pending-ask",
+      role: "assistant",
+      content: "",
+      ask,
+    });
+  }
+  return next;
+}
+
+async function loadSessionChrome(sessionId: number) {
+  const [plan, ask, todos] = await Promise.all([
+    ipc.getPendingPlan().catch(() => null),
+    ipc.getPendingAsk().catch(() => null),
+    ipc.getSessionTodos(sessionId).catch(() => [] as SessionTodo[]),
+  ]);
+  return { plan, ask, todos };
+}
+
 const fileName = (p: string) => p.replace(/\\/g, "/").split("/").pop() || p;
 
 export default function ChatPanel() {
@@ -60,6 +100,7 @@ export default function ChatPanel() {
     messages,
     streaming,
     pendingPlan,
+    sessionTodos,
     setMessages,
     addMessage,
     attachDbId,
@@ -70,6 +111,9 @@ export default function ChatPanel() {
     completeTool,
     setStreaming,
     setPendingPlan,
+    setPendingAsk,
+    setSessionTodos,
+    settleAsk,
   } = useChatStore();
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -78,6 +122,8 @@ export default function ChatPanel() {
   const [showSessions, setShowSessions] = useState(false);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
+  const currentSessionIdRef = useRef<number | null>(null);
+  currentSessionIdRef.current = currentSessionId;
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -172,7 +218,16 @@ export default function ChatPanel() {
       finishStreaming();
       addMessage({ role: "system", content: `出错了：${p.message}` });
     });
+    add<SessionTodoSnapshot>("session-todos", (p) => {
+      if (p.session_id === currentSessionIdRef.current) setSessionTodos(p.todos);
+    });
+    add<{ session_id: number; content: string }>("subagent-chat", (p) => {
+      if (p.session_id === currentSessionIdRef.current) {
+        addMessage({ role: "system", content: p.content });
+      }
+    });
     add<{ name: string; status: string; result?: unknown }>("tool-status", (p) => {
+      if (p.name === "todo_write") return;
       if (p.status === "running") {
         addMessage({ role: "tool", toolName: p.name, content: "", streaming: true });
       } else if (p.status === "done" || p.status === "error") {
@@ -183,6 +238,11 @@ export default function ChatPanel() {
       setPendingPlan(p);
       addMessage({ role: "assistant", content: "我拟了一份整理方案，请确认：", plan: p });
     });
+    add<AskUserPrompt>("ask-user", (p) => {
+      setPendingAsk(p);
+      addMessage({ role: "assistant", content: "", ask: p });
+    });
+    add("ask-user-settled", () => settleAsk());
     add<ExecResult>("plan-executed", (p) => {
       setPendingPlan(null);
       const parts = [`移动 ${p.moved} 项`];
@@ -200,23 +260,16 @@ export default function ChatPanel() {
     add("sessions-changed", refreshSessions);
 
     const hydrate = (attempt = 0) => {
-      Promise.all([ipc.getCurrentSession(), ipc.getPendingPlan().catch(() => null)])
-        .then(([view, plan]) => {
+      ipc
+        .getCurrentSession()
+        .then(async (view) => {
+          const chrome = await loadSessionChrome(view.session_id);
           if (disposed) return;
           setCurrentSessionId(view.session_id);
-          const msgs: UiMessage[] = mapHistory(view.messages);
-          if (plan) {
-            setPendingPlan(plan);
-            msgs.push({
-              id: "pending-plan",
-              role: "assistant",
-              content: "你还有一个待确认的整理方案：",
-              plan,
-            });
-          } else {
-            setPendingPlan(null);
-          }
-          setMessages(msgs);
+          setPendingPlan(chrome.plan);
+          setPendingAsk(chrome.ask);
+          setSessionTodos(chrome.todos);
+          setMessages(overlayPending(mapHistory(view.messages), chrome.plan, chrome.ask));
         })
         .catch(() => {
           if (disposed || attempt >= 20) return;
@@ -257,6 +310,7 @@ export default function ChatPanel() {
     const localId = addMessage({ role: "user", content: display });
     addMessage({ role: "assistant", content: "", streaming: true });
     setStreaming(true);
+    setSessionTodos([]);
     try {
       const dbId = await ipc.sendChat(text, files.length ? files : undefined);
       attachDbId(localId, dbId);
@@ -285,12 +339,19 @@ export default function ChatPanel() {
     }
   };
 
+  const adoptSession = async (view: { session_id: number; messages: ChatMsg[] }) => {
+    const chrome = await loadSessionChrome(view.session_id);
+    setCurrentSessionId(view.session_id);
+    setPendingPlan(chrome.plan);
+    setPendingAsk(chrome.ask);
+    setSessionTodos(chrome.todos);
+    setMessages(overlayPending(mapHistory(view.messages), chrome.plan, chrome.ask));
+  };
+
   const createSession = async () => {
     try {
       const view = await ipc.newSession();
-      setCurrentSessionId(view.session_id);
-      setMessages([]);
-      setPendingPlan(null);
+      await adoptSession(view);
       refreshSessions();
     } catch (e) {
       addMessage({ role: "system", content: `新建会话失败：${String(e)}` });
@@ -300,8 +361,7 @@ export default function ChatPanel() {
   const switchTo = async (id: number) => {
     try {
       const view = await ipc.switchSession(id);
-      setCurrentSessionId(view.session_id);
-      setMessages(mapHistory(view.messages));
+      await adoptSession(view);
       setShowSessions(false);
     } catch (e) {
       addMessage({ role: "system", content: `切换会话失败：${String(e)}` });
@@ -312,9 +372,7 @@ export default function ChatPanel() {
     try {
       const view = await ipc.deleteSession(id);
       if (id === currentSessionId) {
-        setCurrentSessionId(view.session_id);
-        setMessages(mapHistory(view.messages));
-        setPendingPlan(null);
+        await adoptSession(view);
       }
       refreshSessions();
     } catch (e) {
@@ -336,6 +394,22 @@ export default function ChatPanel() {
       await ipc.cancelPlan(plan.id);
     } catch {
       setPendingPlan(null);
+    }
+  };
+
+  const answerAsk = async (answers: AskAnswer[]) => {
+    try {
+      await ipc.answerAskUser(answers);
+    } catch (e) {
+      addMessage({ role: "system", content: `没能记下你的选择：${String(e)}` });
+    }
+  };
+
+  const skipAsk = async () => {
+    try {
+      await ipc.dismissAskUser();
+    } catch {
+      settleAsk();
     }
   };
 
@@ -386,6 +460,8 @@ export default function ChatPanel() {
         </div>
       </div>
 
+      <SessionProgressBar items={sessionTodos} />
+
       <div ref={listRef} className="flex-1 overflow-y-auto scrollbar-thin px-3 py-3 space-y-2.5">
         {messages.length === 0 && (
           <div className="text-slate-500 text-xs text-center mt-10 leading-6">
@@ -403,6 +479,8 @@ export default function ChatPanel() {
             activePlanId={pendingPlan?.id ?? null}
             onConfirmPlan={confirmPlan}
             onCancelPlan={cancelPlan}
+            onAnswerAsk={answerAsk}
+            onSkipAsk={skipAsk}
             onRecall={recall}
           />
         ))}
@@ -569,6 +647,9 @@ const TOOL_LABELS: Record<string, string> = {
   browser_evaluate: "执行页面脚本",
   browser_status: "诊断浏览器连接",
   run_subagent: "子代理处理子任务",
+  await_subagent: "等待子代理",
+  web_search: "搜索网页",
+  web_fetch: "抓取网页",
   run_command: "执行命令",
   run_command_background: "后台执行命令",
   await_task: "等待任务结束",
@@ -582,6 +663,8 @@ const TOOL_LABELS: Record<string, string> = {
   create_skill: "创建 Skill",
   delete_skill: "删除 Skill",
   manage_skill: "管理 Skill",
+  ask_user: "等你确认",
+  todo_write: "更新进度",
 };
 
 function toolFailureSummary(result: unknown): string {
@@ -611,12 +694,16 @@ function MessageBubble({
   activePlanId,
   onConfirmPlan,
   onCancelPlan,
+  onAnswerAsk,
+  onSkipAsk,
   onRecall,
 }: {
   m: UiMessage;
   activePlanId: number | null;
   onConfirmPlan: (p: Plan) => void;
   onCancelPlan: (p: Plan) => void;
+  onAnswerAsk: (answers: AskAnswer[]) => void;
+  onSkipAsk: () => void;
   onRecall: (m: UiMessage) => void;
 }) {
   if (m.role === "system") {
@@ -700,6 +787,9 @@ function MessageBubble({
             onConfirm={() => onConfirmPlan(m.plan!)}
             onCancel={() => onCancelPlan(m.plan!)}
           />
+        )}
+        {m.ask && (
+          <AskUserCard prompt={m.ask} active={!m.askSettled} onAnswer={onAnswerAsk} onSkip={onSkipAsk} />
         )}
       </div>
     </div>
@@ -792,6 +882,203 @@ function PlanCard({
         </div>
       ) : (
         <div className="mt-2 text-[11px] text-slate-500">该方案已处理（{plan.status}）</div>
+      )}
+    </div>
+  );
+}
+
+function AskUserCard({
+  prompt,
+  active,
+  onAnswer,
+  onSkip,
+}: {
+  prompt: AskUserPrompt;
+  active: boolean;
+  onAnswer: (answers: AskAnswer[]) => void;
+  onSkip: () => void;
+}) {
+  const [picked, setPicked] = useState<Record<string, string[]>>({});
+  const [custom, setCustom] = useState<Record<string, string>>({});
+
+  const toggle = (question: AskQuestion, label: string) => {
+    setPicked((prev) => {
+      const cur = prev[question.id] ?? [];
+      if (question.multi_select) {
+        const next = cur.includes(label) ? cur.filter((x) => x !== label) : [...cur, label];
+        return { ...prev, [question.id]: next };
+      }
+      return { ...prev, [question.id]: [label] };
+    });
+  };
+
+  const ready = prompt.questions.every((q) => {
+    const selected = picked[q.id] ?? [];
+    const note = (custom[q.id] ?? "").trim();
+    if (q.options.length === 0) return note.length > 0;
+    return selected.length > 0 || note.length > 0;
+  });
+
+  const submit = () => {
+    if (!ready) return;
+    onAnswer(
+      prompt.questions.map((q) => {
+        const note = (custom[q.id] ?? "").trim();
+        return {
+          id: q.id,
+          selected: picked[q.id] ?? [],
+          custom: note || null,
+        };
+      })
+    );
+  };
+
+  const onlySingleChoices =
+    prompt.questions.length === 1 &&
+    prompt.questions[0].options.length > 0 &&
+    !prompt.questions[0].multi_select;
+
+  return (
+    <div className="mt-2 rounded-lg border border-sky-500/30 bg-slate-900/70 p-2.5">
+      <div className="space-y-3">
+        {prompt.questions.map((q) => (
+          <div key={q.id}>
+            {q.header && <div className="text-[11px] text-sky-300 mb-0.5">{q.header}</div>}
+            <div className="text-xs text-slate-200 mb-1.5 leading-5">{q.question}</div>
+            {q.options.length > 0 && (
+              <div className="flex flex-col gap-1">
+                {q.options.map((opt) => {
+                  const on = (picked[q.id] ?? []).includes(opt.label);
+                  return (
+                    <button
+                      key={opt.label}
+                      type="button"
+                      disabled={!active}
+                      onClick={() => {
+                        if (onlySingleChoices) {
+                          onAnswer([{ id: q.id, selected: [opt.label], custom: null }]);
+                          return;
+                        }
+                        toggle(q, opt.label);
+                      }}
+                      className={`text-left rounded-md px-2.5 py-1.5 text-xs border transition ${
+                        on
+                          ? "border-sky-400 bg-sky-500/20 text-sky-100"
+                          : "border-slate-600 bg-slate-800/80 text-slate-200 hover:border-sky-500/50"
+                      } disabled:opacity-50`}
+                    >
+                      <span className="font-medium">{opt.label}</span>
+                      {opt.description && (
+                        <span className="block text-[11px] text-slate-400 mt-0.5 leading-4">
+                          {opt.description}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {active && (
+              <input
+                value={custom[q.id] ?? ""}
+                onChange={(e) => setCustom((p) => ({ ...p, [q.id]: e.target.value }))}
+                placeholder={q.options.length ? "或写一句" : "用一句话说明"}
+                className="mt-1.5 w-full bg-slate-800/80 text-slate-100 text-xs rounded-md px-2.5 py-1.5 outline-none border border-slate-600 focus:border-sky-500 placeholder:text-slate-500"
+              />
+            )}
+          </div>
+        ))}
+      </div>
+      {active ? (
+        <div className="flex gap-2 mt-2.5">
+          {(!onlySingleChoices || prompt.questions.some((q) => (custom[q.id] ?? "").trim())) && (
+            <button
+              type="button"
+              disabled={!ready}
+              onClick={submit}
+              className="flex-1 py-1.5 rounded text-white text-xs font-medium bg-gradient-to-r from-sky-500 to-indigo-600 hover:opacity-90 disabled:opacity-40 transition"
+            >
+              确定
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onSkip}
+            className="px-3 py-1.5 rounded bg-slate-700 text-slate-300 text-xs hover:bg-slate-600 transition"
+          >
+            先不答
+          </button>
+        </div>
+      ) : (
+        <div className="mt-2 text-[11px] text-slate-500">已记下你的选择</div>
+      )}
+    </div>
+  );
+}
+
+function SessionProgressBar({ items }: { items: SessionTodo[] }) {
+  const [open, setOpen] = useState(() => items.some((i) => i.status === "in_progress"));
+  const hasActive = items.some((i) => i.status === "in_progress");
+
+  useEffect(() => {
+    if (hasActive) setOpen(true);
+  }, [hasActive]);
+
+  if (items.length === 0) return null;
+
+  const done = items.filter((i) => i.status === "completed").length;
+  const current = items.find((i) => i.status === "in_progress");
+  const pct = Math.round((done / items.length) * 100);
+  const headline = current
+    ? current.content
+    : done === items.length
+      ? "这一步都做完了"
+      : "下一步还没开始";
+
+  return (
+    <div className="shrink-0 border-b border-slate-700/60 bg-slate-800/70 px-3 py-2">
+      <button type="button" onClick={() => setOpen((v) => !v)} className="w-full text-left">
+        <div className="flex items-center gap-2">
+          <div className="flex-1 h-1 rounded-full bg-slate-700 overflow-hidden">
+            <div
+              className="h-full bg-gradient-to-r from-sky-500 to-indigo-500 transition-all"
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+          <span className="text-[11px] text-slate-400 tabular-nums shrink-0">
+            {done}/{items.length}
+          </span>
+        </div>
+        <div className="mt-1 flex items-center justify-between gap-2">
+          <span className="text-[11px] text-slate-300 truncate">{headline}</span>
+          <span className="text-slate-500 text-[10px] shrink-0">{open ? "▴" : "▾"}</span>
+        </div>
+      </button>
+      {open && (
+        <ul className="mt-1.5 space-y-1">
+          {items.map((item) => {
+            const mark =
+              item.status === "completed" ? "✓" : item.status === "in_progress" ? "●" : "○";
+            const color =
+              item.status === "completed"
+                ? "text-slate-500 line-through"
+                : item.status === "in_progress"
+                  ? "text-sky-200"
+                  : "text-slate-300";
+            const markColor =
+              item.status === "completed"
+                ? "text-emerald-400"
+                : item.status === "in_progress"
+                  ? "text-sky-400"
+                  : "text-slate-500";
+            return (
+              <li key={item.content} className="flex items-start gap-1.5 text-[11px] leading-4">
+                <span className={`${markColor} shrink-0`}>{mark}</span>
+                <span className={color}>{item.content}</span>
+              </li>
+            );
+          })}
+        </ul>
       )}
     </div>
   );

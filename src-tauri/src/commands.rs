@@ -393,6 +393,8 @@ pub async fn send_chat_message(
             return Err(e.to_string());
         }
     };
+    let snapshot = state.session_todos.begin_turn(session_id);
+    let _ = app.emit("session-todos", &snapshot);
     let title_src = if text.trim().is_empty() {
         composed.as_str()
     } else {
@@ -422,6 +424,8 @@ pub async fn send_chat_message(
 #[tauri::command]
 pub fn stop_chat_message(state: State<AppState>) -> Result<(), String> {
     let token = state.chat_cancel.lock().map_err(|e| e.to_string())?.take();
+    state.ask_user.dismiss();
+    state.subagents.cancel_all();
     match token {
         Some(t) => {
             t.cancel();
@@ -505,6 +509,7 @@ pub fn delete_session(
     id: i64,
 ) -> Result<SessionView, String> {
     let new_current = state.db.delete_session(id).map_err(|e| e.to_string())?;
+    state.session_todos.drop_session(id);
     let messages = messages_for_ui(
         state
             .db
@@ -706,6 +711,36 @@ pub fn set_todo_done(
 #[tauri::command]
 pub fn get_pending_plan(state: State<AppState>) -> Result<Option<Plan>, String> {
     state.db.pending_plan().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_pending_ask(state: State<AppState>) -> Option<crate::ask_user::AskUserPrompt> {
+    state.ask_user.prompt()
+}
+
+#[tauri::command]
+pub fn answer_ask_user(
+    state: State<AppState>,
+    answers: Vec<crate::ask_user::AskAnswer>,
+) -> Result<(), String> {
+    state.ask_user.answer(answers).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn dismiss_ask_user(state: State<AppState>) {
+    state.ask_user.dismiss();
+}
+
+#[tauri::command]
+pub fn get_session_todos(
+    state: State<AppState>,
+    session_id: Option<i64>,
+) -> Result<Vec<crate::session_todo::SessionTodo>, String> {
+    let id = match session_id {
+        Some(id) => id,
+        None => state.db.current_session_id().map_err(|e| e.to_string())?,
+    };
+    Ok(state.session_todos.list(id))
 }
 
 #[tauri::command]

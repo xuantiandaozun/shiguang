@@ -184,6 +184,39 @@ export interface ExecResult {
   skipped: number;
 }
 
+export interface AskOption {
+  label: string;
+  description: string;
+}
+
+export interface AskQuestion {
+  id: string;
+  question: string;
+  header?: string | null;
+  options: AskOption[];
+  multi_select: boolean;
+}
+
+export interface AskUserPrompt {
+  questions: AskQuestion[];
+}
+
+export interface AskAnswer {
+  id: string;
+  selected: string[];
+  custom?: string | null;
+}
+
+export interface SessionTodo {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+export interface SessionTodoSnapshot {
+  session_id: number;
+  todos: SessionTodo[];
+}
+
 export interface LlmUsageTotals {
   requests: number;
   prompt_tokens: number;
@@ -286,6 +319,11 @@ export const ipc = {
   getPendingPlan: () => invoke<Plan | null>("get_pending_plan"),
   executePlan: (planId: number) => invoke<ExecResult>("execute_plan_cmd", { planId }),
   cancelPlan: (planId: number) => invoke<void>("cancel_plan", { planId }),
+  getPendingAsk: () => invoke<AskUserPrompt | null>("get_pending_ask"),
+  answerAskUser: (answers: AskAnswer[]) => invoke<void>("answer_ask_user", { answers }),
+  dismissAskUser: () => invoke<void>("dismiss_ask_user"),
+  getSessionTodos: (sessionId?: number | null) =>
+    invoke<SessionTodo[]>("get_session_todos", { sessionId: sessionId ?? null }),
 
   listBatches: () => invoke<BatchSummary[]>("list_batches"),
   undoBatch: (batchId: string) => invoke<number>("undo_batch_cmd", { batchId }),

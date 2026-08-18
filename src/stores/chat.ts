@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { Plan } from "../lib/ipc";
+import type { AskUserPrompt, SessionTodo } from "../lib/ipc";
 
 export interface UiMessage {
   id: string;
@@ -11,6 +12,8 @@ export interface UiMessage {
   toolName?: string;
   toolFailed?: boolean;
   plan?: Plan;
+  ask?: AskUserPrompt;
+  askSettled?: boolean;
   streaming?: boolean;
 }
 
@@ -21,6 +24,8 @@ interface ChatState {
   messages: UiMessage[];
   streaming: boolean;
   pendingPlan: Plan | null;
+  pendingAsk: AskUserPrompt | null;
+  sessionTodos: SessionTodo[];
   setMessages: (m: UiMessage[]) => void;
   addMessage: (m: Omit<UiMessage, "id">) => string;
   attachDbId: (localId: string, dbId: number) => void;
@@ -31,12 +36,17 @@ interface ChatState {
   completeTool: (toolName: string, error?: string) => void;
   setStreaming: (b: boolean) => void;
   setPendingPlan: (p: Plan | null) => void;
+  setPendingAsk: (p: AskUserPrompt | null) => void;
+  setSessionTodos: (todos: SessionTodo[]) => void;
+  settleAsk: () => void;
 }
 
 export const useChatStore = create<ChatState>()((set) => ({
   messages: [],
   streaming: false,
   pendingPlan: null,
+  pendingAsk: null,
+  sessionTodos: [],
   setMessages: (messages) => set({ messages }),
   addMessage: (m) => {
     const id = nid();
@@ -96,7 +106,7 @@ export const useChatStore = create<ChatState>()((set) => ({
       }
       return {
         messages: msgs.filter(
-          (m) => !(m.role === "assistant" && m.content === "" && !m.plan && !m.reasoning)
+          (m) => !(m.role === "assistant" && m.content === "" && !m.plan && !m.ask && !m.reasoning)
         ),
         streaming: false,
       };
@@ -116,4 +126,11 @@ export const useChatStore = create<ChatState>()((set) => ({
     }),
   setStreaming: (streaming) => set({ streaming }),
   setPendingPlan: (pendingPlan) => set({ pendingPlan }),
+  setPendingAsk: (pendingAsk) => set({ pendingAsk }),
+  setSessionTodos: (sessionTodos) => set({ sessionTodos }),
+  settleAsk: () =>
+    set((s) => ({
+      pendingAsk: null,
+      messages: s.messages.map((m) => (m.ask && !m.askSettled ? { ...m, askSettled: true } : m)),
+    })),
 }));

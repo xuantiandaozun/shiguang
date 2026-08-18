@@ -6,8 +6,8 @@
 //! - **external（外部）**：`app_data/skills/<name>/`，AI 与用户可自由创建/修改/删除/从
 //!   Claude·Codex·Cursor 同步；也承接由旧「工作流经验」迁移来的条目。
 //!
-//! 启用技能由 `discover_capabilities` 按当前目标检索；命中后再 `load_skill` 拉全文，
-//! 不把完整目录永久注入每一轮对话。
+//! 启用技能目录作为独立 system 消息插在系统提示之后、历史之前；
+//! 命中后再 `load_skill` 拉全文。启用集不变则目录正文逐字节稳定，便于前缀缓存。
 
 use crate::builtin_skills;
 use anyhow::{anyhow, bail, Result};
@@ -176,21 +176,42 @@ impl SkillStore {
         out
     }
 
-    /// 注入对话尾部的启用技能目录（名称+描述）。系统提示保持稳定，目录随启用集变化。
-    pub fn catalog_block(&self) -> Option<String> {
-        let items: Vec<SkillInfo> = self.list().into_iter().filter(|s| s.enabled).collect();
+    /// 已启用技能的模型侧目录（独立 system 消息，不要拼进时间尾巴）。
+    /// 无启用项时返回 None，不发空目录。
+    pub fn catalog_reminder(&self) -> Option<String> {
+        let items: Vec<(String, String)> = self
+            .list()
+            .into_iter()
+            .filter(|s| s.enabled)
+            .map(|s| {
+                let desc: String = collapse_ws(&s.description).chars().take(180).collect();
+                (s.name, desc)
+            })
+            .collect();
         if items.is_empty() {
             return None;
         }
-        let mut out = String::from(
-            "\n\n已启用 Skills（根据当前目标判断是否命中；命中则先 load_skill，按技能步骤执行，不要凭摘要猜步骤）：",
-        );
-        for skill in items {
-            let desc = collapse_ws(&skill.description);
-            let desc: String = desc.chars().take(180).collect();
-            out.push_str(&format!("\n- {}：{}", skill.name, desc));
+        let mut out = String::from("Skills 是可复用的任务说明。当前已启用：\n\n<available_skills>\n");
+        for (name, desc) in items {
+            out.push_str(&format!(
+                "- `{}`: {}\n",
+                xml_escape(&name),
+                xml_escape(&desc)
+            ));
         }
+        out.push_str(
+            "</available_skills>\n\n\
+             用户点名某技能、或当前任务明显匹配某条描述时，先 load_skill，再按其步骤做；把技能当检查清单，不要当不可改的脚本。\n\
+             本目录只有摘要；未加载前不要推断或执行技能正文。\n\
+             若对话里已经出现该技能的 <skill_content>，直接遵循，不要再 load_skill。\n\
+             目录没有明显匹配、路径不确定、或批量文件任务需要索引策略时，再调用 discover_capabilities。",
+        );
         Some(out)
+    }
+
+    /// 兼容旧名：与 [`catalog_reminder`] 相同
+    pub fn catalog_block(&self) -> Option<String> {
+        self.catalog_reminder()
     }
 
     /// AI load_skill：禁用则拒绝
@@ -561,6 +582,18 @@ fn collapse_ws(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// 包一层模型可识别的技能正文标记；正文里若出现结束标签则转义，避免提前闭合。
+pub fn wrap_skill_content(name: &str, body: &str) -> String {
+    let safe = body.replace("</skill_content>", "&lt;/skill_content>");
+    format!("<skill_content name=\"{}\">\n{safe}\n</skill_content>", xml_escape(name))
+}
+
 struct ParsedSkill {
     name: String,
     description: String,
@@ -828,10 +861,36 @@ mod tests {
                 "# 日报",
             )
             .unwrap();
-        let block = store.catalog_block().expect("catalog");
-        assert!(block.contains("daily-report-feishu-base"));
-        assert!(block.contains("写日报"));
+        let block = store.catalog_reminder().expect("catalog");
+        assert!(block.contains("<available_skills>"));
+        assert!(block.contains("`daily-report-feishu-base`"));
+        assert!(block.contains("日报"));
         assert!(block.contains("load_skill"));
+        assert!(block.contains("<skill_content>"));
+        assert!(block.contains("未加载前不要推断"));
+        assert!(!block.starts_with('\n'));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wrap_skill_content_escapes_closing_tag() {
+        let wrapped = wrap_skill_content("demo", "a</skill_content>b");
+        assert!(wrapped.starts_with("<skill_content name=\"demo\">"));
+        assert!(wrapped.contains("a&lt;/skill_content>b"));
+        assert!(wrapped.ends_with("</skill_content>"));
+    }
+
+    #[test]
+    fn catalog_reminder_escapes_description_markup() {
+        let dir = std::env::temp_dir().join(format!("dh-skills-esc-{}", uuid::Uuid::new_v4()));
+        let _ = fs::create_dir_all(&dir);
+        let store = SkillStore::new(&dir);
+        store
+            .create("amp-skill", "a <b> & c", "# body")
+            .unwrap();
+        let block = store.catalog_reminder().unwrap();
+        assert!(block.contains("a &lt;b&gt; &amp; c"));
+        assert!(!block.contains("a <b> & c"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -28,6 +28,13 @@ pub fn ensure_temp_dir(app: &AppHandle) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// 超长工具结果全文落盘目录（`temp/tool-spills/`）
+pub fn tool_spill_dir(app: &AppHandle) -> Result<PathBuf> {
+    let dir = ensure_temp_dir(app)?.join("tool-spills");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
 pub fn temp_path_display(app: &AppHandle) -> String {
     temp_dir(app).to_string_lossy().replace('\\', "/")
 }

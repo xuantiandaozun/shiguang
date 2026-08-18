@@ -3,15 +3,13 @@ use crate::db::{ChatMsg, ToolCallReplay};
 use crate::llm::{client, prompts, tools};
 use anyhow::Result;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use tauri::{AppHandle, Emitter, Manager};
 
 /// 单次任务的工具调用轮次预算。浏览器类任务动辄 10+ 轮，给足余量。
 const MAX_TOOL_ROUNDS: usize = 50;
 /// 倒数第几轮时注入收尾提醒
 const WARN_BEFORE_END: usize = 3;
-/// 对话总长度超过该阈值时压缩较早的工具结果，防止超出模型上下文窗口
-const CONTEXT_TRIM_CHARS: usize = 80_000;
 
 /// 模型可能以纯文本形式输出工具调用的标记对（DeepSeek 特殊 token / DSML / XML 风格）。
 /// 无工具请求（收尾总结）时模型尤其容易把这些写进正文，需过滤。
@@ -47,9 +45,13 @@ pub async fn run_chat(
         return Ok(());
     }
 
-    let (history, profile_block, replay_calls, skills_block, lookup_block) = {
+    let (history, profile_block, replay_calls, skills_block, lookup_block, stored_compact) = {
         let state = app.state::<crate::AppState>();
-        let history = state.db.load_chat(session_id, 30)?;
+        let mut history = state.db.load_chat(session_id, 30)?;
+        let stored_compact = state.db.get_session_compact(session_id).ok().flatten();
+        if let Some((cover_until, _)) = &stored_compact {
+            history.retain(|m| m.id > *cover_until);
+        }
         let latest_user = history
             .iter()
             .rev()
@@ -61,9 +63,13 @@ pub async fn run_chat(
             .filter(|m| m.role == "user")
             .map(|m| m.id)
             .collect();
-        let replay_calls = state
+        let mut replay_calls = state
             .db
             .load_tool_calls_for_messages(session_id, &request_ids)?;
+        if stored_compact.is_some() {
+            let keep: HashSet<i64> = request_ids.iter().copied().collect();
+            replay_calls.retain(|c| keep.contains(&c.request_message_id));
+        }
         // 个人信息按需注入：命中求职/发帖等场景或用户主动要求时才加载
         let profile = if crate::llm::profile::should_inject(&latest_user) {
             let entries = state.db.pf_list().unwrap_or_default();
@@ -71,12 +77,12 @@ pub async fn run_chat(
         } else {
             None
         };
-        let skills_block = state.skills.catalog_block();
+        let skills_block = state.skills.catalog_reminder();
         let lookup_block = state.lookup_cache.catalog_block();
-        (history, profile, replay_calls, skills_block, lookup_block)
+        (history, profile, replay_calls, skills_block, lookup_block, stored_compact)
     };
 
-    // 上下文缓存：系统提示 + 历史（含回放的 tool 记录）必须逐字节稳定。
+    // 上下文缓存：系统提示必须逐字节稳定；Skills 目录紧随其后（启用集不变则同样稳定）。
     // 当前时间插在历史之后、本轮工具轮之前：同一轮只往后面追加 assistant/tool，
     // 才能走 DeepSeek「A+B → A+B+C」前缀命中；不要每轮把时间挪到最后。
     let sys = prompts::system_prompt(&settings);
@@ -84,6 +90,15 @@ pub async fn run_chat(
         "role": "system",
         "content": sys,
     })];
+    if let Some(catalog) = &skills_block {
+        messages.push(json!({
+            "role": "system",
+            "content": catalog,
+        }));
+    }
+    if let Some((_, summary)) = &stored_compact {
+        messages.push(crate::compact::checkpoint_message(summary));
+    }
     messages.extend(history_with_tool_replay(&history, &replay_calls));
     let mut tail = format!(
         "当前时间：{}",
@@ -91,9 +106,6 @@ pub async fn run_chat(
     );
     if let Some(pb) = &profile_block {
         tail.push_str(pb);
-    }
-    if let Some(sb) = &skills_block {
-        tail.push_str(sb);
     }
     if let Some(lb) = &lookup_block {
         tail.push_str(lb);
@@ -113,6 +125,7 @@ pub async fn run_chat(
         model: settings.model.clone(),
     };
     let mut text_call_retries = 0usize;
+    let mut repeat_guard = crate::repeat_guard::RepeatGuard::new();
 
     for round in 0..MAX_TOOL_ROUNDS {
         if cancel.is_cancelled() {
@@ -125,7 +138,25 @@ pub async fn run_chat(
                 "content": "注意：本轮对话的工具调用预算即将用完，请优先收尾，用最少的步骤完成任务。",
             }));
         }
-        trim_context(&mut messages);
+        trim_context(&app, &mut messages);
+        if let Ok(true) = crate::compact::compact_if_needed(
+            &app,
+            &http,
+            &cfg,
+            &settings,
+            &mut messages,
+            &cancel,
+        )
+        .await
+        {
+            let cover_until = history
+                .iter()
+                .map(|m| m.id)
+                .filter(|&id| id < request_message_id)
+                .max()
+                .unwrap_or(0);
+            crate::compact::persist_cover(&app, session_id, cover_until, &messages);
+        }
         let body = request_body(&cfg, &settings, &messages, true);
 
         let resp = stream_filtered(&http, &cfg, &body, &cancel, &app).await?;
@@ -247,22 +278,36 @@ pub async fn run_chat(
             } else {
                 "done"
             };
+            let content = model_tool_content(&app, &call.name, &call.id, &result);
             {
                 let state = app.state::<crate::AppState>();
                 state
                     .db
-                    .finish_tool_call(tool_record_id, tool_status, &result.to_string())?;
+                    .finish_tool_call(tool_record_id, tool_status, &content)?;
             }
             push_tool_log(&mut tool_log, &call.name, &call.arguments, &result);
+            let emit_result = if crate::retention::is_bounded(&content) {
+                json!({
+                    "truncated": true,
+                    "ok": result.get("ok"),
+                    "error": result.get("error"),
+                    "status": result.get("status"),
+                })
+            } else {
+                result.clone()
+            };
             let _ = app.emit(
                 "tool-status",
-                json!({ "name": call.name, "status": tool_status, "result": result }),
+                json!({ "name": call.name, "status": tool_status, "result": emit_result }),
             );
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": call.id,
-                "content": result.to_string(),
+                "content": content,
             }));
+            if let Some(reminder) = repeat_guard.observe(&call.name, &call.arguments) {
+                messages.push(crate::repeat_guard::reminder_message(&reminder));
+            }
         }
     }
 
@@ -388,7 +433,7 @@ async fn finalize_with_summary(
         "role": "system",
         "content": "工具调用轮次已用完。请基于已获得的信息，直接用自然语言给出阶段性回答：1) 已完成的部分；2) 卡在什么地方；3) 如果用户说「继续」，你接下来打算怎么做。不要声称完成了并未完成的步骤。严禁输出任何工具调用语法（例如 <tool_call>…</tool_call>、<｜tool▁call▁begin｜>…、<｜｜DSML｜｜tool_calls>…</｜｜DSML｜｜tool_calls>、或带 \"name\"/\"arguments\" 字段的 JSON 代码块），只能输出给用户看的自然语言。",
     }));
-    trim_context(&mut messages);
+    trim_context(app, &mut messages);
     let body = request_body(cfg, settings, &messages, false);
     let resp = stream_filtered(http, cfg, &body, cancel, app).await;
     match resp {
@@ -756,28 +801,21 @@ pub(crate) fn visible_assistant_content(content: &str) -> String {
     text
 }
 
-/// 上下文保护：对话过长时，把较早的工具结果替换成占位符（保留最近几条完整内容）。
-/// tool 消息必须与 assistant 的 tool_calls 配对保留，只压缩其 content。
-fn trim_context(messages: &mut [Value]) {
-    let total: usize = messages.iter().map(|m| m.to_string().len()).sum();
-    if total <= CONTEXT_TRIM_CHARS {
-        return;
-    }
-    let keep_last = 8;
-    let cutoff = messages.len().saturating_sub(keep_last);
-    for m in messages.iter_mut().take(cutoff) {
-        if m.get("role").and_then(|r| r.as_str()) != Some("tool") {
-            continue;
-        }
-        let len = m
-            .get("content")
-            .and_then(|c| c.as_str())
-            .map(|c| c.len())
-            .unwrap_or(0);
-        if len > 200 {
-            m["content"] = json!(format!("（较早的工具结果已省略，原 {} 字符）", len));
-        }
-    }
+fn model_tool_content(app: &AppHandle, name: &str, call_id: &str, result: &Value) -> String {
+    let dir = crate::tempfs::tool_spill_dir(app).ok();
+    crate::retention::bound_and_spill(
+        dir.as_deref(),
+        name,
+        call_id,
+        &result.to_string(),
+        crate::retention::FRESH,
+    )
+}
+
+/// 对话过长时压缩较早的工具结果：保留头尾，全文落到 temp/tool-spills。
+fn trim_context(app: &AppHandle, messages: &mut [Value]) {
+    let dir = crate::tempfs::tool_spill_dir(app).ok();
+    crate::retention::trim_old_tool_messages(messages, dir.as_deref());
 }
 
 #[cfg(test)]
