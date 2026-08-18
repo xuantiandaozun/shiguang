@@ -27,7 +27,7 @@ LLM 走 OpenAI 兼容接口（默认 DeepSeek），Function Calling + SSE 流式
 1. **主代理循环** `agent.rs::run_chat`：上限 50 轮；`trim_context` 压缩早期工具结果。事件：`llm-token` / `llm-reasoning` / `llm-message-done` / `llm-error` / `llm-cancelled` / `tool-status`。
 2. **工具系统** `tools.rs`：新增工具四步 = definitions → execute → prompts（仅非显而易见约束）→ ChatPanel `TOOL_LABELS`。
 3. **子代理** `subagent.rs`：只读白名单 + 15 轮 + 5 分钟；`Box::pin` 打破异步递归。
-4. **后台任务** `tasks.rs`：`run_command` / `run_command_background` / `check_task` / `list_tasks` / `stop_task`；开关 `command_tools_enabled`；命令日志按 UTF-8/GBK 自适应解码。
+4. **后台任务** `tasks.rs`：`run_command` / `run_command_background` / `await_task` / `check_task` / `list_tasks` / `stop_task`；长任务用 await 挂起对话、结束后自动继续，不要靠 check_task 轮询。开关 `command_tools_enabled`；命令日志按 UTF-8/GBK 自适应解码。stdout JSON 由 `cli_json.rs` 解析。
 5. **外部参考缓存** `lookup_cache`：按稳定 key 保存 CLI/API 提炼后的对照表（id↔名称、字段/选项），默认 7 天；目录注入对话末尾。不自动缓存原始命令输出。
 6. **待办提醒** `todo/scheduler.rs`：30s 轮询到期，按 `todos.remind_mode` 分发——`notify` 系统通知；`popup`/`popup_input` 发 `reminder-popup` 事件给 reminder 弹窗。`popup_input` 的输入作为聊天消息发给 AI（调 `send_chat_message`，不落本地），发完 `show_chat_window` 展开聊天窗；重复任务提醒即顺延、一次性任务标 reminded。
 7. **本机信息** `get_system_info`：便利封装，与 `run_command` 等价可选，不在系统提示词强制引导。

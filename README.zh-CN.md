@@ -13,11 +13,12 @@
 | 待办事项 | 自然语言创建：「明天下午三点提醒我交周报」；支持重复（每天/每周）、优先级、延后提醒；提醒方式可选 Windows 通知或弹窗——带输入框的弹窗能直接把回复发给 AI 继续聊 |
 | 浏览器操作 | 读文章正文（Readability）、快照后按编号点击/输入；走配套扩展操作你的真实浏览器（带登录态），失败自动故障转移到独立 CDP 实例 |
 | 本机文件索引 | 持久化的 Everything 类元数据索引，用于批量搜索和整盘分析；整盘空间分析可先通过提权的 NTFS/MFT 助手快速估算并按一级目录汇总，需要精确值时再对指定范围逐项扫描 |
-| 后台命令 | AI 可同步或后台执行 PowerShell / cmd；执行前检查 PowerShell 语法，保持中文输出编码，传播原生程序退出码，并可稍后查看长任务结果；可在设置中关闭命令工具 |
-| Agent Skills | 内置只读 Skill + AI 可自建/沉淀的外部 Skill；可与 Claude / Codex / Cursor 的技能目录同步 |
+| 后台命令 | 可跑 PowerShell、cmd 或 AI 自己写的脚本。短任务同步等待；长任务会挂起对话（期间不再调模型），结束后带着结果自动继续。CLI 返回的 JSON 会自动解析。可在设置中关闭命令工具 |
+| 模型与用量 | 可保存多套大模型配置（DeepSeek、通义、火山 Agent Plan、OpenAI 等预设）并手动切换当前使用；「用量」页查看 token 与缓存命中 |
+| Agent Skills | 内置只读 Skill + AI 可自建/沉淀的外部 Skill；启用目录会注入对话，按意图加载匹配技能。可与 Claude / Codex / Cursor 的技能目录同步 |
 | 文件与视觉 | 读文件（文本/PDF）、OCR、看图、带自动备份的安全写入、只读子代理 |
 | 悬浮球 | 桌面常驻小圆球，可拖动，单击展开/收起聊天窗；聊天窗、主窗口关闭后程序仍在托盘运行 |
-| 主窗口 | 待办管理 / 整理规则 / 操作记录（撤销）/ 后台任务 / Skills / 设置 |
+| 主窗口 | 待办管理 / 整理规则 / 操作记录（撤销）/ 后台任务 / Skills / 用量 / 设置 |
 
 ## 安全设计
 
@@ -47,7 +48,7 @@ npm install
 npm run tauri:dev
 ```
 
-首次运行后：托盘图标右键 → 打开主窗口 →「设置」页填写大模型 API（有 DeepSeek / 通义 / OpenAI 预设），保存后即可在聊天窗使用。
+首次运行后：托盘图标右键 → 打开主窗口 →「设置」页添加一套或多套大模型配置（DeepSeek / 通义 / 火山 Agent Plan / OpenAI 等预设），选好当前使用后再聊天。每次启动会开一个新会话，旧对话仍在历史里。
 
 ## 打包
 
@@ -66,6 +67,7 @@ npm run tauri:build
 - `deskhelper.db`（SQLite：待办、规则、操作记录、设置、聊天记录）
 - `file_index.db`（持久化文件元数据索引：路径、名称、大小、时间；不含文件内容）
 - `tasks/`、`skills/`、`screenshots/`、`temp/`（AI 临时文件）、`file_backups/`、`ntfs-helper/`
+- `lookup-cache.json`（AI 从外部 CLI 提炼的 id↔名称 / 字段对照，短期缓存）
 
 API Key 仅保存在本机此数据库中，不会上传。
 
@@ -74,7 +76,7 @@ API Key 仅保存在本机此数据库中，不会上传。
 ```
 src/                    React 前端
   windows/              FloatBall / ChatPanel / Reminder / MainWindow 四个窗口页面
-  components/           主窗口标签页（待办 / 规则 / 记录 / 后台任务 / Skills / 设置）
+  components/           主窗口标签页（待办 / 规则 / 记录 / 后台任务 / Skills / 用量 / 设置）
   lib/ipc.ts            前端 invoke/事件封装的唯一声明处
   stores/chat.ts        聊天状态（zustand）
 src-tauri/src/
@@ -89,7 +91,9 @@ src-tauri/src/
   ntfs_usn.rs           只读 NTFS MFT / USN Journal 支持
   ntfs_helper.rs        短生命周期提权索引辅助进程的协议与客户端
   todo/scheduler.rs     待办提醒调度（通知 / 弹窗 / 带输入弹窗）
-  tasks.rs              后台命令；skills.rs + builtin_skills.rs  Agent Skills
+  tasks.rs              后台命令（含长时间任务挂起等待）
+  lookup_cache.rs / cli_json.rs   外部对照缓存、CLI JSON 解析
+  skills.rs + builtin_skills.rs  Agent Skills
   reader.rs / writer.rs / ocr.rs / machine.rs / tempfs.rs
 src-tauri/builtin-skills/  内置 Skill 源文件（编译进应用）
 browser-extension/      配套浏览器扩展（WebSocket 桥接桌面端）

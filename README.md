@@ -13,11 +13,12 @@ A tray-resident AI desktop assistant: a floating ball + chat window backed by an
 | Todos | Natural-language creation ("remind me to submit the weekly report at 3pm tomorrow"); daily/weekly repeats, priorities, snooze; reminder via Windows notification or popup — the input popup lets you reply to the AI right from the reminder |
 | Browser Control | Read article bodies (Readability), snapshot and click/type on pages through the companion extension (your real browser, with your logins), with automatic failover to a standalone CDP instance |
 | Local File Index | Persistent Everything-like metadata index for bulk search and whole-drive analysis. Whole-drive usage can first use an elevated NTFS/MFT estimate grouped by top-level directory, then scan only requested scopes when exact values are needed |
-| Background Commands | The AI can run PowerShell or cmd commands synchronously or in the background, validate PowerShell syntax, preserve Unicode output, propagate native exit codes, and check long-running tasks later; command tools can be disabled in Settings |
-| Agent Skills | Built-in read-only skills + external skills the AI can create and refine; syncs with Claude / Codex / Cursor skill folders |
+| Background Commands | Run PowerShell, cmd, or AI-written scripts. Short jobs wait inline; long jobs pause the chat (no extra model calls) and resume when the process finishes. JSON stdout is parsed automatically. Command tools can be disabled in Settings |
+| Models & Usage | Save several LLM profiles (DeepSeek, Qwen, Volcengine Agent Plan, OpenAI, …) and switch which one is active. The Usage tab shows token counts and cache-hit rate |
+| Agent Skills | Built-in read-only skills + external skills the AI can create and refine; the enabled catalog is injected into chat so matching skills load by intent. Syncs with Claude / Codex / Cursor skill folders |
 | File & Vision Tools | Read files (text / PDF), OCR, image understanding, safe writes with automatic backups, read-only subagents |
 | Floating Ball | Always-on draggable orb; click to toggle the chat window; closing windows keeps the app running in the tray |
-| Main Window | Todos / Rules / History (undo) / Background Tasks / Skills / Settings |
+| Main Window | Todos / Rules / History (undo) / Background Tasks / Skills / Usage / Settings |
 
 ## Safety by Design
 
@@ -47,7 +48,7 @@ npm install
 npm run tauri:dev
 ```
 
-First run: right-click the tray icon → open the main window → Settings → fill in your LLM API (DeepSeek / Qwen / OpenAI presets), save, then chat.
+First run: right-click the tray icon → open the main window → Settings → add one or more LLM profiles (DeepSeek / Qwen / Volcengine Agent Plan / OpenAI and other presets), set which one is active, then chat. Each launch starts a fresh conversation; previous chats stay in History.
 
 ## Build
 
@@ -66,6 +67,7 @@ Output: NSIS installer under `src-tauri/target/release/bundle/nsis/`.
 - `deskhelper.db` — SQLite: todos, rules, operation logs, settings, chat history
 - `file_index.db` — persistent file metadata index (paths, names, sizes, timestamps; no file contents)
 - `tasks/`, `skills/`, `screenshots/`, `temp/` (AI scratch files), `file_backups/`, `ntfs-helper/`
+- `lookup-cache.json` — short-lived id↔name / field maps the AI extracts from external CLIs
 
 API keys live only in this local database and are never uploaded.
 
@@ -74,7 +76,7 @@ API keys live only in this local database and are never uploaded.
 ```
 src/                    React frontend
   windows/              FloatBall / ChatPanel / Reminder / MainWindow pages
-  components/           Main window tabs (Todos / Rules / History / Tasks / Skills / Settings)
+  components/           Main window tabs (Todos / Rules / History / Tasks / Skills / Usage / Settings)
   lib/ipc.ts            Sole declaration of the invoke/event IPC surface
   stores/chat.ts        Chat state (zustand)
 src-tauri/src/
@@ -89,7 +91,9 @@ src-tauri/src/
   ntfs_usn.rs           Read-only NTFS MFT / USN Journal support
   ntfs_helper.rs        Protocol and client for the short-lived elevated index helper
   todo/scheduler.rs     Todo reminder scheduler (notify / popup / popup-with-input)
-  tasks.rs              Background commands;  skills.rs + builtin_skills.rs  Agent Skills
+  tasks.rs              Background commands (including await until a long job finishes)
+  lookup_cache.rs / cli_json.rs   External CLI reference cache and JSON stdout parsing
+  skills.rs + builtin_skills.rs  Agent Skills
   reader.rs / writer.rs / ocr.rs / machine.rs / tempfs.rs
 src-tauri/builtin-skills/  Built-in skill sources (compiled into the app)
 browser-extension/      Companion browser extension (WebSocket bridge to the app)
