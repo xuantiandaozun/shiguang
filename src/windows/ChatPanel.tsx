@@ -95,6 +95,37 @@ async function loadSessionChrome(sessionId: number) {
 
 const fileName = (p: string) => p.replace(/\\/g, "/").split("/").pop() || p;
 
+const MAX_PASTE_BYTES = 32 * 1024 * 1024;
+
+function pasteHasFiles(dt: DataTransfer | null): boolean {
+  if (!dt) return false;
+  if (dt.files && dt.files.length > 0) return true;
+  const types = Array.from(dt.types ?? []);
+  if (types.some((t) => t === "Files" || t === "files" || t.startsWith("image/"))) return true;
+  return Array.from(dt.items ?? []).some((it) => it.kind === "file" || it.type.startsWith("image/"));
+}
+
+function filesFromClipboard(dt: DataTransfer): File[] {
+  const fromList = Array.from(dt.files ?? []);
+  if (fromList.length) return fromList;
+  const fromItems: File[] = [];
+  for (const it of Array.from(dt.items ?? [])) {
+    if (it.kind !== "file") continue;
+    const f = it.getAsFile();
+    if (f) fromItems.push(f);
+  }
+  return fromItems;
+}
+
+function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
 export default function ChatPanel() {
   const {
     messages,
@@ -148,6 +179,63 @@ export default function ChatPanel() {
       return Array.from(set);
     });
   }, []);
+
+  const ingestPastedFiles = useCallback(
+    async (files: File[], includeImage: boolean) => {
+      try {
+        const imported = await ipc.importClipboardAttachments(includeImage);
+        if (imported.paths.length) addAttachments(imported.paths);
+        if (imported.skipped_dirs > 0) {
+          addMessage({
+            role: "system",
+            content: imported.paths.length
+              ? `已跳过 ${imported.skipped_dirs} 个文件夹，目前只支持粘贴文件`
+              : "暂不支持直接粘贴文件夹，请选择其中的文件",
+          });
+        }
+        if (imported.paths.length || imported.skipped_dirs > 0) return;
+        if (!includeImage || !files.length) return;
+
+        const paths: string[] = [];
+        for (const file of files) {
+          if (file.size > MAX_PASTE_BYTES) {
+            addMessage({
+              role: "system",
+              content: `「${file.name || "未命名"}」较大，请改用拖入或点击左侧按钮添加`,
+            });
+            continue;
+          }
+          const buf = new Uint8Array(await file.arrayBuffer());
+          const name =
+            file.name && file.name !== "image.png" ? file.name : `截图-${Date.now()}.png`;
+          paths.push(await ipc.savePastedFile(name, uint8ToBase64(buf)));
+        }
+        addAttachments(paths);
+      } catch (e) {
+        if (includeImage || files.length) {
+          addMessage({ role: "system", content: `粘贴文件失败：${String(e)}` });
+        }
+      }
+    },
+    [addAttachments, addMessage],
+  );
+
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const hasFiles = pasteHasFiles(e.clipboardData);
+      if (hasFiles) {
+        e.preventDefault();
+        const files = e.clipboardData ? filesFromClipboard(e.clipboardData) : [];
+        void ingestPastedFiles(files, true);
+        return;
+      }
+      // 资源管理器复制的文件在部分 WebView 上不会出现在 paste 事件里，补查 CF_HDROP。
+      // 不读剪贴板图片，避免从 Word 粘贴文字时把选区位图当成附件。
+      void ingestPastedFiles([], false);
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [ingestPastedFiles]);
 
   const pickFiles = async () => {
     try {
@@ -517,7 +605,7 @@ export default function ChatPanel() {
           <button
             onClick={pickFiles}
             disabled={streaming}
-            title="添加文件（Word / PDF / 图片等）"
+            title="添加文件（也可粘贴或拖入）"
             className="shrink-0 w-9 h-9 rounded-lg bg-slate-900/80 border border-slate-700 text-slate-400 hover:text-sky-300 hover:border-sky-500/50 disabled:opacity-40 transition flex items-center justify-center"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -535,7 +623,7 @@ export default function ChatPanel() {
               }
             }}
             rows={1}
-            placeholder="和 AI 说点什么… 可拖入或点左侧附文件"
+            placeholder="和 AI 说点什么… 可粘贴、拖入或点左侧附文件"
             className="flex-1 resize-none scrollbar-none bg-slate-900/80 text-slate-100 text-sm rounded-lg px-3 py-2 outline-none border border-slate-700 focus:border-sky-500 placeholder:text-slate-500 max-h-28"
           />
           {streaming ? (
@@ -637,6 +725,9 @@ const TOOL_LABELS: Record<string, string> = {
   delete_profile_entry: "删除个人信息",
   browser_navigate: "打开网页",
   browser_snapshot: "读取页面快照",
+  browser_find: "查找页面控件",
+  browser_network_observe: "观察网页接口",
+  browser_request: "调用网页接口",
   browser_read: "提取页面正文",
   browser_click: "点击页面元素",
   browser_type: "输入文字",
@@ -646,6 +737,9 @@ const TOOL_LABELS: Record<string, string> = {
   browser_screenshot: "页面截图",
   browser_evaluate: "执行页面脚本",
   browser_status: "诊断浏览器连接",
+  find_browser_recipes: "查找浏览器经验",
+  save_browser_recipe: "保存浏览器配方",
+  run_browser_recipe: "运行浏览器配方",
   run_subagent: "子代理处理子任务",
   await_subagent: "等待子代理",
   web_search: "搜索网页",
@@ -663,6 +757,9 @@ const TOOL_LABELS: Record<string, string> = {
   create_skill: "创建 Skill",
   delete_skill: "删除 Skill",
   manage_skill: "管理 Skill",
+  list_workflows: "查看工作流",
+  create_workflow: "创建工作流",
+  manage_workflow: "管理工作流",
   ask_user: "等你确认",
   todo_write: "更新进度",
 };

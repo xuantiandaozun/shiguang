@@ -269,7 +269,7 @@ pub async fn run_chat(
             );
             let parsed_args: Value =
                 serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
-            let result = match tools::execute(&app, &call.name, &parsed_args, &cancel).await {
+            let result = match tools::execute(&app, &call.name, &parsed_args, &cancel, session_id).await {
                 Ok(v) => v,
                 Err(e) => json!({ "error": e.to_string() }),
             };
@@ -941,6 +941,7 @@ mod tests {
             subagent_reasoning_effort: "low".into(),
             subagent_model: String::new(),
             command_tools_enabled: true,
+            permission_level: "balanced".into(),
             llm_profiles: vec![],
             active_llm_profile_id: String::new(),
             profile_name: String::new(),

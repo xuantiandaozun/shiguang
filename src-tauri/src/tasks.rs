@@ -121,6 +121,7 @@ impl TaskManager {
         let mut transient_script = None;
         let (mut cmd, shell_name, shell_selection, transport) = if argv_mode {
             let (program, args) = validate_argv(spec.argv)?;
+            let program = resolve_program(&program);
             let mut cmd = tokio::process::Command::new(&program);
             cmd.args(&args);
             (cmd, "direct", "argv", "argv")
@@ -184,6 +185,12 @@ impl TaskManager {
             Err(error) => {
                 if let Some(path) = transient_script.as_ref() {
                     let _ = std::fs::remove_file(path);
+                }
+                if argv_mode && error.kind() == std::io::ErrorKind::NotFound {
+                    let program = spec.argv.first().map(|s| s.as_str()).unwrap_or("");
+                    return Err(anyhow!(
+                        "启动命令失败: program not found。找不到「{program}」。Windows 下 npm 全局命令通常是 .cmd，已按 PATH/PATHEXT 查找仍失败。请确认已安装，或改用绝对路径。"
+                    ));
                 }
                 return Err(anyhow!("启动命令失败: {}", error));
             }
@@ -504,6 +511,54 @@ fn validate_argv(argv: &[String]) -> Result<(String, Vec<String>)> {
         }
     }
     Ok((program.to_string(), args))
+}
+
+/// CreateProcess 不会套用 PATHEXT。`lark-cli` 这类 npm 全局命令实际是 `.cmd`，
+/// 不解析的话 GUI 进程里会直接 program not found，模型再包一层 cmd /c。
+fn resolve_program(program: &str) -> String {
+    let path = Path::new(program);
+    if path.is_absolute() || program.contains('/') || program.contains('\\') {
+        return program.to_string();
+    }
+    if path.extension().is_some() {
+        return search_path(program).unwrap_or_else(|| program.to_string());
+    }
+    if let Some(found) = search_path(program) {
+        return found;
+    }
+    for ext in pathext() {
+        if let Some(found) = search_path(&format!("{program}{ext}")) {
+            return found;
+        }
+    }
+    program.to_string()
+}
+
+fn pathext() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+            .split(';')
+            .map(|ext| ext.trim().to_string())
+            .filter(|ext| !ext.is_empty())
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+fn search_path(name: &str) -> Option<String> {
+    let path_os = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_os) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
 }
 
 /// 模型常把整条命令塞进 argv[0]。带空格的真实路径（含 \\ 或 /）放行。
@@ -833,7 +888,7 @@ mod tests {
     use super::{
         decode_log, encode_powershell_command, looks_like_powershell,
         looks_like_unsplit_shell_line, normalize_success_exit_codes, powershell_file_bootstrap,
-        powershell_wrapper, resolve_shell, unwrap_powershell_command, utf8_command, validate_argv,
+        powershell_wrapper, resolve_program, resolve_shell, unwrap_powershell_command, utf8_command, validate_argv,
         write_utf8_bom, ShellKind,
     };
     use base64::Engine as _;
@@ -856,6 +911,35 @@ mod tests {
             validate_argv(&["git".into(), "status".into(), "-sb".into()]).unwrap();
         assert_eq!(program, "git");
         assert_eq!(args, vec!["status", "-sb"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_program_finds_windows_cmd_shim_on_path() {
+        let dir = std::env::temp_dir().join(format!("shiguang-argv-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shim = dir.join("dh-fake-cli.cmd");
+        std::fs::write(&shim, "@echo off\n").unwrap();
+        let old_path = std::env::var_os("PATH");
+        let mut paths = vec![dir.clone()];
+        if let Some(path) = old_path.as_ref() {
+            paths.extend(std::env::split_paths(path));
+        }
+        std::env::set_var("PATH", std::env::join_paths(&paths).unwrap());
+        let resolved = resolve_program("dh-fake-cli");
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        let _ = std::fs::remove_file(&shim);
+        let _ = std::fs::remove_dir(&dir);
+        assert!(
+            resolved
+                .replace('\\', "/")
+                .to_ascii_lowercase()
+                .ends_with("dh-fake-cli.cmd"),
+            "{resolved}"
+        );
     }
 
     #[test]

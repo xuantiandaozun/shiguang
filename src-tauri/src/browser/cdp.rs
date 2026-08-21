@@ -1,7 +1,7 @@
 //! CDP 后端：通过 Chrome DevTools Protocol 操作浏览器。
 //! 连接顺序：127.0.0.1:9222（chrome://inspect 手动调试）→ 9223（本程序托管的调试实例）→ 自动拉起实例。
 
-use super::page_inject_js;
+use super::{page_inject_js, wrap_evaluate_expression};
 use anyhow::{anyhow, bail, Result};
 use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::page::{BringToFrontParams, CaptureScreenshotFormat};
@@ -71,7 +71,7 @@ impl CdpClient {
                 let max = params
                     .get("max_chars")
                     .and_then(|v| v.as_u64())
-                    .unwrap_or(8000);
+                    .unwrap_or(4000);
                 let scope = params.get("scope").cloned().unwrap_or(Value::Null);
                 let snap = self.dh("snapshot", json!([max, scope])).await?;
                 let info = self.info().await.unwrap_or(Value::Null);
@@ -85,8 +85,9 @@ impl CdpClient {
                 let max = params
                     .get("max_chars")
                     .and_then(|v| v.as_u64())
-                    .unwrap_or(12000);
-                let mut article = self.dh("read", json!([max])).await?;
+                    .unwrap_or(6000);
+                let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mut article = self.dh("read", json!([max, offset])).await?;
                 let info = self.info().await.unwrap_or(Value::Null);
                 if let Some(obj) = article.as_object_mut() {
                     if !obj.contains_key("url") {
@@ -112,6 +113,19 @@ impl CdpClient {
             "click" => {
                 let r = req_u64(&params, "ref")?;
                 self.dh("click", json!([r])).await
+            }
+            "find" => {
+                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(12).clamp(1, 30);
+                self.dh("find", json!([query, limit])).await
+            }
+            "request" => {
+                let method = params.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+                let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let body = params.get("body").cloned().unwrap_or(Value::Null);
+                let headers = params.get("headers").cloned().unwrap_or_else(|| json!({}));
+                let max = params.get("max_chars").and_then(|v| v.as_u64()).unwrap_or(6000);
+                self.dh("request", json!([method, url, body, headers, max])).await
             }
             "type" => {
                 let r = req_u64(&params, "ref")?;
@@ -189,17 +203,11 @@ impl CdpClient {
                 let ref_ = params.get("ref").and_then(|v| v.as_u64());
                 let dynamic_args = params.get("args").cloned().unwrap_or(Value::Null);
                 let page = self.current_page().await?;
-                let expression = if let Some(ref_) = ref_ {
-                    format!(
-                        "{}\n;(async()=>{{const $el=window.__dh.ref({});if(!$el)throw new Error('元素 [{}] 不存在或已失效，请重新获取快照');const $args={};return await ({});}})()",
-                        page_inject_js(),
-                        ref_,
-                        ref_,
-                        serde_json::to_string(&dynamic_args)?,
-                        expr
-                    )
+                let wrapped = wrap_evaluate_expression(expr, ref_, &dynamic_args);
+                let expression = if ref_.is_some() {
+                    format!("{}\n;{}", page_inject_js(), wrapped)
                 } else {
-                    expr.to_string()
+                    wrapped
                 };
                 let v = page
                     .evaluate(expression)

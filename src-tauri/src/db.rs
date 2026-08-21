@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -6,6 +6,19 @@ use std::sync::Mutex;
 
 pub fn now_str() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+fn query_like_tokens(query: Option<&str>) -> Vec<String> {
+    query
+        .map(|value| {
+            value
+                .split_whitespace()
+                .filter(|token| token.chars().count() >= 2)
+                .take(8)
+                .map(|token| format!("%{token}%"))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +250,55 @@ pub struct Workflow {
     pub updated_at: String,
 }
 
+/// 可直接执行的自动化流程。它和 Skill 不同：Skill 是 AI 的方法说明，
+/// Workflow 是用户保存的、可手动或按计划触发的一次具体工作。
+#[derive(Debug, Clone, Serialize)]
+pub struct AutomationWorkflow {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub prompt: String,
+    pub schedule_rule: String,
+    pub next_run_at: Option<String>,
+    pub enabled: bool,
+    pub run_count: i64,
+    pub last_run_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 经验证的浏览器操作配方：保存站点特征和声明式动作，不保存任意页面脚本或隐私内容。
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserRecipe {
+    pub id: i64,
+    pub name: String,
+    pub site_pattern: String,
+    pub goal: String,
+    pub recipe_json: String,
+    pub verification_json: String,
+    pub success_count: i64,
+    pub failure_count: i64,
+    pub last_used_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+fn browser_recipe_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BrowserRecipe> {
+    Ok(BrowserRecipe {
+        id: row.get(0)?, name: row.get(1)?, site_pattern: row.get(2)?, goal: row.get(3)?,
+        recipe_json: row.get(4)?, verification_json: row.get(5)?, success_count: row.get(6)?,
+        failure_count: row.get(7)?, last_used_at: row.get(8)?, created_at: row.get(9)?, updated_at: row.get(10)?,
+    })
+}
+
+fn automation_workflow_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AutomationWorkflow> {
+    Ok(AutomationWorkflow {
+        id: row.get(0)?, name: row.get(1)?, description: row.get(2)?, prompt: row.get(3)?,
+        schedule_rule: row.get(4)?, next_run_at: row.get(5)?, enabled: row.get::<_, i32>(6)? != 0,
+        run_count: row.get(7)?, last_run_at: row.get(8)?, created_at: row.get(9)?, updated_at: row.get(10)?,
+    })
+}
+
 /// 个人信息自由条目（AI 在聊天中维护，用户也可在设置页手动管理）
 #[derive(Debug, Clone, Serialize)]
 pub struct ProfileEntry {
@@ -369,6 +431,35 @@ impl Db {
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS automation_workflows(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL UNIQUE,
+              description TEXT NOT NULL DEFAULT '',
+              prompt TEXT NOT NULL,
+              schedule_rule TEXT NOT NULL DEFAULT 'manual',
+              next_run_at TEXT,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              run_count INTEGER NOT NULL DEFAULT 0,
+              last_run_at TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_automation_workflows_due
+              ON automation_workflows(enabled, next_run_at);
+            CREATE TABLE IF NOT EXISTS browser_recipes(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL UNIQUE,
+              site_pattern TEXT NOT NULL,
+              goal TEXT NOT NULL,
+              recipe_json TEXT NOT NULL,
+              verification_json TEXT NOT NULL DEFAULT '{}',
+              success_count INTEGER NOT NULL DEFAULT 0,
+              failure_count INTEGER NOT NULL DEFAULT 0,
+              last_used_at TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_browser_recipes_site ON browser_recipes(site_pattern);
             CREATE TABLE IF NOT EXISTS profile_entries(
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               label TEXT NOT NULL UNIQUE,
@@ -1214,9 +1305,9 @@ impl Db {
         include_history_queries: bool,
     ) -> Result<Vec<ToolCallRecord>> {
         let conn = self.conn.lock().unwrap();
-        let query_pattern = query.map(|value| format!("%{}%", value));
+        let query_tokens = query_like_tokens(query);
         let include_history_queries = if include_history_queries { 1 } else { 0 };
-        let mut stmt = conn.prepare(
+        let mut sql = String::from(
             "SELECT
                t.id, t.session_id, t.request_message_id, t.response_message_id,
                t.round_index, t.call_index, t.tool_call_id, t.tool_name,
@@ -1230,29 +1321,42 @@ impl Db {
              WHERE (?1 IS NULL OR t.session_id=?1)
                AND (?2 IS NULL OR t.tool_name=?2)
                AND (?3 IS NULL OR t.status=?3)
-               AND (?4 IS NULL OR t.id<?4)
-               AND (?5 IS NULL
-                    OR t.tool_name LIKE ?5
-                    OR t.arguments_json LIKE ?5
-                    OR COALESCE(t.result_json, '') LIKE ?5
-                    OR req.content LIKE ?5
-                    OR COALESCE(resp.content, '') LIKE ?5)
-               AND (?6=1 OR t.tool_name<>'get_tool_call_history')
-             ORDER BY t.id DESC
-             LIMIT ?7",
-        )?;
-        let mapped = stmt.query_map(
-            params![
-                session_id,
-                tool_name,
-                status,
-                before_id,
-                query_pattern,
-                include_history_queries,
-                limit.clamp(1, 100) as i64,
-            ],
-            tool_call_record_from_row,
-        )?;
+               AND (?4 IS NULL OR t.id<?4)",
+        );
+        if !query_tokens.is_empty() {
+            sql.push_str(" AND (");
+            for (index, _) in query_tokens.iter().enumerate() {
+                if index > 0 {
+                    sql.push_str(" OR ");
+                }
+                let n = 5 + index;
+                sql.push_str(&format!(
+                    "(t.tool_name LIKE ?{n}
+                      OR t.arguments_json LIKE ?{n}
+                      OR COALESCE(t.result_json, '') LIKE ?{n}
+                      OR req.content LIKE ?{n}
+                      OR COALESCE(resp.content, '') LIKE ?{n})"
+                ));
+            }
+            sql.push_str(")");
+        }
+        let include_idx = 5 + query_tokens.len();
+        let limit_idx = include_idx + 1;
+        sql.push_str(&format!(
+            " AND (?{include_idx}=1 OR t.tool_name<>'get_tool_call_history')
+              ORDER BY t.id DESC
+              LIMIT ?{limit_idx}"
+        ));
+        let mut stmt = conn.prepare(&sql)?;
+        let limit_i = limit.clamp(1, 100) as i64;
+        let mut bind: Vec<&dyn rusqlite::ToSql> =
+            vec![&session_id, &tool_name, &status, &before_id];
+        for token in &query_tokens {
+            bind.push(token);
+        }
+        bind.push(&include_history_queries);
+        bind.push(&limit_i);
+        let mapped = stmt.query_map(bind.as_slice(), tool_call_record_from_row)?;
         let mut rows: Vec<ToolCallRecord> = mapped.collect::<rusqlite::Result<Vec<_>>>()?;
         rows.reverse();
         Ok(rows)
@@ -1468,6 +1572,117 @@ impl Db {
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.updated_at.cmp(&a.1.updated_at)));
         Ok(scored.into_iter().take(limit).map(|(_, w)| w).collect())
+    }
+
+    // ---------- automation workflows ----------
+
+    pub fn automation_workflow_list(&self) -> Result<Vec<AutomationWorkflow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, prompt, schedule_rule, next_run_at, enabled, run_count, last_run_at, created_at, updated_at
+             FROM automation_workflows ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], automation_workflow_from_row)?;
+        Ok(rows.filter_map(|row| row.ok()).collect())
+    }
+
+    pub fn automation_workflow_get(&self, id: i64) -> Result<Option<AutomationWorkflow>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row(
+            "SELECT id, name, description, prompt, schedule_rule, next_run_at, enabled, run_count, last_run_at, created_at, updated_at
+             FROM automation_workflows WHERE id=?1",
+            params![id], automation_workflow_from_row,
+        ).optional()?)
+    }
+
+    pub fn automation_workflow_save(&self, workflow: &AutomationWorkflow) -> Result<AutomationWorkflow> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_str();
+        if workflow.id == 0 {
+            conn.execute(
+                "INSERT INTO automation_workflows(name, description, prompt, schedule_rule, next_run_at, enabled, created_at, updated_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                params![workflow.name.trim(), workflow.description.trim(), workflow.prompt.trim(), workflow.schedule_rule, workflow.next_run_at, workflow.enabled as i32, now],
+            )?;
+            let id = conn.last_insert_rowid();
+            drop(conn);
+            return Ok(self.automation_workflow_get(id)?.expect("inserted workflow"));
+        }
+        conn.execute(
+            "UPDATE automation_workflows SET name=?1, description=?2, prompt=?3, schedule_rule=?4, next_run_at=?5, enabled=?6, updated_at=?7 WHERE id=?8",
+            params![workflow.name.trim(), workflow.description.trim(), workflow.prompt.trim(), workflow.schedule_rule, workflow.next_run_at, workflow.enabled as i32, now, workflow.id],
+        )?;
+        drop(conn);
+        self.automation_workflow_get(workflow.id)?.ok_or_else(|| anyhow!("工作流不存在"))
+    }
+
+    pub fn automation_workflow_delete(&self, id: i64) -> Result<()> {
+        self.conn.lock().unwrap().execute("DELETE FROM automation_workflows WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn due_automation_workflows(&self, now: &str) -> Result<Vec<AutomationWorkflow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, prompt, schedule_rule, next_run_at, enabled, run_count, last_run_at, created_at, updated_at
+             FROM automation_workflows WHERE enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=?1",
+        )?;
+        let rows = stmt.query_map(params![now], automation_workflow_from_row)?;
+        Ok(rows.filter_map(|row| row.ok()).collect())
+    }
+
+    pub fn mark_automation_workflow_run(&self, id: i64, next_run_at: Option<&str>) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE automation_workflows SET run_count=run_count+1, last_run_at=?1, next_run_at=?2, updated_at=?1 WHERE id=?3",
+            params![now_str(), next_run_at, id],
+        )?;
+        Ok(())
+    }
+
+    // ---------- browser recipes ----------
+
+    pub fn browser_recipe_list(&self) -> Result<Vec<BrowserRecipe>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id, name, site_pattern, goal, recipe_json, verification_json, success_count, failure_count, last_used_at, created_at, updated_at FROM browser_recipes ORDER BY updated_at DESC")?;
+        let rows = stmt.query_map([], browser_recipe_from_row)?;
+        Ok(rows.filter_map(|row| row.ok()).collect())
+    }
+
+    pub fn browser_recipe_get(&self, id: i64) -> Result<Option<BrowserRecipe>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row("SELECT id, name, site_pattern, goal, recipe_json, verification_json, success_count, failure_count, last_used_at, created_at, updated_at FROM browser_recipes WHERE id=?1", params![id], browser_recipe_from_row).optional()?)
+    }
+
+    pub fn browser_recipe_save(&self, recipe: &BrowserRecipe) -> Result<BrowserRecipe> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_str();
+        if recipe.id == 0 {
+            conn.execute("INSERT INTO browser_recipes(name, site_pattern, goal, recipe_json, verification_json, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?6)", params![recipe.name.trim(), recipe.site_pattern.trim(), recipe.goal.trim(), recipe.recipe_json, recipe.verification_json, now])?;
+            let id = conn.last_insert_rowid(); drop(conn);
+            return Ok(self.browser_recipe_get(id)?.expect("inserted recipe"));
+        }
+        conn.execute("UPDATE browser_recipes SET name=?1, site_pattern=?2, goal=?3, recipe_json=?4, verification_json=?5, updated_at=?6 WHERE id=?7", params![recipe.name.trim(), recipe.site_pattern.trim(), recipe.goal.trim(), recipe.recipe_json, recipe.verification_json, now, recipe.id])?;
+        drop(conn);
+        self.browser_recipe_get(recipe.id)?.ok_or_else(|| anyhow!("浏览器配方不存在"))
+    }
+
+    pub fn browser_recipe_delete(&self, id: i64) -> Result<()> {
+        self.conn.lock().unwrap().execute("DELETE FROM browser_recipes WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn browser_recipe_find(&self, url: &str, goal: &str, limit: usize) -> Result<Vec<BrowserRecipe>> {
+        let mut all = self.browser_recipe_list()?;
+        let u = url.to_lowercase(); let g = goal.to_lowercase();
+        all.retain(|recipe| u.contains(&recipe.site_pattern.to_lowercase()) && (g.is_empty() || recipe.goal.to_lowercase().contains(&g) || recipe.name.to_lowercase().contains(&g)));
+        all.sort_by(|a, b| (b.success_count - b.failure_count).cmp(&(a.success_count - a.failure_count)).then(b.updated_at.cmp(&a.updated_at)));
+        Ok(all.into_iter().take(limit).collect())
+    }
+
+    pub fn browser_recipe_mark(&self, id: i64, success: bool) -> Result<()> {
+        let field = if success { "success_count" } else { "failure_count" };
+        self.conn.lock().unwrap().execute(&format!("UPDATE browser_recipes SET {field}={field}+1, last_used_at=?1, updated_at=?1 WHERE id=?2"), params![now_str(), id])?;
+        Ok(())
     }
 
     // ---------- profile entries ----------
@@ -1913,6 +2128,98 @@ mod tool_call_tests {
         );
 
         assert!(result.is_err());
+        cleanup(db, &path);
+    }
+
+    #[test]
+    fn querying_tool_calls_does_not_leak_other_sessions() {
+        let (db, path) = test_db();
+        let current = db.current_session_id().unwrap();
+        let other = db.create_session().unwrap();
+
+        let current_request = db.save_chat(current, "user", "当前会话").unwrap();
+        let current_call = db
+            .start_tool_call(
+                current,
+                current_request,
+                0,
+                0,
+                "call-current",
+                "browser_status",
+                "{}",
+                "",
+                "",
+            )
+            .unwrap();
+        db.finish_tool_call(current_call, "done", r#"{"ok":true}"#)
+            .unwrap();
+
+        let other_request = db.save_chat(other, "user", "其他会话").unwrap();
+        let other_call = db
+            .start_tool_call(
+                other,
+                other_request,
+                0,
+                0,
+                "call-other",
+                "browser_click",
+                "{}",
+                "",
+                "",
+            )
+            .unwrap();
+        db.finish_tool_call(other_call, "done", r#"{"ok":true}"#)
+            .unwrap();
+
+        let current_only = db
+            .query_tool_calls(Some(current), None, None, None, None, 20, false)
+            .unwrap();
+        assert_eq!(current_only.len(), 1);
+        assert_eq!(current_only[0].id, current_call);
+
+        let all = db
+            .query_tool_calls(None, None, None, None, None, 20, false)
+            .unwrap();
+        assert_eq!(all.len(), 2);
+
+        cleanup(db, &path);
+    }
+
+    #[test]
+    fn querying_tool_calls_splits_keywords() {
+        let (db, path) = test_db();
+        let session_id = db.current_session_id().unwrap();
+        let request_id = db.save_chat(session_id, "user", "上传截图").unwrap();
+        let call_id = db
+            .start_tool_call(
+                session_id,
+                request_id,
+                0,
+                0,
+                "call-upload",
+                "browser_evaluate",
+                r#"{"expression":"DataTransfer"}"#,
+                "",
+                "",
+            )
+            .unwrap();
+        db.finish_tool_call(call_id, "done", r#"{"ok":true}"#)
+            .unwrap();
+
+        let hits = db
+            .query_tool_calls(
+                Some(session_id),
+                None,
+                None,
+                Some("upload_file DataTransfer base64"),
+                None,
+                20,
+                false,
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, call_id);
+
         cleanup(db, &path);
     }
 }

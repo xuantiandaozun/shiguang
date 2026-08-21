@@ -268,6 +268,30 @@ export default function SettingsTab() {
       </section>
 
       <section className="space-y-2.5">
+        <div className="text-sm font-medium text-slate-100">AI 操作权限</div>
+        <div className="grid grid-cols-1 gap-2">
+          {[
+            ["confirmation", "谨慎", "每次执行有副作用的操作前都先询问。"],
+            ["balanced", "平衡", "普通操作直接完成；发送、删除、覆盖、提权等敏感操作才确认。"],
+            ["autopilot", "高效", "非危险操作不再打断；危险、不可逆和提权操作仍会确认。"],
+          ].map(([value, label, hint]) => (
+            <button
+              key={value}
+              onClick={() => update({ permission_level: value })}
+              className={`text-left rounded-lg border px-3 py-2.5 transition ${
+                settings.permission_level === value
+                  ? "border-sky-500/70 bg-sky-500/10"
+                  : "border-slate-700/60 bg-slate-900/40 hover:border-slate-600"
+              }`}
+            >
+              <div className="text-sm text-slate-200">{label}</div>
+              <div className="mt-0.5 text-xs text-slate-500">{hint}</div>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="space-y-2.5">
         <div className="text-sm font-medium text-slate-100">
           后台任务与命令执行
           <span className="ml-2 text-xs font-normal text-slate-500">

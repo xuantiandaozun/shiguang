@@ -37,6 +37,9 @@ fn tools_for_category(category: &str) -> &'static [&'static str] {
         "browser" => &[
             "browser_navigate",
             "browser_snapshot",
+            "browser_find",
+            "browser_network_observe",
+            "browser_request",
             "browser_read",
             "browser_click",
             "browser_type",
@@ -46,6 +49,9 @@ fn tools_for_category(category: &str) -> &'static [&'static str] {
             "browser_screenshot",
             "browser_evaluate",
             "browser_status",
+            "find_browser_recipes",
+            "save_browser_recipe",
+            "run_browser_recipe",
         ],
         "web" => &["web_search", "web_fetch"],
         "organize" => &[
@@ -76,6 +82,7 @@ fn tools_for_category(category: &str) -> &'static [&'static str] {
             "delete_skill",
             "manage_skill",
         ],
+        "workflows" => &["list_workflows", "create_workflow", "manage_workflow"],
         _ => &[],
     }
 }
@@ -107,9 +114,9 @@ pub fn definitions() -> Value {
                             "type": "array",
                             "items": {
                                 "type": "string",
-                                "enum": ["files", "browser", "web", "organize", "todos", "profile", "commands", "system", "delegation", "skills"]
+                                "enum": ["files", "browser", "web", "organize", "todos", "profile", "commands", "system", "delegation", "skills", "workflows"]
                             },
-                            "description": "要检索的能力：files=本地文件/图片，browser=已打开的网页，web=公开网页搜索/抓取，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，system=硬件与进程，delegation=只读子任务，skills=管理技能"
+                            "description": "要检索的能力：files=本地文件/图片，browser=已打开的网页，web=公开网页搜索/抓取，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，system=硬件与进程，delegation=只读子任务，skills=管理技能，workflows=固定流程与定时执行"
                         }
                     },
                     "required": ["query", "categories"]
@@ -120,14 +127,13 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "get_tool_call_history",
-                "description": "查询持久化的工具调用历史，用于复盘过去操作、追踪“失败 → 调整 → 验证”过程、排障或总结可复用 Skill。记录与触发它的用户消息及最终 AI 回复相关联。search 先找到相关调用和 id；需要某次调用的完整参数/结果时再用 get，避免一次载入过多历史。不要用它代替对当前环境的实际验证。",
+                "description": "查询当前这次会话内已持久化的工具调用历史，用于复盘本会话过去操作、追踪“失败 → 调整 → 验证”过程、排障或总结可复用 Skill。不能查看其他会话。记录与触发它的用户消息及最终 AI 回复相关联。search 先找到相关调用和 id；需要某次调用的完整参数/结果时再用 get，避免一次载入过多历史。不要用它代替对当前环境的实际验证。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": { "type": "string", "enum": ["search", "get"], "description": "默认 search；get 按 id 返回单次调用的完整参数和结果" },
-                        "id": { "type": "integer", "description": "action=get 时必填，来自 search 结果" },
-                        "scope": { "type": "string", "enum": ["current_session", "all_sessions"], "description": "search 范围，默认当前会话；跨会话总结经验时可用 all_sessions" },
-                        "query": { "type": "string", "description": "搜索工具名、参数、结果、用户消息和最终回复中包含的文字" },
+                        "id": { "type": "integer", "description": "action=get 时必填，来自本会话 search 结果" },
+                        "query": { "type": "string", "description": "搜索工具名、参数、结果、用户消息和最终回复中包含的文字；多个词按空格分开，命中任一即可" },
                         "tool_name": { "type": "string", "description": "精确限定工具名" },
                         "status": { "type": "string", "enum": ["running", "done", "error"], "description": "按最终调用状态过滤" },
                         "before_id": { "type": "integer", "description": "分页：只返回小于该 id 的更早记录" },
@@ -308,11 +314,11 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "browser_snapshot",
-                "description": "观察当前页面的交互结构与状态。快照为控件编号，并标注 role、标签、值、展开/收起、关联浮层、可搜索性、禁用/必填等语义；当前可见的 dialog/listbox/menu/tree/grid 浮层会优先输出，包括 portal 与虚拟列表的可见部分。任何点击、输入、滚动、导航、弹窗变化或 channel 变化后，旧编号都可能失效，应重新观察。打开自定义控件后先取新的全量快照，因为 portal 浮层通常不在触发器子树；定位到新浮层后才用 scope 聚焦。正文阅读用 browser_read。",
+                "description": "观察当前页面的交互结构与状态。只输出可见的交互元素、表单和弹层，不含网页 CSS/脚本；默认紧凑 4000 字符，当前可见 dialog/listbox/menu/tree/grid 浮层优先。先用 browser_find 查找文字明确的按钮/字段；只有候选不明确、复杂表单或新浮层时再 snapshot，并优先用 scope 聚焦。导航、刷新、切换通道或出现新浮层后 ref 必须重取；单纯输入同页普通字段后，可复用仍在页面上的既有 ref 完成同一表单，再用局部快照统一核验。正文阅读用 browser_read。",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "max_chars": { "type": "integer", "description": "快照最大字符数，默认 8000" },
+                        "max_chars": { "type": "integer", "description": "快照最大字符数，默认 4000；仅复杂页面按需增大" },
                         "scope": { "description": "可选：聚焦局部。传上次快照中容器元素的编号（数字），或 CSS 选择器（字符串，如 .msg-form、dialog）。只遍历该元素子树，编号从 1 重排" }
                     },
                     "required": []
@@ -322,12 +328,52 @@ pub fn definitions() -> Value {
         {
             "type": "function",
             "function": {
-                "name": "browser_read",
-                "description": "用 Readability 抽取当前页可读正文（剥离导航/广告/侧栏），返回纯文本。适合总结文章、摘录新闻/博客/文档页。不返回可点击编号——要操作页面请用 browser_snapshot。应用页、登录页、信息流等非文章结构可能提取失败，此时改用 snapshot 或截图。",
+                "name": "browser_find",
+                "description": "按可见文字、标签、placeholder、aria 或 title 查找少量可操作候选，并直接返回可供 click/type 使用的 ref。找“提交”“标题”“搜索”等明确目标时优先用它，避免全页快照消耗 token；候选不唯一或找不到时再用局部 snapshot 判断，不要猜。",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "max_chars": { "type": "integer", "description": "正文最大字符数，默认 12000，上限 100000" }
+                        "query": { "type": "string", "description": "要匹配的可见文字或字段语义，如“发布”“标题”“收件人”" },
+                        "limit": { "type": "integer", "description": "最多候选数，默认 12，最大 30" }
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_network_observe",
+                "description": "观察当前浏览器标签页发出的网络请求，用于理解已登录网站的真实接口。start 后让用户或你用正常页面操作完成一次真实动作，再用 list 查看脱敏接口目录，最后 stop。只记录方法、同源 URL 路径、参数字段名、请求体字段名、状态码和 MIME；绝不记录 Cookie、Authorization、token、请求值或响应正文。仅扩展 debugger 通道可用。",
+                "parameters": { "type": "object", "properties": {
+                    "action": { "type": "string", "enum": ["start", "list", "stop"], "description": "start 开始当前标签观察；list 查看；stop 停止并清除内存记录" }
+                }, "required": ["action"] }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_request",
+                "description": "从当前页面主世界调用同源 HTTP 接口，自动携带当前浏览器会话的 Cookie/CSRF 上下文；仅在已通过网络观察或页面证据确认接口用途后使用。禁止跨域、手工 Authorization/Cookie/token。GET 查询可直接执行；POST/PUT/PATCH/DELETE 涉及提交、发布或删除时仍按权限策略确认，并必须核验响应。",
+                "parameters": { "type": "object", "properties": {
+                    "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+                    "url": { "type": "string", "description": "当前站点同源的相对路径或完整 URL" },
+                    "body": { "description": "非 GET 请求的 JSON 请求体；不得包含密码、token 或 Cookie" },
+                    "headers": { "type": "object", "description": "可选的非认证请求头；仅允许 Content-Type、Accept、X-Requested-With" },
+                    "max_chars": { "type": "integer", "description": "返回正文预览上限，默认 6000，最大 20000" }
+                }, "required": ["method", "url"] }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_read",
+                "description": "用 Readability 抽取当前页可读正文（剥离导航/广告/侧栏），默认只返回 6000 字符。长文用 offset 分段读取，不要一次拉取整篇；适合总结文章、摘录新闻/博客/文档页。不返回可点击编号——要操作页面请用 browser_snapshot。应用页、登录页、信息流等非文章结构可能提取失败，此时改用 snapshot 或截图。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "max_chars": { "type": "integer", "description": "本段正文最大字符数，默认 6000，上限 100000" },
+                        "offset": { "type": "integer", "description": "从正文第几个字符开始读取，默认 0；长文按返回结果的 offset/returned_chars 继续" }
                     },
                     "required": []
                 }
@@ -413,13 +459,13 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "browser_evaluate",
-                "description": "在当前页面执行 AI 动态生成的 JavaScript 并返回结构化结果，是 click/type/scroll 在复杂组件、虚拟列表、画布或页面语义不足时的通用补充能力，不绑定特定网站。优先先 snapshot 观察真实状态；先用只读脚本检查 DOM/ARIA/滚动尺寸/候选，再生成最小改动脚本，派发页面需要的事件，并在返回值中报告执行前后状态以便核验。可传 ref，此时表达式中可用 `$el` 引用该快照元素、用 `$args` 读取结构化参数；复杂逻辑写成 `async` IIFE。复用 ref 时必须沿用 snapshot 返回的通道：extension-debugger 对应 debugger，cdp 对应 cdp；页面导航、刷新或切换通道后须重新 snapshot。默认走扩展 debugger 主世界；无法附着时降级到 scripting 隔离世界。",
+                "description": "在当前页面执行 AI 动态生成的 JavaScript 并返回结构化结果，是 click/type/scroll 在复杂组件、虚拟列表、画布或页面语义不足时的通用补充能力，不绑定特定网站。优先先 snapshot 观察真实状态；先用只读脚本检查 DOM/ARIA/滚动尺寸/候选，再生成最小改动脚本，派发页面需要的事件，并在返回值中报告执行前后状态以便核验。可传 ref，表达式中用 `$el` 引用该快照元素。结构化参数放在 args，表达式中用 `$args` 读取，不要把长文本、路径、base64 拼进 expression；args 不依赖 ref。复杂逻辑写成 `async` IIFE。复用 ref 时必须沿用 snapshot 返回的通道：extension-debugger 对应 debugger，cdp 对应 cdp；页面导航、刷新或切换通道后须重新 snapshot。默认走扩展 debugger 主世界；无法附着时降级到 scripting 隔离世界。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "expression": { "type": "string", "description": "JS 表达式或 IIFE，返回可 JSON 序列化的值。例：`({role:$el?.getAttribute('role'), expanded:$el?.getAttribute('aria-expanded')})`；复杂操作用 `(async()=>{ /* inspect/action/verify */ return {...}; })()`" },
                         "ref": { "type": "integer", "description": "可选：browser_snapshot 的元素编号；传入后表达式可直接使用 `$el`，避免编造脆弱 CSS 选择器" },
-                        "args": { "description": "可选：传给动态脚本的 JSON 值；表达式中通过 `$args` 使用，避免手工拼接和转义用户文本" },
+                        "args": { "description": "可选：传给动态脚本的 JSON 值。表达式通过 `$args` 使用（不传 ref 时同样可用），避免手工拼接和转义用户文本" },
                         "channel": {
                             "type": "string",
                             "enum": ["auto", "extension", "debugger", "cdp"],
@@ -436,6 +482,41 @@ pub fn definitions() -> Value {
                 "name": "browser_status",
                 "description": "查看浏览器连接通道状态（扩展桥 / CDP 调试实例 / 未连接）。浏览器工具异常时用它诊断。",
                 "parameters": { "type": "object", "properties": {}, "required": [] }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "find_browser_recipes",
+                "description": "查找已验证的浏览器操作经验/配方。完成浏览器任务前，已知当前页面 URL 且目标重复时可先查；结果仅作加速参考，执行前仍须用 browser_find 或紧凑快照核对当前页面。",
+                "parameters": { "type": "object", "properties": {
+                    "url": { "type": "string", "description": "当前页面 URL" },
+                    "goal": { "type": "string", "description": "当前任务目标关键词" }
+                }, "required": ["url"] }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "save_browser_recipe",
+                "description": "在浏览器任务已实际完成且成功结果已核验后，保存可复用的声明式操作配方。只记录稳定的站点特征和 find/click/type/verify 动作，不记录账号、密码、cookie、用户正文或任意 JavaScript。不要在未验证、失败或一次性任务后保存。",
+                "parameters": { "type": "object", "properties": {
+                    "id": { "type": "integer", "description": "更新已有配方时填写；新建则省略" },
+                    "name": { "type": "string" }, "site_pattern": { "type": "string", "description": "稳定域名或 URL 片段，如 docs.example.com" },
+                    "goal": { "type": "string", "description": "适用目标" },
+                    "actions": { "type": "array", "description": "动作仅允许 find_click、find_type；find_type 的 value 可写 {{变量名}}。", "items": { "type": "object" } },
+                    "verification": { "type": "object", "description": "可选，url_contains 或 find_query；至少有一个才适合自动运行" }
+                }, "required": ["name", "site_pattern", "goal", "actions"] }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_browser_recipe",
+                "description": "预检并执行已验证的浏览器配方。只在用户要求执行该流程且当前页面已知时使用；敏感的发送、发布、删除等动作仍遵循权限策略。页面不匹配、候选不唯一或验证失败时立即停止并返回，由 AI 使用正常浏览器工具接管，不会盲目重试。",
+                "parameters": { "type": "object", "properties": {
+                    "id": { "type": "integer" }, "variables": { "type": "object", "description": "填充 {{变量名}} 所需值；不得包含密码、cookie 或 token" }
+                }, "required": ["id"] }
             }
         },
         {
@@ -957,6 +1038,41 @@ pub fn definitions() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "list_workflows",
+                "description": "列出用户保存的可执行工作流（固定流程，可手动或定时运行）。它不同于 Skill：Skill 是给 AI 的方法说明，不会直接执行；工作流保存一次具体工作的执行指令与计划。",
+                "parameters": { "type": "object", "properties": {}, "required": [] }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "create_workflow",
+                "description": "新建或更新可执行工作流。用户要求把固定流程封装、设为定时任务时使用。prompt 写完整、可执行的固定指令；不要把通用方法论做成工作流，应改用 Skill。schedule_rule=manual/once/daily/weekly；非 manual 必须给 next_run_at（本地 YYYY-MM-DD HH:MM:SS）。",
+                "parameters": { "type": "object", "properties": {
+                    "id": { "type": "integer", "description": "更新已有工作流时填写；新建则省略" },
+                    "name": { "type": "string", "description": "用户可辨识的名称，最多 60 字" },
+                    "description": { "type": "string", "description": "该流程产出什么、何时适用" },
+                    "prompt": { "type": "string", "description": "每次运行时发给 AI 的完整固定执行指令" },
+                    "schedule_rule": { "type": "string", "enum": ["manual", "once", "daily", "weekly"] },
+                    "next_run_at": { "type": "string", "description": "定时计划的首次/下次执行时间，YYYY-MM-DD HH:MM:SS" },
+                    "enabled": { "type": "boolean", "description": "是否允许定时触发，默认 true" }
+                }, "required": ["name", "description", "prompt", "schedule_rule"] }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "manage_workflow",
+                "description": "管理可执行工作流：run 手动启动，delete 删除（仅在用户明确要求时），enable/disable 控制定时触发。",
+                "parameters": { "type": "object", "properties": {
+                    "action": { "type": "string", "enum": ["run", "delete", "enable", "disable"] },
+                    "id": { "type": "integer" }
+                }, "required": ["action", "id"] }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "manage_skill",
                 "description": "管理 Skill：enable/disable（内外部均可）、scan/sync 从本机 Claude/Codex/Cursor 导入为外部技能。不能用 sync 覆盖内部技能。",
                 "parameters": {
@@ -1010,11 +1126,89 @@ pub fn definitions_for<S: AsRef<str>>(names: &[S]) -> Value {
     )
 }
 
+fn query_current_session_tool_history(db: &Db, session_id: i64, args: &Value) -> Result<Value> {
+    if let Some(scope) = args.get("scope").and_then(Value::as_str) {
+        match scope {
+            "current_session" => {}
+            "all_sessions" => bail!("只能查询当前这次会话内的工具调用记录"),
+            other => bail!("未知 scope: {}", other),
+        }
+    }
+    let action = args
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("search");
+    match action {
+        "get" => {
+            let id = args
+                .get("id")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| anyhow!("action=get 需要有效 id"))?;
+            let record = db
+                .get_tool_call(id)?
+                .filter(|record| record.session_id == session_id)
+                .ok_or_else(|| anyhow!("未找到工具调用记录 {}", id))?;
+            Ok(tool_call_detail(&record))
+        }
+        "search" => {
+            let tool_name = args
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let status = args
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            if status.is_some_and(|value| !matches!(value, "running" | "done" | "error")) {
+                bail!("无效 status");
+            }
+            let query = args
+                .get("query")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let before_id = args.get("before_id").and_then(Value::as_i64);
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(20)
+                .clamp(1, 50) as usize;
+            let include_history_queries = args
+                .get("include_history_queries")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let records = db.query_tool_calls(
+                Some(session_id),
+                tool_name,
+                status,
+                query,
+                before_id,
+                limit,
+                include_history_queries,
+            )?;
+            let next_before_id = (records.len() == limit)
+                .then(|| records.first().map(|record| record.id))
+                .flatten();
+            let items: Vec<Value> = records.iter().map(tool_call_search_item).collect();
+            Ok(json!({
+                "count": items.len(),
+                "calls": items,
+                "next_before_id": next_before_id,
+                "note": "search 返回截断预览；需要某条记录的完整参数和结果时，用 action=get + id。",
+            }))
+        }
+        other => bail!("未知 action: {}", other),
+    }
+}
+
 pub async fn execute(
     app: &AppHandle,
     name: &str,
     args: &Value,
     cancel: &tokio_util::sync::CancellationToken,
+    session_id: i64,
 ) -> Result<Value> {
     let state = app.state::<crate::AppState>();
     let db = &state.db;
@@ -1095,83 +1289,7 @@ pub async fn execute(
                 "next": next,
             }))
         }
-        "get_tool_call_history" => {
-            let action = args
-                .get("action")
-                .and_then(Value::as_str)
-                .unwrap_or("search");
-            match action {
-                "get" => {
-                    let id = args
-                        .get("id")
-                        .and_then(Value::as_i64)
-                        .ok_or_else(|| anyhow!("action=get 需要有效 id"))?;
-                    let record = db
-                        .get_tool_call(id)?
-                        .ok_or_else(|| anyhow!("未找到工具调用记录 {}", id))?;
-                    Ok(tool_call_detail(&record))
-                }
-                "search" => {
-                    let session_id = match args
-                        .get("scope")
-                        .and_then(Value::as_str)
-                        .unwrap_or("current_session")
-                    {
-                        "current_session" => Some(db.current_session_id()?),
-                        "all_sessions" => None,
-                        other => bail!("未知 scope: {}", other),
-                    };
-                    let tool_name = args
-                        .get("tool_name")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty());
-                    let status = args
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty());
-                    if status.is_some_and(|value| !matches!(value, "running" | "done" | "error")) {
-                        bail!("无效 status");
-                    }
-                    let query = args
-                        .get("query")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty());
-                    let before_id = args.get("before_id").and_then(Value::as_i64);
-                    let limit = args
-                        .get("limit")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(20)
-                        .clamp(1, 50) as usize;
-                    let include_history_queries = args
-                        .get("include_history_queries")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    let records = db.query_tool_calls(
-                        session_id,
-                        tool_name,
-                        status,
-                        query,
-                        before_id,
-                        limit,
-                        include_history_queries,
-                    )?;
-                    let next_before_id = (records.len() == limit)
-                        .then(|| records.first().map(|record| record.id))
-                        .flatten();
-                    let items: Vec<Value> = records.iter().map(tool_call_search_item).collect();
-                    Ok(json!({
-                        "count": items.len(),
-                        "calls": items,
-                        "next_before_id": next_before_id,
-                        "note": "search 返回截断预览；需要某条记录的完整参数和结果时，用 action=get + id。",
-                    }))
-                }
-                other => bail!("未知 action: {}", other),
-            }
-        }
+        "get_tool_call_history" => query_current_session_tool_history(db, session_id, args),
         "scan_desktop" => {
             let recursive = args
                 .get("recursive")
@@ -1543,6 +1661,14 @@ pub async fn execute(
             let result = tokio::task::block_in_place(|| state.ocr.recognize(&path))?;
             Ok(serde_json::to_value(&result)?)
         }
+        "find_browser_recipes" => {
+            let url = args.get("url").and_then(Value::as_str).ok_or_else(|| anyhow!("缺少 url"))?;
+            let goal = args.get("goal").and_then(Value::as_str).unwrap_or("");
+            let recipes = db.browser_recipe_find(url, goal, 8)?;
+            Ok(json!({ "count": recipes.len(), "recipes": recipes, "note": "配方只作加速参考；运行前仍会预检当前 URL 与唯一候选。" }))
+        }
+        "save_browser_recipe" => save_browser_recipe(app, db, args),
+        "run_browser_recipe" => run_browser_recipe(app, db, args).await,
         n if n.starts_with("browser_") => browser_tool(app, n, args).await,
         "propose_organization" => propose_organization(app, db, args),
         "add_todo" => {
@@ -1736,6 +1862,42 @@ pub async fn execute(
                 .unwrap_or(15)
                 .clamp(1, 50) as usize;
             crate::machine::query(category, sort_by, limit).await
+        }
+        "list_workflows" => {
+            let list = db.automation_workflow_list()?;
+            Ok(json!({ "count": list.len(), "workflows": list }))
+        }
+        "create_workflow" => {
+            let name = args.get("name").and_then(Value::as_str).unwrap_or("").trim();
+            let prompt = args.get("prompt").and_then(Value::as_str).unwrap_or("").trim();
+            let schedule_rule = args.get("schedule_rule").and_then(Value::as_str).unwrap_or("manual");
+            if name.is_empty() || prompt.is_empty() { bail!("name 和 prompt 不能为空"); }
+            if !["manual", "once", "daily", "weekly"].contains(&schedule_rule) { bail!("schedule_rule 无效"); }
+            let next_run_at = args.get("next_run_at").and_then(Value::as_str).map(str::to_string);
+            if schedule_rule != "manual" && next_run_at.as_deref().unwrap_or("").is_empty() { bail!("定时工作流必须提供 next_run_at"); }
+            let workflow = db.automation_workflow_save(&crate::db::AutomationWorkflow {
+                id: args.get("id").and_then(Value::as_i64).unwrap_or(0), name: name.into(),
+                description: args.get("description").and_then(Value::as_str).unwrap_or("").into(), prompt: prompt.into(),
+                schedule_rule: schedule_rule.into(), next_run_at, enabled: args.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+                run_count: 0, last_run_at: None, created_at: String::new(), updated_at: String::new(),
+            })?;
+            let _ = app.emit("automation-workflows-changed", ());
+            Ok(json!({ "ok": true, "workflow": workflow }))
+        }
+        "manage_workflow" => {
+            let id = args.get("id").and_then(Value::as_i64).ok_or_else(|| anyhow!("缺少 id"))?;
+            match args.get("action").and_then(Value::as_str).unwrap_or("") {
+                "run" => Ok(json!({ "message": "请用户在工作流页点击「运行」，或在聊天中发送要执行的流程名称；这样能确保当前聊天未忙。", "workflow_id": id })),
+                "delete" => { db.automation_workflow_delete(id)?; let _ = app.emit("automation-workflows-changed", ()); Ok(json!({"ok": true, "deleted_id": id})) }
+                "enable" | "disable" => {
+                    let mut workflow = db.automation_workflow_get(id)?.ok_or_else(|| anyhow!("工作流不存在"))?;
+                    workflow.enabled = args.get("action").and_then(Value::as_str) == Some("enable");
+                    let workflow = db.automation_workflow_save(&workflow)?;
+                    let _ = app.emit("automation-workflows-changed", ());
+                    Ok(json!({"ok": true, "workflow": workflow}))
+                }
+                _ => bail!("未知 action"),
+            }
         }
         "lookup_cache" => lookup_cache_tool(app, args),
         "list_skills" => {
@@ -2331,20 +2493,20 @@ fn tool_call_search_item(record: &ToolCallRecord) -> Value {
         },
         "request_message": {
             "id": record.request_message_id,
-            "content_preview": text_preview(&record.request_content, 500),
+            "content_preview": text_preview(&record.request_content, 180),
         },
         "response_message": {
             "id": record.response_message_id,
-            "content_preview": record.response_content.as_deref().map(|value| text_preview(value, 500)),
+            "content_preview": record.response_content.as_deref().map(|value| text_preview(value, 180)),
         },
         "round_index": record.round_index,
         "call_index": record.call_index,
         "tool_call_id": record.tool_call_id,
         "tool_name": record.tool_name,
         "status": record.status,
-        "arguments_preview": text_preview(&record.arguments_json, 1000),
-        "result_preview": record.result_json.as_deref().map(|value| text_preview(value, 2000)),
-        "assistant_content_preview": text_preview(&record.assistant_content, 500),
+        "arguments_preview": text_preview(&record.arguments_json, 400),
+        "result_preview": record.result_json.as_deref().map(|value| text_preview(value, 500)),
+        "assistant_content_preview": text_preview(&record.assistant_content, 120),
         "has_reasoning_content": !record.reasoning_content.is_empty(),
         "started_at": record.started_at,
         "completed_at": record.completed_at,
@@ -2416,6 +2578,21 @@ mod capability_tests {
                 "todo_write"
             ]
         );
+    }
+
+    #[test]
+    fn tool_history_schema_stays_inside_current_session() {
+        let definitions = definitions_for(&["get_tool_call_history"]);
+        let tool = &definitions.as_array().unwrap()[0];
+        let description = tool
+            .pointer("/function/description")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(description.contains("当前这次会话"));
+        assert!(!description.contains("all_sessions"));
+        assert!(tool
+            .pointer("/function/parameters/properties/scope")
+            .is_none());
     }
 
     #[test]
@@ -2544,7 +2721,7 @@ mod capability_tests {
             .pointer("/function/description")
             .and_then(Value::as_str)
             .unwrap()
-            .contains("动态生成"));
+            .contains("不依赖 ref"));
     }
 
     #[test]
@@ -2715,6 +2892,90 @@ mod capability_tests {
         let ok = parse_argv(&json!({ "argv": ["git", "status"] })).unwrap();
         assert_eq!(ok, vec!["git", "status"]);
         assert!(parse_argv(&json!({})).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tool_history_scope_tests {
+    use super::*;
+    use crate::db::Db;
+    use std::path::Path;
+
+    fn test_db() -> (Db, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "shiguang-tool-history-scope-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        (Db::new(&path).unwrap(), path)
+    }
+
+    fn cleanup(db: Db, path: &Path) {
+        drop(db);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    fn insert_call(db: &Db, session_id: i64, tool_name: &str, args: &str) -> i64 {
+        let request_id = db
+            .save_chat(session_id, "user", &format!("触发 {tool_name}"))
+            .unwrap();
+        let call_id = db
+            .start_tool_call(
+                session_id,
+                request_id,
+                0,
+                0,
+                &format!("call-{tool_name}-{session_id}"),
+                tool_name,
+                args,
+                "",
+                "",
+            )
+            .unwrap();
+        db.finish_tool_call(call_id, "done", r#"{"ok":true}"#)
+            .unwrap();
+        call_id
+    }
+
+    #[test]
+    fn search_and_get_stay_inside_the_current_session() {
+        let (db, path) = test_db();
+        let current = db.current_session_id().unwrap();
+        let other = db.create_session().unwrap();
+
+        let current_call = insert_call(&db, current, "browser_status", r#"{"from":"current"}"#);
+        let other_call = insert_call(&db, other, "browser_click", r#"{"from":"other"}"#);
+
+        let searched = query_current_session_tool_history(&db, current, &json!({})).unwrap();
+        let calls = searched["calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], current_call);
+        assert_eq!(calls[0]["tool_name"], "browser_status");
+
+        let detail =
+            query_current_session_tool_history(&db, current, &json!({ "action": "get", "id": current_call }))
+                .unwrap();
+        assert_eq!(detail["id"], current_call);
+
+        let leaked = query_current_session_tool_history(
+            &db,
+            current,
+            &json!({ "action": "get", "id": other_call }),
+        );
+        assert!(leaked.unwrap_err().to_string().contains("未找到工具调用记录"));
+
+        let cross_session = query_current_session_tool_history(
+            &db,
+            current,
+            &json!({ "scope": "all_sessions" }),
+        );
+        assert!(cross_session
+            .unwrap_err()
+            .to_string()
+            .contains("当前这次会话"));
+
+        cleanup(db, &path);
     }
 }
 
@@ -3415,11 +3676,104 @@ pub fn apply_rule_to_path(db: &Db, path: &Path) -> Result<Option<(String, String
     rules::apply_to_file(db, path)
 }
 
+fn save_browser_recipe(app: &AppHandle, db: &Db, args: &Value) -> Result<Value> {
+    let name = args.get("name").and_then(Value::as_str).unwrap_or("").trim();
+    let site = args.get("site_pattern").and_then(Value::as_str).unwrap_or("").trim();
+    let goal = args.get("goal").and_then(Value::as_str).unwrap_or("").trim();
+    let actions = args.get("actions").and_then(Value::as_array).ok_or_else(|| anyhow!("缺少 actions"))?;
+    if name.is_empty() || site.is_empty() || goal.is_empty() || actions.is_empty() { bail!("名称、站点、目标和至少一个动作不能为空"); }
+    if actions.len() > 12 { bail!("浏览器配方最多 12 个动作"); }
+    for action in actions {
+        let kind = action.get("action").and_then(Value::as_str).unwrap_or("");
+        if !["find_click", "find_type"].contains(&kind) || action.get("query").and_then(Value::as_str).unwrap_or("").trim().is_empty() {
+            bail!("动作只允许带 query 的 find_click 或 find_type");
+        }
+        if kind == "find_type" && action.get("value").and_then(Value::as_str).is_none() { bail!("find_type 需要 value"); }
+    }
+    let verification = args.get("verification").cloned().unwrap_or_else(|| json!({}));
+    let recipe = db.browser_recipe_save(&crate::db::BrowserRecipe {
+        id: args.get("id").and_then(Value::as_i64).unwrap_or(0), name: name.into(), site_pattern: site.into(), goal: goal.into(),
+        recipe_json: serde_json::to_string(actions)?, verification_json: serde_json::to_string(&verification)?,
+        success_count: 0, failure_count: 0, last_used_at: None, created_at: String::new(), updated_at: String::new(),
+    })?;
+    let _ = app.emit("browser-recipes-changed", ());
+    Ok(json!({ "ok": true, "recipe": recipe }))
+}
+
+fn recipe_value(template: &str, vars: &Value) -> Result<String> {
+    let mut output = template.to_string();
+    let object = vars.as_object();
+    for capture in template.match_indices("{{") {
+        let start = capture.0 + 2;
+        let Some(end) = template[start..].find("}}") else { bail!("变量模板未闭合"); };
+        let key = &template[start..start + end];
+        let value = object.and_then(|map| map.get(key)).and_then(Value::as_str).ok_or_else(|| anyhow!("缺少配方变量：{}", key))?;
+        let lower = key.to_lowercase();
+        if lower.contains("password") || lower.contains("cookie") || lower.contains("token") || lower.contains("secret") { bail!("配方不接受密码、cookie、token 或密钥变量"); }
+        output = output.replace(&format!("{{{{{key}}}}}"), value);
+    }
+    Ok(output)
+}
+
+async fn run_browser_recipe(app: &AppHandle, db: &Db, args: &Value) -> Result<Value> {
+    let id = args.get("id").and_then(Value::as_i64).ok_or_else(|| anyhow!("缺少 id"))?;
+    let recipe = db.browser_recipe_get(id)?.ok_or_else(|| anyhow!("浏览器配方不存在"))?;
+    let state = app.state::<crate::AppState>();
+    let info = state.browser.call("info", json!({})).await?;
+    let url = info.get("url").and_then(Value::as_str).unwrap_or("");
+    if !url.to_lowercase().contains(&recipe.site_pattern.to_lowercase()) {
+        db.browser_recipe_mark(id, false)?;
+        bail!("配方适用于「{}」，当前页面为「{}」；已停止，请正常快照后处理", recipe.site_pattern, url);
+    }
+    let actions: Vec<Value> = serde_json::from_str(&recipe.recipe_json).map_err(|_| anyhow!("配方动作格式损坏"))?;
+    let vars = args.get("variables").cloned().unwrap_or_else(|| json!({}));
+    let mut completed = Vec::new();
+    for action in actions {
+        let kind = action.get("action").and_then(Value::as_str).unwrap_or("");
+        let query = recipe_value(action.get("query").and_then(Value::as_str).unwrap_or(""), &vars)?;
+        let found = state.browser.call("find", json!({ "query": query, "limit": 4 })).await?;
+        let candidates = found.get("candidates").and_then(Value::as_array).cloned().unwrap_or_default();
+        if candidates.len() != 1 {
+            db.browser_recipe_mark(id, false)?;
+            bail!("配方步骤「{}」找到 {} 个候选，无法安全选择；已停止，请用 browser_snapshot 接管", kind, candidates.len());
+        }
+        let reference = candidates[0].get("ref").and_then(Value::as_u64).ok_or_else(|| anyhow!("候选缺少 ref"))?;
+        let result = match kind {
+            "find_click" => state.browser.call("click", json!({ "ref": reference })).await?,
+            "find_type" => {
+                let value = recipe_value(action.get("value").and_then(Value::as_str).unwrap_or(""), &vars)?;
+                state.browser.call("type", json!({ "ref": reference, "text": value, "clear": action.get("clear").and_then(Value::as_bool).unwrap_or(true) })).await?
+            }
+            _ => { db.browser_recipe_mark(id, false)?; bail!("配方含不支持的动作"); }
+        };
+        completed.push(json!({ "action": kind, "query": query, "result": result }));
+    }
+    let verify: Value = serde_json::from_str(&recipe.verification_json).unwrap_or_else(|_| json!({}));
+    let verified = if let Some(expected) = verify.get("url_contains").and_then(Value::as_str) {
+        state.browser.call("info", json!({})).await?.get("url").and_then(Value::as_str).is_some_and(|current| current.contains(expected))
+    } else if let Some(query) = verify.get("find_query").and_then(Value::as_str) {
+        state.browser.call("find", json!({ "query": query, "limit": 1 })).await?.get("count").and_then(Value::as_u64).unwrap_or(0) > 0
+    } else { true };
+    db.browser_recipe_mark(id, verified)?;
+    if !verified { bail!("配方已执行但未通过成功校验；已停止，请用正常浏览器工具核验和处理"); }
+    Ok(json!({ "ok": true, "recipe": recipe.name, "completed": completed, "verified": verified }))
+}
+
 async fn browser_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value> {
     let state = app.state::<crate::AppState>();
     let action = name.trim_start_matches("browser_");
     if action == "status" {
         return Ok(state.browser.status().await);
+    }
+    if action == "evaluate" {
+        let expr = args.get("expression").and_then(Value::as_str).unwrap_or("");
+        let has_args = args.get("args").is_some_and(|value| !value.is_null());
+        if expr.contains("$args") && !has_args {
+            bail!("表达式使用了 $args，请把结构化参数放在 args 里，不要写进 expression");
+        }
+        if expr.contains("$el") && args.get("ref").and_then(Value::as_i64).is_none() {
+            bail!("表达式使用了 $el，请同时传入 browser_snapshot 的 ref");
+        }
     }
     if action == "screenshot" {
         let v = state.browser.call("screenshot", args.clone()).await?;

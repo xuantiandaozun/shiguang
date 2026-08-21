@@ -25,6 +25,24 @@ pub fn page_inject_js() -> String {
     format!("{}\n{}", READABILITY_JS, PAGE_API_JS)
 }
 
+/// 给动态脚本注入 `$el` / `$args`。
+/// `args` 即使没有 `ref` 也要可用：模型常把长文本、文件名放进 args，避免拼进 expression。
+pub fn wrap_evaluate_expression(expr: &str, ref_: Option<u64>, args: &Value) -> String {
+    if ref_.is_none() && args.is_null() {
+        return expr.to_string();
+    }
+    let args_json = serde_json::to_string(args).unwrap_or_else(|_| "null".to_string());
+    if let Some(ref_) = ref_ {
+        let missing = format!("元素 [{ref_}] 不存在或已失效，请重新获取快照");
+        let missing_json = serde_json::to_string(&missing).unwrap_or_else(|_| "\"元素已失效\"".into());
+        format!(
+            "(async()=>{{const $el=window.__dh.ref({ref_});if(!$el)throw new Error({missing_json});const $args={args_json};return await ({expr});}})()"
+        )
+    } else {
+        format!("(async()=>{{const $args={args_json};return await ({expr});}})()")
+    }
+}
+
 pub struct Hub {
     ext: ext::ExtServer,
     cdp: tokio::sync::Mutex<Option<cdp::CdpClient>>,
@@ -234,14 +252,31 @@ fn stamp(v: &mut Value, channel: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
 
     #[test]
     fn page_api_exposes_adaptive_interaction_primitives() {
-        assert!(PAGE_API_JS.contains("const DH_VER = 6"));
+        assert!(PAGE_API_JS.contains("const DH_VER = 10"));
         assert!(PAGE_API_JS.contains("aria-controls"));
         assert!(PAGE_API_JS.contains("unique_fuzzy"));
         assert!(PAGE_API_JS.contains("activePopupScrollable"));
         assert!(PAGE_API_JS.contains("ref: (ref) => getRef(ref)"));
+    }
+
+    #[test]
+    fn evaluate_wraps_args_without_requiring_ref() {
+        let wrapped = wrap_evaluate_expression(
+            "(async()=>{return $args.names;})()",
+            None,
+            &json!({ "names": ["a.png"] }),
+        );
+        assert!(wrapped.contains("const $args="));
+        assert!(wrapped.contains("names"));
+        assert!(!wrapped.contains("$el"));
+        assert_eq!(
+            wrap_evaluate_expression("1+1", None, &Value::Null),
+            "1+1"
+        );
     }
 
     #[test]

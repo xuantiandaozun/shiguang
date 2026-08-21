@@ -440,9 +440,13 @@ async fn run_inner(
         })
         .to_string());
     }
-    let (settings, skills_catalog) = {
+    let (settings, skills_catalog, session_id) = {
         let state = app.state::<crate::AppState>();
-        (load_settings(&state.db), state.skills.catalog_reminder())
+        (
+            load_settings(&state.db),
+            state.skills.catalog_reminder(),
+            state.db.current_session_id()?,
+        )
     };
     let cfg = client::LlmConfig {
         base_url: settings.base_url.clone(),
@@ -543,7 +547,7 @@ async fn run_inner(
                     }
                     continue;
                 }
-                match Box::pin(tools::execute(app, &call.name, &parsed, cancel)).await {
+                match Box::pin(tools::execute(app, &call.name, &parsed, cancel, session_id)).await {
                     Ok(v) => v,
                     Err(e) => json!({ "error": e.to_string() }),
                 }

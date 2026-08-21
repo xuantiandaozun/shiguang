@@ -5,6 +5,7 @@ pub mod ask_user;
 pub mod browser;
 pub mod builtin_skills;
 pub mod cli_json;
+pub mod clipboard;
 pub mod commands;
 pub mod compact;
 pub mod db;
@@ -166,6 +167,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::send_chat_message,
+            commands::import_clipboard_attachments,
+            commands::save_pasted_file,
             commands::stop_chat_message,
             commands::get_current_session,
             commands::list_sessions,
@@ -210,6 +213,12 @@ pub fn run() {
             commands::list_bg_tasks,
             commands::stop_bg_task,
             commands::read_bg_task_tail,
+            commands::list_automation_workflows,
+            commands::save_automation_workflow,
+            commands::delete_automation_workflow,
+            commands::run_automation_workflow_cmd,
+            commands::list_browser_recipes_cmd,
+            commands::delete_browser_recipe_cmd,
             commands::list_skills_cmd,
             commands::create_skill_cmd,
             commands::delete_skill_cmd,

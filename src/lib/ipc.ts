@@ -86,6 +86,8 @@ export interface Settings {
   subagent_reasoning_effort: string;
   subagent_model: string;
   command_tools_enabled: boolean;
+  /** confirmation=每次确认 / balanced=仅敏感操作确认 / autopilot=非危险操作自动执行 */
+  permission_level: string;
   profile_name: string;
   profile_alias: string;
   profile_gender: string;
@@ -174,6 +176,44 @@ export interface SyncSkillsResult {
   errors: string[];
   details: unknown[];
   local_dir: string;
+}
+
+export interface AutomationWorkflow {
+  id: number;
+  name: string;
+  description: string;
+  prompt: string;
+  schedule_rule: "manual" | "once" | "daily" | "weekly";
+  next_run_at: string | null;
+  enabled: boolean;
+  run_count: number;
+  last_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutomationWorkflowInput {
+  id?: number;
+  name: string;
+  description: string;
+  prompt: string;
+  schedule_rule: string;
+  next_run_at: string | null;
+  enabled: boolean;
+}
+
+export interface BrowserRecipe {
+  id: number;
+  name: string;
+  site_pattern: string;
+  goal: string;
+  recipe_json: string;
+  verification_json: string;
+  success_count: number;
+  failure_count: number;
+  last_used_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ExecResult {
@@ -274,6 +314,12 @@ export interface LlmUsageRequest {
 export const ipc = {
   sendChat: (text: string, attachments?: string[]) =>
     invoke<number>("send_chat_message", { text, attachments: attachments ?? null }),
+  importClipboardAttachments: (includeImage = true) =>
+    invoke<{ paths: string[]; skipped_dirs: number }>("import_clipboard_attachments", {
+      includeImage,
+    }),
+  savePastedFile: (filename: string, dataBase64: string) =>
+    invoke<string>("save_pasted_file", { filename, dataBase64 }),
   stopChat: () => invoke<void>("stop_chat_message"),
   getCurrentSession: () => invoke<SessionView>("get_current_session"),
   listSessions: () => invoke<SessionInfo[]>("list_sessions"),
@@ -348,6 +394,14 @@ export const ipc = {
   stopBgTask: (id: string) => invoke<void>("stop_bg_task", { id }),
   readBgTaskTail: (id: string, maxChars?: number) =>
     invoke<string>("read_bg_task_tail", { id, maxChars: maxChars ?? null }),
+
+  listAutomationWorkflows: () => invoke<AutomationWorkflow[]>("list_automation_workflows"),
+  saveAutomationWorkflow: (input: AutomationWorkflowInput) =>
+    invoke<AutomationWorkflow>("save_automation_workflow", { input }),
+  deleteAutomationWorkflow: (id: number) => invoke<void>("delete_automation_workflow", { id }),
+  runAutomationWorkflow: (id: number) => invoke<number>("run_automation_workflow_cmd", { id }),
+  listBrowserRecipes: () => invoke<BrowserRecipe[]>("list_browser_recipes_cmd"),
+  deleteBrowserRecipe: (id: number) => invoke<void>("delete_browser_recipe_cmd", { id }),
 
   listSkills: () => invoke<SkillInfo[]>("list_skills_cmd"),
   createSkill: (name: string, description: string, body: string) =>

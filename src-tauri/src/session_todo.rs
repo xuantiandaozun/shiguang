@@ -119,10 +119,21 @@ impl SessionTodoHub {
 }
 
 pub fn parse_todos(args: &Value) -> Result<Vec<SessionTodo>> {
-    let items = args
-        .get("todos")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("todos 必须是非空数组"))?;
+    let owned;
+    let items: &[Value] = match args.get("todos") {
+        Some(Value::Array(items)) => items,
+        Some(Value::String(raw)) => {
+            let parsed: Value = serde_json::from_str(raw.trim()).map_err(|_| {
+                anyhow::anyhow!("todos 必须是对象数组，不要把数组序列化成字符串")
+            })?;
+            owned = parsed
+                .as_array()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("todos 必须是对象数组，不要把数组序列化成字符串"))?;
+            &owned
+        }
+        _ => anyhow::bail!("todos 必须是非空数组"),
+    };
     if items.is_empty() {
         bail!("至少写一项进度；下一轮用户消息会自动清空");
     }
@@ -216,6 +227,18 @@ mod tests {
             ]
         }))
         .is_err());
+    }
+
+    #[test]
+    fn parse_accepts_json_string_array() {
+        let todos = parse_todos(&json!({
+            "todos": "[{\"content\":\"梳理文案\",\"status\":\"in_progress\"},{\"content\":\"上传截图\",\"status\":\"pending\"}]"
+        }))
+        .unwrap();
+        assert_eq!(todos.len(), 2);
+        assert_eq!(todos[0].content, "梳理文案");
+        let err = parse_todos(&json!({ "todos": "not-json" })).unwrap_err();
+        assert!(err.to_string().contains("不要把数组序列化成字符串"));
     }
 
     #[test]

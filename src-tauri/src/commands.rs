@@ -56,6 +56,8 @@ pub struct Settings {
     pub subagent_model: String,
     /// 允许 AI 执行命令行（后台任务类工具总开关）
     pub command_tools_enabled: bool,
+    /// confirmation: 每次有副作用都确认；balanced: 仅敏感/危险动作确认；autopilot: 非危险动作自动执行
+    pub permission_level: String,
     // ---- 个人信息固定字段（用户在设置页维护）----
     pub profile_name: String,
     /// 自媒体号名称（对外默认使用，真实姓名仅招聘等实名场景使用）
@@ -131,6 +133,10 @@ pub fn load_settings(db: &Db) -> Settings {
             .flatten()
             .map(|v| v == "true")
             .unwrap_or(true),
+        permission_level: match get("permission_level", "balanced").as_str() {
+            "confirmation" | "balanced" | "autopilot" => get("permission_level", "balanced"),
+            _ => "balanced".to_string(),
+        },
         profile_name: get("profile_name", ""),
         profile_alias: get("profile_alias", ""),
         profile_gender: get("profile_gender", ""),
@@ -366,6 +372,27 @@ fn compose_user_message(text: &str, attachments: &[String]) -> Result<String, St
     } else {
         Ok(format!("{}\n\n{}", text, block))
     }
+}
+
+#[tauri::command]
+pub fn import_clipboard_attachments(
+    app: AppHandle,
+    include_image: bool,
+) -> Result<crate::clipboard::ClipboardImport, String> {
+    crate::clipboard::import_attachments(&app, include_image)
+}
+
+#[tauri::command]
+pub fn save_pasted_file(
+    app: AppHandle,
+    filename: String,
+    data_base64: String,
+) -> Result<String, String> {
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(data_base64)
+        .map_err(|e| format!("粘贴内容解码失败: {e}"))?;
+    crate::clipboard::save_pasted_bytes(&app, &filename, &data)
 }
 
 #[tauri::command]
@@ -977,6 +1004,10 @@ pub fn save_settings(
         },
     )
     .map_err(|e| e.to_string())?;
+    db.set_setting("permission_level", match settings.permission_level.as_str() {
+        "confirmation" | "balanced" | "autopilot" => settings.permission_level.as_str(),
+        _ => "balanced",
+    }).map_err(|e| e.to_string())?;
     for (k, v) in [
         ("profile_name", settings.profile_name.trim()),
         ("profile_alias", settings.profile_alias.trim()),
@@ -1081,6 +1112,100 @@ pub fn read_bg_task_tail(
         .tasks
         .tail(&id, max_chars.unwrap_or(3000))
         .map_err(|e| e.to_string())
+}
+
+// ---------- automation workflows ----------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutomationWorkflowInput {
+    pub id: Option<i64>,
+    pub name: String,
+    pub description: String,
+    pub prompt: String,
+    pub schedule_rule: String,
+    pub next_run_at: Option<String>,
+    pub enabled: bool,
+}
+
+fn validate_workflow(input: &AutomationWorkflowInput) -> Result<(), String> {
+    if input.name.trim().is_empty() || input.name.trim().chars().count() > 60 {
+        return Err("工作流名称需为 1–60 个字符".into());
+    }
+    if input.prompt.trim().is_empty() || input.prompt.trim().chars().count() > 4000 {
+        return Err("执行内容需为 1–4000 个字符".into());
+    }
+    if !["manual", "once", "daily", "weekly"].contains(&input.schedule_rule.as_str()) {
+        return Err("不支持的执行计划".into());
+    }
+    if input.schedule_rule != "manual" && input.next_run_at.as_deref().unwrap_or("").is_empty() {
+        return Err("定时工作流需要下一次执行时间".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_automation_workflows(state: State<AppState>) -> Result<Vec<crate::db::AutomationWorkflow>, String> {
+    state.db.automation_workflow_list().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_automation_workflow(app: AppHandle, state: State<AppState>, input: AutomationWorkflowInput) -> Result<crate::db::AutomationWorkflow, String> {
+    validate_workflow(&input)?;
+    let saved = state.db.automation_workflow_save(&crate::db::AutomationWorkflow {
+        id: input.id.unwrap_or(0), name: input.name, description: input.description, prompt: input.prompt,
+        schedule_rule: input.schedule_rule, next_run_at: input.next_run_at, enabled: input.enabled,
+        run_count: 0, last_run_at: None, created_at: String::new(), updated_at: String::new(),
+    }).map_err(|e| e.to_string())?;
+    let _ = app.emit("automation-workflows-changed", ());
+    Ok(saved)
+}
+
+#[tauri::command]
+pub fn delete_automation_workflow(app: AppHandle, state: State<AppState>, id: i64) -> Result<(), String> {
+    state.db.automation_workflow_delete(id).map_err(|e| e.to_string())?;
+    let _ = app.emit("automation-workflows-changed", ());
+    Ok(())
+}
+
+fn next_workflow_run(rule: &str, current: Option<&str>) -> Option<String> {
+    let current = current.and_then(|value| chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok())?;
+    let days = match rule { "daily" => 1, "weekly" => 7, _ => return None };
+    Some((current + chrono::Duration::days(days)).format("%Y-%m-%d %H:%M:%S").to_string())
+}
+
+pub async fn run_automation_workflow(app: AppHandle, id: i64, scheduled: bool) -> Result<i64, String> {
+    let state = app.state::<AppState>();
+    let workflow = state.db.automation_workflow_get(id).map_err(|e| e.to_string())?
+        .ok_or_else(|| "工作流不存在".to_string())?;
+    if scheduled && !workflow.enabled { return Err("工作流已停用".into()); }
+    // 定时工作流不应在当前对话忙碌时被标记为已运行；保留到下一轮调度重试。
+    if state.chat_busy.load(Ordering::SeqCst) {
+        return Err("聊天正在处理另一项任务，将在下一次调度时重试".into());
+    }
+    let next = next_workflow_run(&workflow.schedule_rule, workflow.next_run_at.as_deref());
+    state.db.mark_automation_workflow_run(id, next.as_deref()).map_err(|e| e.to_string())?;
+    let _ = app.emit("automation-workflows-changed", ());
+    let origin = if scheduled { "定时触发" } else { "手动执行" };
+    let result = send_chat_message(app.clone(), format!("【运行工作流：{}｜{}】\n这是一次自主执行任务，不是预设脚本，也不是 Skill。请像处理聊天请求一样，依据目标自行规划并使用当前可用的全部工具完成工作；不要等待用户逐步发送下一条指令。按当前权限策略直接执行允许的操作，仅在危险、不可逆、提权或范围不明时确认。\n\n工作流目标与约束：\n{}", workflow.name, origin, workflow.prompt), None).await;
+    if result.is_ok() { windows::show_chat(&app); }
+    result
+}
+
+#[tauri::command]
+pub async fn run_automation_workflow_cmd(app: AppHandle, id: i64) -> Result<i64, String> {
+    run_automation_workflow(app, id, false).await
+}
+
+#[tauri::command]
+pub fn list_browser_recipes_cmd(state: State<AppState>) -> Result<Vec<crate::db::BrowserRecipe>, String> {
+    state.db.browser_recipe_list().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_browser_recipe_cmd(app: AppHandle, state: State<AppState>, id: i64) -> Result<(), String> {
+    state.db.browser_recipe_delete(id).map_err(|e| e.to_string())?;
+    let _ = app.emit("browser-recipes-changed", ());
+    Ok(())
 }
 
 // ---------- Skills ----------

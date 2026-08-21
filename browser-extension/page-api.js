@@ -37,7 +37,7 @@
 //   输入框；原生 select 支持唯一模糊匹配，歧义时返回候选而非猜测。
 // - scroll 会沿 aria-controls/aria-owns 等控件关系寻找浮层中的真实滚动容器。
 (() => {
-  const DH_VER = 6;
+  const DH_VER = 10;
   if (window.__dh && window.__dhVer === DH_VER) return;
 
   const INTERACTIVE_SEL = [
@@ -372,6 +372,69 @@
     return el;
   }
 
+  // 只返回匹配目标的紧凑候选，避免为了找一个“提交”按钮而把整页导航和卡片交给模型。
+  // 仍把候选写入 ref 表，可直接 click/type，不需要再取一次全页快照。
+  function findElements(query, limit) {
+    const needle = String(query || "").trim().toLocaleLowerCase();
+    if (!needle) return { error: "缺少查找文字" };
+    const tokens = needle.split(/\s+/).filter(Boolean);
+    const refs = {};
+    const results = [];
+    const seen = new Set();
+    const all = Array.from(document.querySelectorAll(INTERACTIVE_SEL));
+    for (const el of all) {
+      if (results.length >= Math.max(1, Math.min(Number(limit) || 12, 30))) break;
+      if (!visibleStyle(el) || seen.has(el)) continue;
+      const label = describeEl(el);
+      const haystack = `${label} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`.toLocaleLowerCase();
+      if (!tokens.every((token) => haystack.includes(token))) continue;
+      seen.add(el);
+      const ref = results.length + 1;
+      refs[ref] = el;
+      results.push({ ref, element: label });
+    }
+    window.__dhRefs = refs;
+    return {
+      query: String(query),
+      count: results.length,
+      candidates: results,
+      hint: results.length === 0 ? "未找到可见匹配项；换更短的关键词或使用 browser_snapshot 查看局部区域。" : undefined,
+    };
+  }
+
+  async function sameOriginRequest(method, rawUrl, body, headers, maxChars) {
+    const upper = String(method || "GET").toUpperCase();
+    if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(upper)) return { error: "仅支持 GET/POST/PUT/PATCH/DELETE" };
+    let target;
+    try { target = new URL(String(rawUrl || ""), location.href); } catch { return { error: "接口地址无效" }; }
+    if (target.origin !== location.origin) return { error: "为保护当前登录态，只允许调用当前页面同源接口" };
+    const safeHeaders = {};
+    for (const [key, value] of Object.entries(headers || {})) {
+      const lower = String(key).toLowerCase();
+      if (["authorization", "cookie", "set-cookie", "proxy-authorization"].includes(lower)) return { error: `禁止手工传入 ${key}；认证将仅由当前浏览器会话自动携带` };
+      if (["content-type", "accept", "x-requested-with"].includes(lower)) safeHeaders[key] = String(value);
+    }
+    const init = { method: upper, credentials: "same-origin", headers: safeHeaders };
+    // 常见站点把 CSRF 值放在当前页 meta 中；仅在页面内部自动附带，不返回给模型。
+    if (upper !== "GET" && !Object.keys(safeHeaders).some((key) => key.toLowerCase() === "x-csrf-token")) {
+      const csrf = document.querySelector('meta[name="csrf-token"], meta[name="csrf_token"]');
+      const token = csrf && csrf.getAttribute("content");
+      if (token) init.headers["X-CSRF-Token"] = token;
+    }
+    if (body != null && upper !== "GET") {
+      if (typeof body === "string") init.body = body;
+      else { if (!Object.keys(safeHeaders).some((key) => key.toLowerCase() === "content-type")) init.headers["Content-Type"] = "application/json"; init.body = JSON.stringify(body); }
+    }
+    let response;
+    try { response = await fetch(target.href, init); } catch (e) { return { error: "接口请求失败: " + String((e && e.message) || e) }; }
+    const text = await response.text();
+    const cap = Math.max(500, Math.min(Number(maxChars) || 6000, 20000));
+    const chars = Array.from(text);
+    let preview = chars.slice(0, cap).join("");
+    try { preview = JSON.stringify(JSON.parse(text), null, 2); preview = Array.from(preview).slice(0, cap).join(""); } catch { /* 保留文本预览 */ }
+    return { ok: response.ok, status: response.status, url: target.href, content_type: response.headers.get("content-type") || "", returned_chars: Array.from(preview).length, truncated: chars.length > cap, body: preview };
+  }
+
   function centerOf(el) {
     const r = el.getBoundingClientRect();
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
@@ -556,7 +619,7 @@
     },
 
     // 抽取可读正文（文章/新闻/文档页）。会 clone 文档再解析，不改动当前页面 DOM。
-    read: (maxChars) => {
+    read: (maxChars, offset) => {
       const cap = Math.max(500, Math.min(Number(maxChars) || 12000, 100000));
       if (typeof Readability !== "function") {
         return { error: "Readability 未加载，无法提取正文" };
@@ -576,23 +639,29 @@
         };
       }
       const chars = Array.from(cleaned);
-      const truncated = chars.length > cap;
-      const content = truncated ? chars.slice(0, cap).join("") : cleaned;
+      const start = Math.max(0, Math.min(Number(offset) || 0, chars.length));
+      const truncated = chars.length > start + cap;
+      const content = chars.slice(start, start + cap).join("");
       const out = {
         title: (article.title || document.title || "").trim(),
         byline: (article.byline || "").trim(),
         siteName: (article.siteName || "").trim(),
         excerpt: (article.excerpt || "").trim(),
         length: chars.length,
+        offset: start,
         returned_chars: Array.from(content).length,
         truncated,
         content,
       };
       if (truncated) {
-        out.hint = `正文共 ${chars.length} 字符，已截断至 ${cap}。可增大 max_chars 获取更多；要操作页面请用 browser_snapshot。`;
+        out.hint = `正文共 ${chars.length} 字符，当前返回第 ${start + 1}–${start + Array.from(content).length} 字。用 offset 继续读取，不要直接把 max_chars 拉得很大；要操作页面请用 browser_snapshot。`;
       }
       return out;
     },
+
+    find: (query, limit) => findElements(query, limit),
+
+    request: (method, url, body, headers, maxChars) => sameOriginRequest(method, url, body, headers, maxChars),
 
     click: async (ref) => {
       const el = getRef(ref);
@@ -759,9 +828,11 @@
       // 读回校验：防止设值被框架重置（受控组件拒绝输入、maxlength 截断等）；
       // 富文本编辑器会归一化首尾空白/换行，比较时容错
       const actual = el.isContentEditable ? el.innerText : el.value;
-      const norm = (s) => (s || "").replace(/^\s+/, "").replace(/\s+$/, "");
+      const compact = (s) => (s || "").replace(/\s+/g, " ").trim();
       const pass = el.isContentEditable
-        ? norm(actual) === norm(expected) || norm(actual).endsWith(norm(text))
+        ? compact(actual) === compact(expected)
+          || compact(actual).endsWith(compact(text))
+          || (compact(text).length >= 8 && compact(actual).includes(compact(text)))
         : actual === expected;
       if (!pass) {
         return {

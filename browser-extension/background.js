@@ -64,12 +64,52 @@ connect();
 // 无法附着时再降级到 scripting 隔离世界。会话按标签保持，避免提示条闪烁；
 // SW 重启后 Set 丢失，重新 attach 时报 "already attached" 视为成功即可。
 const attachedTabs = new Set();
+// 仅在用户/AI 显式开启观察时保存当前标签的脱敏请求目录；不会记录认证头、Cookie 或响应正文。
+const networkWatch = new Map();
 // 同一标签必须固定执行面，否则 snapshot 的 ref 和 click/evaluate 会落在不同世界。
 const tabExec = new Map();
 chrome.debugger.onDetach.addListener((source) => {
   if (source && source.tabId) {
     attachedTabs.delete(source.tabId);
     tabExec.delete(source.tabId);
+    networkWatch.delete(source.tabId);
+  }
+});
+
+function safeRequestSummary(request) {
+  let url;
+  try { url = new URL(request.url); } catch { return null; }
+  const query_keys = Array.from(url.searchParams.keys()).slice(0, 30);
+  let body_keys = [];
+  if (request.postData) {
+    try {
+      const parsed = JSON.parse(request.postData);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) body_keys = Object.keys(parsed).slice(0, 30);
+    } catch { body_keys = ["(非 JSON 请求体，未保存内容)"]; }
+  }
+  const safePath = url.pathname
+    .split("/")
+    .map((part) => (/^\d{3,}$/.test(part) || /^[0-9a-f]{8}-[0-9a-f-]{8,}$/i.test(part)) ? ":id" : part)
+    .join("/");
+  return { method: request.method, url: `${url.origin}${safePath}`, query_keys, body_keys, resource_type: "" };
+}
+
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  const tabId = source && source.tabId;
+  const watch = tabId != null ? networkWatch.get(tabId) : null;
+  if (!watch) return;
+  if (method === "Network.requestWillBeSent" && params && params.request) {
+    const item = safeRequestSummary(params.request);
+    if (!item) return;
+    item.resource_type = params.type || "";
+    item.request_id = params.requestId;
+    item.at = new Date().toISOString();
+    watch.items.push(item);
+    if (watch.items.length > 80) watch.items.shift();
+  }
+  if (method === "Network.responseReceived" && params) {
+    const item = watch.items.find((x) => x.request_id === params.requestId);
+    if (item) { item.status = params.response && params.response.status; item.mime_type = params.response && params.response.mimeType; }
   }
 });
 
@@ -81,6 +121,12 @@ async function ensureDebugger(tabId) {
     if (!/already attached/i.test(String((e && e.message) || e))) throw e;
   }
   attachedTabs.add(tabId);
+}
+
+async function startNetworkWatch(tabId) {
+  await ensureDebugger(tabId);
+  await chrome.debugger.sendCommand({ tabId }, "Network.enable", {});
+  networkWatch.set(tabId, { started_at: new Date().toISOString(), items: [] });
 }
 
 // 通道能力型错误：本通道做不到、换通道才可能做到（CSP 拦截 / 注入被拒 / 调试器无法附着）。
@@ -160,7 +206,9 @@ function waitLoad(tabId, ms) {
 // 在页面隔离世界中调用 page-api.js 注入的 window.__dh 方法
 const CALLS = {
   snapshot: (maxChars, scope) => window.__dh.snapshot(maxChars, scope),
-  read: (maxChars) => window.__dh.read(maxChars),
+  read: (maxChars, offset) => window.__dh.read(maxChars, offset),
+  find: (query, limit) => window.__dh.find(query, limit),
+  request: (method, url, body, headers, maxChars) => window.__dh.request(method, url, body, headers, maxChars),
   click: (ref) => window.__dh.click(ref),
   type: (ref, text, clear) => window.__dh.type(ref, text, clear),
   scroll: (dir, amount, ref) => window.__dh.scroll(dir, amount, ref),
@@ -223,6 +271,10 @@ async function evalViaDebugger(tabId, expression, ref, suppliedArgs) {
     const wrapped = `${src}\n;(async()=>{const $el=window.__dh.ref(${JSON.stringify(ref)});if(!$el)throw new Error(${JSON.stringify(`元素 [${ref}] 不存在或已失效，请在当前通道重新获取快照`)});const $args=${JSON.stringify(suppliedArgs)};return await (${expression});})()`;
     return debuggerEval(tabId, wrapped);
   }
+  if (suppliedArgs != null) {
+    const wrapped = `(async()=>{const $args=${JSON.stringify(suppliedArgs)};return await (${expression});})()`;
+    return debuggerEval(tabId, wrapped);
+  }
   return debuggerEval(tabId, expression);
 }
 
@@ -248,6 +300,26 @@ async function evalInPage(tabId, expression, ref, suppliedArgs) {
         }
       },
       args: [expression, ref, suppliedArgs ?? null],
+    });
+    if (r && r.error) throw new Error(r.error.message || String(r.error));
+    const res = r ? r.result : null;
+    if (res && res.ok === false) throw new Error(res.error);
+    return res ? res.value : null;
+  }
+  if (suppliedArgs != null) {
+    const [r] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: async (expr, dynamicArgs) => {
+        try {
+          const $args = dynamicArgs;
+          const v = await eval(expr);
+          return { ok: true, value: v === undefined ? null : v };
+        } catch (e) {
+          return { ok: false, error: String(e) };
+        }
+      },
+      args: [expression, suppliedArgs],
     });
     if (r && r.error) throw new Error(r.error.message || String(r.error));
     const res = r ? r.result : null;
@@ -290,7 +362,7 @@ async function handle(action, p) {
     }
     case "snapshot": {
       const t = await activeTab();
-      const snapshot = await runInTabAuto(t.id, "snapshot", [p.max_chars || 8000, p.scope ?? null], p.channel);
+      const snapshot = await runInTabAuto(t.id, "snapshot", [p.max_chars || 4000, p.scope ?? null], p.channel);
       const info = await runInTabAuto(t.id, "info", [], p.channel);
       const out = { title: info.title, url: info.url, snapshot };
       if ((snapshot && snapshot.via === "debugger") || info.via === "debugger") out.via = "debugger";
@@ -298,7 +370,7 @@ async function handle(action, p) {
     }
     case "read": {
       const t = await activeTab();
-      const article = await runInTabAuto(t.id, "read", [p.max_chars || 12000], p.channel);
+      const article = await runInTabAuto(t.id, "read", [p.max_chars || 6000, p.offset || 0], p.channel);
       const info = await runInTabAuto(t.id, "info", [], p.channel);
       const out = {
         url: info.url,
@@ -318,6 +390,23 @@ async function handle(action, p) {
     case "click": {
       const t = await activeTab();
       return runInTabAuto(t.id, "click", [p.ref], p.channel);
+    }
+    case "find": {
+      const t = await activeTab();
+      return runInTabAuto(t.id, "find", [p.query || "", p.limit || 12], p.channel);
+    }
+    case "network_observe": {
+      const t = await activeTab();
+      const action = p.action || "list";
+      if (action === "start") { await startNetworkWatch(t.id); return { ok: true, started: true, note: "正在观察当前标签页；只保存脱敏后的接口结构。" }; }
+      const watch = networkWatch.get(t.id);
+      if (action === "stop") { networkWatch.delete(t.id); return { ok: true, stopped: true, captured: watch ? watch.items.length : 0 }; }
+      if (!watch) return { active: false, requests: [], hint: "尚未开始观察；先调用 action=start，再在页面上完成一次真实操作。" };
+      return { active: true, started_at: watch.started_at, count: watch.items.length, requests: watch.items.map(({ request_id, ...item }) => item) };
+    }
+    case "request": {
+      const t = await activeTab();
+      return runInTabAuto(t.id, "request", [p.method || "GET", p.url || "", p.body ?? null, p.headers ?? {}, p.max_chars || 6000], p.channel);
     }
     case "type": {
       const t = await activeTab();

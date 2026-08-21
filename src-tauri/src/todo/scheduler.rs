@@ -56,5 +56,15 @@ fn tick(app: &AppHandle) -> anyhow::Result<()> {
         );
         let _ = app.emit("todos-changed", ());
     }
+    // 工作流和待办分开存储：待办提醒用户，工作流直接向 AI 发起一次固定执行请求。
+    // 先推进 next_run_at，避免聊天忙碌时每 30 秒重复触发同一条流程。
+    for workflow in state.db.due_automation_workflows(&now_str)? {
+        let app_handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = crate::commands::run_automation_workflow(app_handle, workflow.id, true).await {
+                log::warn!("定时工作流「{}」未能启动: {}", workflow.name, error);
+            }
+        });
+    }
     Ok(())
 }
