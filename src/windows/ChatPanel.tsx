@@ -16,7 +16,15 @@ import type {
 import { useChatStore } from "../stores/chat";
 import type { UiMessage } from "../stores/chat";
 import Markdown from "../components/Markdown";
+import ChatSlashMenu from "../components/ChatSlashMenu";
 import appIcon from "../assets/app-icon.png";
+import {
+  buildSlashCommands,
+  filterSlashCommands,
+  resolveSlashLine,
+  type SlashCommand,
+} from "../lib/slash-commands";
+import type { AutomationWorkflow } from "../lib/ipc";
 
 const TOOL_DIGEST_MARKERS = [
   "【中断前已完成的工具调用与结果】",
@@ -153,10 +161,34 @@ export default function ChatPanel() {
   const [showSessions, setShowSessions] = useState(false);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
+  const [workflows, setWorkflows] = useState<AutomationWorkflow[]>([]);
+  const [slashIndex, setSlashIndex] = useState(0);
   const currentSessionIdRef = useRef<number | null>(null);
   currentSessionIdRef.current = currentSessionId;
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  const slashQuery = input.startsWith("/") ? input.slice(1).split(/\s/)[0] ?? "" : null;
+  const slashOpen = slashQuery !== null && !streaming;
+  const slashCommands = buildSlashCommands(workflows);
+  const filteredSlash = slashOpen ? filterSlashCommands(slashCommands, slashQuery) : [];
+
+  useEffect(() => {
+    setSlashIndex(0);
+  }, [slashQuery, workflows.length]);
+
+  const reloadWorkflows = useCallback(() => {
+    ipc.listAutomationWorkflows().then(setWorkflows).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    reloadWorkflows();
+    let unlisten: (() => void) | undefined;
+    onEvent("automation-workflows-changed", reloadWorkflows).then((u) => {
+      unlisten = u;
+    });
+    return () => unlisten?.();
+  }, [reloadWorkflows]);
 
   // 输入框随内容自动增高（上限 max-h-28），未超高时不出现滚动条
   useEffect(() => {
@@ -383,10 +415,56 @@ export default function ChatPanel() {
     if (!streaming) setCancelling(false);
   }, [streaming]);
 
+  const runWorkflowFromChat = async (name: string, workflowId: number) => {
+    setInput("");
+    setAttachments([]);
+    const display = `/${name}`;
+    const localId = addMessage({ role: "user", content: display });
+    addMessage({ role: "assistant", content: "", streaming: true });
+    setStreaming(true);
+    setSessionTodos([]);
+    try {
+      const dbId = await ipc.runAutomationWorkflow(workflowId);
+      attachDbId(localId, dbId);
+    } catch (e) {
+      finishStreaming();
+      addMessage({ role: "system", content: `工作流启动失败：${String(e)}` });
+    }
+  };
+
+  const executeSlashCommand = async (cmd: SlashCommand) => {
+    setInput("");
+    if (cmd.kind === "workflow" && cmd.workflowId != null) {
+      await runWorkflowFromChat(cmd.label, cmd.workflowId);
+      return;
+    }
+    if (cmd.id === "help") {
+      const lines = slashCommands
+        .filter((c) => c.kind === "workflow")
+        .map((c) => `· /${c.trigger}${c.description ? ` — ${c.description}` : ""}`);
+      addMessage({
+        role: "system",
+        content:
+          lines.length > 0
+            ? `快捷命令（输入 / 搜索）：\n${lines.join("\n")}`
+            : "暂无工作流。在主面板「工作流」页创建后，可用 /工作流名 快速运行。",
+      });
+    }
+  };
+
   const send = async () => {
     const text = input.trim();
     const files = [...attachments];
     if ((!text && files.length === 0) || streaming) return;
+
+    const slash = text ? resolveSlashLine(text, slashCommands) : null;
+    if (slash) {
+      setInput("");
+      setAttachments([]);
+      await executeSlashCommand(slash);
+      return;
+    }
+
     setInput("");
     setAttachments([]);
     // 本地气泡展示：文字 + 附件文件名（后端入库会附带完整路径说明）
@@ -558,6 +636,8 @@ export default function ChatPanel() {
             「帮我整理一下桌面」
             <br />
             「明天下午三点提醒我交周报」
+            <br />
+            <span className="text-slate-600">输入 / 可快速运行工作流</span>
           </div>
         )}
         {messages.map((m) => (
@@ -601,7 +681,14 @@ export default function ChatPanel() {
             ))}
           </div>
         )}
-        <div className="flex items-end gap-2">
+        <div className="flex items-end gap-2 relative">
+          {slashOpen && (
+            <ChatSlashMenu
+              commands={filteredSlash}
+              activeIndex={Math.min(slashIndex, Math.max(0, filteredSlash.length - 1))}
+              onPick={(cmd) => void executeSlashCommand(cmd)}
+            />
+          )}
           <button
             onClick={pickFiles}
             disabled={streaming}
@@ -617,13 +704,44 @@ export default function ChatPanel() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
+              if (slashOpen) {
+                if (e.key === "ArrowDown" && filteredSlash.length > 0) {
+                  e.preventDefault();
+                  setSlashIndex((i) => Math.min(i + 1, filteredSlash.length - 1));
+                  return;
+                }
+                if (e.key === "ArrowUp" && filteredSlash.length > 0) {
+                  e.preventDefault();
+                  setSlashIndex((i) => Math.max(i - 1, 0));
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setInput("");
+                  return;
+                }
+                if (e.key === "Tab" && filteredSlash.length > 0) {
+                  e.preventDefault();
+                  const cmd = filteredSlash[Math.min(slashIndex, filteredSlash.length - 1)];
+                  if (cmd) setInput(`/${cmd.trigger}`);
+                  return;
+                }
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  if (filteredSlash.length > 0) {
+                    const cmd = filteredSlash[Math.min(slashIndex, filteredSlash.length - 1)];
+                    void executeSlashCommand(cmd);
+                  }
+                  return;
+                }
+              }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 send();
               }
             }}
             rows={1}
-            placeholder="和 AI 说点什么… 可粘贴、拖入或点左侧附文件"
+            placeholder="和 AI 说点什么… 输入 / 运行工作流"
             className="flex-1 resize-none scrollbar-none bg-slate-900/80 text-slate-100 text-sm rounded-lg px-3 py-2 outline-none border border-slate-700 focus:border-sky-500 placeholder:text-slate-500 max-h-28"
           />
           {streaming ? (

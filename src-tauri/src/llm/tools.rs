@@ -285,7 +285,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "ocr_image",
-                "description": "本地 OCR 提取图片中的文字（百度 PaddleOCR PP-OCRv5 mobile，离线、免费、无需 API Key）。适合截图/扫描件/证件等「只要文字」的场景。首次调用会自动下载约 15MB 模型。需要理解画面含义时改用 read_image。",
+                "description": "本地 OCR 提取图片中的文字（百度 PaddleOCR PP-OCRv5 mobile，离线、免费、无需 API Key）。适合截图/扫描件/证件等「只要文字」的场景，比把整图交给模型更省 token。首次调用会自动下载约 15MB 模型。需要理解画面含义时：当前模型能看图请直接看图，否则用 read_image。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -451,7 +451,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "browser_screenshot",
-                "description": "截取当前页面保存为 PNG 并返回路径。只要文字用 ocr_image；要理解画面用 read_image。",
+                "description": "截取当前页面保存为 PNG 并返回路径。只要文字用 ocr_image 更省 token；理解画面时若当前模型能看图请直接看图，否则用 read_image。",
                 "parameters": { "type": "object", "properties": {}, "required": [] }
             }
         },
@@ -1120,6 +1120,28 @@ pub fn definitions_for<S: AsRef<str>>(names: &[S]) -> Value {
                     .and_then(|n| n.as_str())
                     .map(|n| names.iter().any(|candidate| candidate.as_ref() == n))
                     .unwrap_or(false)
+            })
+            .cloned()
+            .collect(),
+    )
+}
+
+/// 主模型能看图时去掉 read_image，OCR 仍保留；否则发全量工具（含原来的视觉接口）。
+pub fn chat_definitions(native_vision: bool) -> Value {
+    let all = definitions();
+    if !native_vision {
+        return all;
+    }
+    let Some(arr) = all.as_array() else {
+        return all;
+    };
+    Value::Array(
+        arr.iter()
+            .filter(|t| {
+                t.get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    != Some("read_image")
             })
             .cloned()
             .collect(),
@@ -3796,10 +3818,17 @@ async fn browser_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
             chrono::Local::now().format("%Y%m%d-%H%M%S")
         ));
         std::fs::write(&file, &bytes)?;
+        let saved = file.to_string_lossy().replace('\\', "/");
+        let settings = crate::commands::load_settings(&state.db);
+        let hint = if crate::llm::models::supports_vision(&settings.model) {
+            "截图已保存。当前对话模型可直接看图，无需再调 read_image；只要文字仍可用 ocr_image。"
+        } else {
+            "截图已保存。提取文字用 ocr_image（本地免费）；理解画面用 read_image。"
+        };
         return Ok(json!({
-            "saved": file.to_string_lossy().replace('\\', "/"),
+            "saved": saved,
             "channel": v.get("channel").cloned().unwrap_or(Value::Null),
-            "hint": "截图已保存。提取文字用 ocr_image（本地免费）；理解画面用 read_image。",
+            "hint": hint,
         }));
     }
     state.browser.call(action, args.clone()).await

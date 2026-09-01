@@ -56,7 +56,7 @@ First run: right-click the tray icon → open the main window → Settings → a
 npm run tauri:build
 ```
 
-Output: NSIS installer under `src-tauri/target/release/bundle/nsis/`.
+Output: NSIS installer under `src-tauri/target/release/bundle/nsis/`. After install, `browser-extension/` is extracted next to the exe so you can load the unpacked Chrome/Edge extension on another PC.
 
 > Note: Windows notifications show the app name and icon only for the **installed** app; otherwise they appear as coming from PowerShell — a system limitation.
 

@@ -62,6 +62,9 @@ export interface LlmProfile {
   name: string;
   base_url: string;
   api_key: string;
+  /** 统一模型目录 id；__custom__ 表示手写 API 模型名 */
+  catalog_model?: string;
+  /** 实际发给 API 的模型名（由目录解析） */
   model: string;
   thinking_enabled: boolean;
   reasoning_effort: string;
@@ -82,9 +85,13 @@ export interface Settings {
   vision_base_url: string;
   vision_api_key: string;
   vision_model: string;
+  /** 视觉模型在统一目录中的 id */
+  vision_catalog_model?: string;
   subagent_thinking_enabled: boolean;
   subagent_reasoning_effort: string;
   subagent_model: string;
+  /** 子代理模型在统一目录中的 id */
+  subagent_catalog_model?: string;
   command_tools_enabled: boolean;
   /** confirmation=每次确认 / balanced=仅敏感操作确认 / autopilot=非危险操作自动执行 */
   permission_level: string;
@@ -334,6 +341,9 @@ export const ipc = {
   hideChat: () => invoke<void>("hide_chat"),
   /** 在系统默认浏览器/程序中打开 http(s) 链接或本地文件 */
   openExternal: (target: string) => invoke<void>("open_external", { target }),
+  getBrowserExtension: () =>
+    invoke<{ path: string; ready: boolean }>("get_browser_extension_info"),
+  openBrowserExtensionDir: () => invoke<void>("open_browser_extension_dir"),
   /** 幂等展示聊天窗（区别于 toggle 的开/关切换） */
   showChat: () => invoke<void>("show_chat_window"),
 

@@ -4,7 +4,12 @@ use crate::llm::{client, prompts, tools};
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
+use std::path::Path;
 use tauri::{AppHandle, Emitter, Manager};
+
+/// 单次请求最多直接嵌入的图片数，避免撑爆请求体。
+const MAX_NATIVE_IMAGES: usize = 8;
+const NATIVE_VISION_NOTICE: &str = "\n当前对话模型可以直接看图：用户附件和工具截图中的图片已嵌入消息，请直接理解画面。只要文字、想省 token 时用 ocr_image。";
 
 /// 单次任务的工具调用轮次预算。浏览器类任务动辄 10+ 轮，给足余量。
 const MAX_TOOL_ROUNDS: usize = 50;
@@ -100,6 +105,12 @@ pub async fn run_chat(
         messages.push(crate::compact::checkpoint_message(summary));
     }
     messages.extend(history_with_tool_replay(&history, &replay_calls));
+    let cfg = client::LlmConfig {
+        base_url: settings.base_url.clone(),
+        api_key: settings.api_key.clone(),
+        model: settings.model.clone(),
+    };
+    let native_vision = crate::llm::models::supports_vision(&cfg.model);
     let mut tail = format!(
         "当前时间：{}",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S %A")
@@ -110,6 +121,9 @@ pub async fn run_chat(
     if let Some(lb) = &lookup_block {
         tail.push_str(lb);
     }
+    if native_vision {
+        tail.push_str(NATIVE_VISION_NOTICE);
+    }
     messages.push(json!({
         "role": "system",
         "content": tail,
@@ -119,11 +133,6 @@ pub async fn run_chat(
     let mut tool_log: Vec<String> = Vec::new();
 
     let http = reqwest::Client::new();
-    let cfg = client::LlmConfig {
-        base_url: settings.base_url.clone(),
-        api_key: settings.api_key.clone(),
-        model: settings.model.clone(),
-    };
     let mut text_call_retries = 0usize;
     let mut repeat_guard = crate::repeat_guard::RepeatGuard::new();
 
@@ -339,7 +348,8 @@ fn is_failed_tool_result(result: &Value) -> bool {
     )
 }
 
-/// 构造请求体。工具定义每轮都发同一份全量清单，避免中途增删打断前缀缓存。
+/// 构造请求体。工具定义在同一次请求里保持稳定，避免中途增删打断前缀缓存。
+/// 主模型本身能看图时不带 read_image（图片直接嵌入，OCR 仍保留）；否则带上原来的视觉工具。
 /// 收尾轮次仍带上同一份 tools，只用 tool_choice=none 禁止再调。
 /// DeepSeek 思考模式参数只对 DeepSeek 接口附加，其它兼容服务收到未知字段可能 400。
 fn request_body(
@@ -348,13 +358,19 @@ fn request_body(
     messages: &[Value],
     allow_tools: bool,
 ) -> Value {
+    let native_vision = crate::llm::models::supports_vision(&cfg.model);
+    let api_messages = if native_vision {
+        prepare_messages_for_api(messages)
+    } else {
+        messages.to_vec()
+    };
     let mut body = json!({
         "model": cfg.model,
-        "messages": messages,
+        "messages": api_messages,
         "stream": true,
         "stream_options": { "include_usage": true },
         "temperature": 0.3,
-        "tools": tools::definitions(),
+        "tools": tools::chat_definitions(native_vision),
         "tool_choice": if allow_tools { json!("auto") } else { json!("none") },
     });
     if cfg.base_url.contains("deepseek") {
@@ -365,6 +381,7 @@ fn request_body(
             body["thinking"] = json!({ "type": "disabled" });
         }
     }
+    crate::llm::provider_headers::sanitize_agentrouter_body(&mut body, &cfg.base_url, &cfg.model);
     body
 }
 
@@ -818,6 +835,91 @@ fn trim_context(app: &AppHandle, messages: &mut [Value]) {
     crate::retention::trim_old_tool_messages(messages, dir.as_deref());
 }
 
+/// 主模型能看图时，把用户附件和工具截图编成 OpenAI 兼容的 image_url 块。
+/// 历史仍以纯文本入库；只在发给接口前展开，避免摘要/裁剪被 base64 撑爆。
+pub(crate) fn prepare_messages_for_api(messages: &[Value]) -> Vec<Value> {
+    let mut out = Vec::with_capacity(messages.len() + 4);
+    let mut embedded = 0usize;
+    let mut seen: HashSet<String> = HashSet::new();
+    for m in messages {
+        let role = m.get("role").and_then(Value::as_str).unwrap_or("");
+        if role == "user" {
+            out.push(expand_user_message(m, &mut embedded, &mut seen));
+            continue;
+        }
+        out.push(m.clone());
+        if role != "tool" {
+            continue;
+        }
+        let Some(path) =
+            crate::llm::models::image_path_from_tool_content(m.get("content").unwrap_or(&Value::Null))
+        else {
+            continue;
+        };
+        if embedded >= MAX_NATIVE_IMAGES || !seen.insert(path.clone()) {
+            continue;
+        }
+        if let Some(img) = native_image_user_message(&path) {
+            embedded += 1;
+            out.push(img);
+        } else {
+            seen.remove(&path);
+        }
+    }
+    out
+}
+
+fn expand_user_message(msg: &Value, embedded: &mut usize, seen: &mut HashSet<String>) -> Value {
+    let Some(content) = msg.get("content").and_then(Value::as_str) else {
+        return msg.clone();
+    };
+    let paths = crate::llm::models::image_paths_in_user_text(content);
+    if paths.is_empty() {
+        return msg.clone();
+    }
+    let mut parts = vec![json!({ "type": "text", "text": content })];
+    for path in paths {
+        if *embedded >= MAX_NATIVE_IMAGES || !seen.insert(path.clone()) {
+            continue;
+        }
+        if let Some(part) = encode_image_part(&path) {
+            parts.push(part);
+            *embedded += 1;
+        } else {
+            seen.remove(&path);
+        }
+    }
+    if parts.len() == 1 {
+        return msg.clone();
+    }
+    let mut next = msg.clone();
+    next["content"] = Value::Array(parts);
+    next
+}
+
+fn encode_image_part(path: &str) -> Option<Value> {
+    let uri = crate::llm::vision::encode_image_data_uri(
+        Path::new(path),
+        crate::llm::vision::MAX_NATIVE_IMAGE_BYTES,
+    )
+    .ok()?;
+    Some(json!({
+        "type": "image_url",
+        "image_url": { "url": uri }
+    }))
+}
+
+fn native_image_user_message(path: &str) -> Option<Value> {
+    let part = encode_image_part(path)?;
+    Some(json!({
+        "role": "user",
+        "content": [
+            { "type": "text", "text": format!("（系统附上图片，请直接查看）\n{path}") },
+            part
+        ]
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -965,6 +1067,131 @@ mod tests {
         assert_eq!(auto["tool_choice"], "auto");
         assert_eq!(none["tool_choice"], "none");
         assert_eq!(auto["tools"], none["tools"]);
+    }
+
+    fn tool_names(body: &Value) -> Vec<String> {
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str().map(|s| s.to_string()))
+            .collect()
+    }
+
+    fn sample_settings(model: &str) -> crate::commands::Settings {
+        crate::commands::Settings {
+            base_url: "https://api.deepseek.com/v1".into(),
+            api_key: String::new(),
+            model: model.into(),
+            organize_root: String::new(),
+            auto_organize: false,
+            autostart: false,
+            desktop_path: String::new(),
+            thinking_enabled: false,
+            reasoning_effort: "low".into(),
+            vision_base_url: String::new(),
+            vision_api_key: String::new(),
+            vision_model: String::new(),
+            subagent_thinking_enabled: false,
+            subagent_reasoning_effort: "low".into(),
+            subagent_model: String::new(),
+            command_tools_enabled: true,
+            permission_level: "balanced".into(),
+            llm_profiles: vec![],
+            active_llm_profile_id: String::new(),
+            profile_name: String::new(),
+            profile_alias: String::new(),
+            profile_gender: String::new(),
+            profile_birth: String::new(),
+            profile_phone: String::new(),
+            profile_email: String::new(),
+            profile_city: String::new(),
+            temp_path: String::new(),
+        }
+    }
+
+    #[test]
+    fn flash_keeps_read_image_and_does_not_switch_model() {
+        let settings = sample_settings("deepseek-v4-flash");
+        let cfg = client::LlmConfig {
+            base_url: settings.base_url.clone(),
+            api_key: String::new(),
+            model: settings.model.clone(),
+        };
+        let body = request_body(
+            &cfg,
+            &settings,
+            &[json!({
+                "role": "user",
+                "content": "看图\n\n【用户附带的文件】\n1. C:/tmp/a.png（图片）\n"
+            })],
+            true,
+        );
+        assert_eq!(body["model"], "deepseek-v4-flash");
+        assert!(tool_names(&body).iter().any(|n| n == "read_image"));
+        assert!(tool_names(&body).iter().any(|n| n == "ocr_image"));
+        assert!(body["messages"][0]["content"].as_str().unwrap().contains("a.png"));
+    }
+
+    #[test]
+    fn vision_exp_embeds_images_and_hides_read_image() {
+        let settings = sample_settings("deepseek-v4-flash-vision-exp");
+        let cfg = client::LlmConfig {
+            base_url: settings.base_url.clone(),
+            api_key: String::new(),
+            model: settings.model.clone(),
+        };
+        let body = request_body(
+            &cfg,
+            &settings,
+            &[json!({
+                "role": "user",
+                "content": "看图\n\n【用户附带的文件】\n1. C:/tmp/missing.png（图片）\n"
+            })],
+            true,
+        );
+        assert_eq!(body["model"], "deepseek-v4-flash-vision-exp");
+        assert!(!tool_names(&body).iter().any(|n| n == "read_image"));
+        assert!(tool_names(&body).iter().any(|n| n == "ocr_image"));
+        // 文件不存在时仍发文本，不把损坏的 image_url 塞进请求
+        assert!(body["messages"][0]["content"].as_str().unwrap().contains("missing.png"));
+    }
+
+    #[test]
+    fn prepare_messages_embeds_user_and_screenshot_images() {
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x05, 0xFE,
+            0xD4, 0xEF, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let dir = std::env::temp_dir();
+        let user_img = dir.join(format!("shiguang-user-{}.png", uuid::Uuid::new_v4()));
+        let shot_img = dir.join(format!("shiguang-shot-{}.png", uuid::Uuid::new_v4()));
+        std::fs::write(&user_img, png).unwrap();
+        std::fs::write(&shot_img, png).unwrap();
+        let user_path = user_img.to_string_lossy().replace('\\', "/");
+        let shot_path = shot_img.to_string_lossy().replace('\\', "/");
+        let messages = vec![
+            json!({
+                "role": "user",
+                "content": format!("看这张\n\n【用户附带的文件】\n1. {user_path}（图片：已直接附上）\n")
+            }),
+            json!({
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": json!({ "saved": shot_path, "hint": "截图已保存" }).to_string()
+            }),
+        ];
+        let expanded = prepare_messages_for_api(&messages);
+        assert_eq!(expanded[0]["content"][0]["type"], "text");
+        assert_eq!(expanded[0]["content"][1]["type"], "image_url");
+        assert_eq!(expanded[1]["role"], "tool");
+        assert_eq!(expanded[2]["role"], "user");
+        assert_eq!(expanded[2]["content"][1]["type"], "image_url");
+        let _ = std::fs::remove_file(&user_img);
+        let _ = std::fs::remove_file(&shot_img);
     }
 
     #[test]

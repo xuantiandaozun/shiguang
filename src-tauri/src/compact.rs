@@ -142,6 +142,7 @@ fn compact_request_body(cfg: &LlmConfig, _settings: &Settings, messages: &[Value
     if cfg.base_url.contains("deepseek") {
         body["thinking"] = json!({ "type": "disabled" });
     }
+    crate::llm::provider_headers::sanitize_agentrouter_body(&mut body, &cfg.base_url, &cfg.model);
     body
 }
 

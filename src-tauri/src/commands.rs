@@ -12,6 +12,10 @@ pub struct LlmProfile {
     pub name: String,
     pub base_url: String,
     pub api_key: String,
+    /// 统一模型目录 id；`__custom__` 表示自定义 API 模型名
+    #[serde(default)]
+    pub catalog_model: String,
+    /// 实际发给 API 的模型名
     pub model: String,
     #[serde(default)]
     pub thinking_enabled: bool,
@@ -175,6 +179,10 @@ fn infer_provider_name(base_url: &str) -> String {
         "硅基流动".into()
     } else if u.contains("openrouter") {
         "OpenRouter".into()
+    } else if u.contains("generativelanguage") || u.contains("googleapis.com") {
+        "Google Gemini".into()
+    } else if u.contains("agentrouter") {
+        "AgentRouter".into()
     } else if u.contains("minimax") {
         "MiniMax".into()
     } else if u.contains("hunyuan") {
@@ -225,6 +233,7 @@ fn hydrate_llm_profiles(db: &Db, settings: &mut Settings) {
             name: infer_provider_name(&settings.base_url),
             base_url: settings.base_url.clone(),
             api_key: settings.api_key.clone(),
+            catalog_model: String::new(),
             model: settings.model.clone(),
             thinking_enabled: settings.thinking_enabled,
             reasoning_effort: settings.reasoning_effort.clone(),
@@ -325,9 +334,12 @@ pub struct SessionView {
     pub messages: Vec<ChatMsg>,
 }
 
-/// 把附件路径拼进用户消息，让 AI 能用 ocr_image / read_image / read_file 读取。
-/// 图片优先标注本地 OCR；其它走 read_file。
-fn compose_user_message(text: &str, attachments: &[String]) -> Result<String, String> {
+/// 把附件路径拼进用户消息。图片在主模型能看图时会由请求层直接嵌入，不必再调 read_image。
+fn compose_user_message(
+    text: &str,
+    attachments: &[String],
+    native_vision: bool,
+) -> Result<String, String> {
     let text = text.trim();
     let mut paths: Vec<String> = Vec::new();
     for raw in attachments {
@@ -350,17 +362,10 @@ fn compose_user_message(text: &str, attachments: &[String]) -> Result<String, St
         return Ok(text.to_string());
     }
 
-    let img_exts = [
-        "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "tif", "tiff", "heic", "avif",
-    ];
     let mut block = String::from("【用户附带的文件】\n");
     for (i, path) in paths.iter().enumerate() {
-        let ext = std::path::Path::new(path)
-            .extension()
-            .map(|e| e.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        let hint = if img_exts.contains(&ext.as_str()) {
-            "图片：抽文字用 ocr_image；理解画面用 read_image"
+        let hint = if crate::llm::models::is_image_file(path) {
+            crate::llm::models::image_attachment_hint(native_vision)
         } else {
             "请用 read_file 读取内容"
         };
@@ -405,7 +410,15 @@ pub async fn send_chat_message(
     if state.chat_busy.swap(true, Ordering::SeqCst) {
         return Err("上一条消息还在处理中，请稍候".to_string());
     }
-    let composed = match compose_user_message(&text, attachments.as_deref().unwrap_or(&[])) {
+    let native_vision = {
+        let settings = load_settings(&state.db);
+        crate::llm::models::supports_vision(&settings.model)
+    };
+    let composed = match compose_user_message(
+        &text,
+        attachments.as_deref().unwrap_or(&[]),
+        native_vision,
+    ) {
         Ok(s) => s,
         Err(e) => {
             state.chat_busy.store(false, Ordering::SeqCst);
@@ -586,7 +599,9 @@ pub fn open_external(target: String) -> Result<(), String> {
     let lower = t.to_lowercase();
     let is_link = lower.starts_with("http://")
         || lower.starts_with("https://")
-        || lower.starts_with("mailto:");
+        || lower.starts_with("mailto:")
+        || lower.starts_with("chrome://")
+        || lower.starts_with("edge://");
     if !is_link && !std::path::Path::new(t).exists() {
         return Err(format!("不是支持的链接，也不是存在的文件: {}", t));
     }
@@ -618,6 +633,28 @@ pub fn open_main_window(app: AppHandle) {
 #[tauri::command]
 pub fn hide_chat(app: AppHandle) {
     windows::hide_chat(&app);
+}
+
+#[tauri::command]
+pub fn get_browser_extension_info(app: AppHandle) -> crate::browser::ExtensionInfo {
+    crate::browser::extension_info(&app)
+}
+
+#[tauri::command]
+pub fn open_browser_extension_dir(app: AppHandle) -> Result<(), String> {
+    let info = crate::browser::extension_info(&app);
+    if !info.ready {
+        return Err(format!(
+            "扩展目录还不完整：{}。请重新安装拾光，或确认安装目录下有 browser-extension 文件夹",
+            info.path
+        ));
+    }
+    let path = info.path.replace('/', "\\");
+    std::process::Command::new("explorer")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("打开文件夹失败: {e}"))?;
+    Ok(())
 }
 
 // ---------- todos ----------
@@ -924,6 +961,7 @@ pub fn save_settings(
             name: infer_provider_name(&settings.base_url),
             base_url: settings.base_url.clone(),
             api_key: settings.api_key.clone(),
+            catalog_model: String::new(),
             model: settings.model.clone(),
             thinking_enabled: settings.thinking_enabled,
             reasoning_effort: settings.reasoning_effort.clone(),
@@ -1349,5 +1387,18 @@ mod llm_profile_tests {
         assert_eq!(s.model, "doubao-seed-2.0-pro");
         assert!(!s.thinking_enabled);
         cleanup(db, &path);
+    }
+
+    #[test]
+    fn compose_user_message_hints_native_vision() {
+        let img = std::env::temp_dir().join(format!("shiguang-compose-{}.png", uuid::Uuid::new_v4()));
+        std::fs::write(&img, b"x").unwrap();
+        let path = img.to_string_lossy().replace('\\', "/");
+        let native = compose_user_message("看图", &[path.clone()], true).unwrap();
+        assert!(native.contains("已直接附上"));
+        assert!(!native.contains("理解画面用 read_image"));
+        let fallback = compose_user_message("看图", &[path], false).unwrap();
+        assert!(fallback.contains("read_image"));
+        let _ = std::fs::remove_file(&img);
     }
 }

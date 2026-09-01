@@ -29,7 +29,7 @@ export default function WorkflowsTab() {
   return <div className="space-y-4 max-w-3xl">
     <div>
       <div className="text-sm font-medium text-slate-100">工作流</div>
-      <p className="mt-1 text-xs text-slate-500">把固定目标和约束交给 AI 自主完成，可在这里一键运行或按计划触发。运行时可使用与聊天相同的工具；Skill 只是 AI 的通用方法说明，不会自动执行。</p>
+      <p className="mt-1 text-xs text-slate-500">把固定目标和约束交给 AI 自主完成，可在这里一键运行或按计划触发；聊天里输入 <span className="text-slate-400 font-mono">/工作流名</span> 也能快速运行。运行时可使用与聊天相同的工具。</p>
     </div>
     <div className="rounded-lg border border-slate-700/60 bg-slate-900/55 p-3 space-y-2.5">
       <div className="flex items-center justify-between"><span className="text-xs font-medium text-slate-300">{editing ? "编辑工作流" : "新建工作流"}</span>{editing && <button onClick={reset} className="text-xs text-slate-500 hover:text-slate-200">取消编辑</button>}</div>

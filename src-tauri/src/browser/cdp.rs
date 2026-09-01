@@ -379,7 +379,7 @@ async fn connect_ws(ws: &str, origin: &str) -> Result<CdpClient> {
 async fn launch_managed() -> Result<CdpClient> {
     let exe = find_browser_exe().ok_or_else(|| {
         anyhow!(
-            "未找到 Chrome/Edge。请安装浏览器，或在浏览器中加载拾光扩展（browser-extension 目录）"
+            "未找到 Chrome/Edge。请安装浏览器，或加载拾光扩展（安装目录下的 browser-extension 文件夹）"
         )
     })?;
     let dir = profile_dir()?;

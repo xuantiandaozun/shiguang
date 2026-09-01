@@ -1,7 +1,9 @@
 pub mod agent;
 pub mod client;
+pub mod models;
 pub mod profile;
 pub mod prompts;
+pub mod provider_headers;
 pub mod subagent;
 pub mod tools;
 pub mod vision;

@@ -485,7 +485,11 @@ async fn run_inner(
         crate::retention::trim_old_tool_messages(&mut messages, spill_dir.as_deref());
         let body = request_body(&cfg, &settings, &messages);
         let resp = client::stream_chat(&http, &cfg, &body, cancel, |_| {}, |_| {}).await?;
-        crate::llm::persist_usage(app, "subagent", &cfg.model, &resp.usage);
+        let usage_model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(&cfg.model);
+        crate::llm::persist_usage(app, "subagent", usage_model, &resp.usage);
 
         if resp.interrupted {
             return Ok(json!({
@@ -586,13 +590,29 @@ fn request_body(
     settings: &crate::commands::Settings,
     messages: &[Value],
 ) -> Value {
+    let native_vision = crate::llm::models::supports_vision(&cfg.model);
+    let api_messages = if native_vision {
+        crate::llm::agent::prepare_messages_for_api(messages)
+    } else {
+        messages.to_vec()
+    };
+    let tools = if native_vision {
+        let names: Vec<&str> = ALLOWED_TOOLS
+            .iter()
+            .copied()
+            .filter(|name| *name != "read_image")
+            .collect();
+        tools::definitions_for(&names)
+    } else {
+        tools::definitions_for(ALLOWED_TOOLS)
+    };
     let mut body = json!({
         "model": cfg.model,
-        "messages": messages,
+        "messages": api_messages,
         "stream": true,
         "stream_options": { "include_usage": true },
         "temperature": 0.2,
-        "tools": tools::definitions_for(ALLOWED_TOOLS),
+        "tools": tools,
         "tool_choice": "auto",
     });
     if cfg.base_url.contains("deepseek") {
@@ -603,6 +623,7 @@ fn request_body(
             body["thinking"] = json!({ "type": "disabled" });
         }
     }
+    crate::llm::provider_headers::sanitize_agentrouter_body(&mut body, &cfg.base_url, &cfg.model);
     body
 }
 

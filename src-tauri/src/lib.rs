@@ -159,6 +159,9 @@ pub fn run() {
                     log::warn!("工作流迁移失败: {}", e);
                 }
             }
+            if let Err(e) = browser::ensure_extension_unpacked(&app.handle()) {
+                log::warn!("准备浏览器扩展失败: {e}");
+            }
             tray::create_tray(app.handle())?;
             todo::scheduler::spawn(app.handle().clone());
             organizer::watcher::spawn(app.handle().clone());
@@ -227,6 +230,8 @@ pub fn run() {
             commands::sync_skills_cmd,
             commands::read_skill_content,
             commands::get_llm_usage_stats,
+            commands::get_browser_extension_info,
+            commands::open_browser_extension_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running shiguang");

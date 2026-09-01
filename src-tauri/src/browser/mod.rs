@@ -9,6 +9,9 @@
 mod cdp;
 mod ext;
 mod launch;
+mod unpack;
+
+pub use unpack::{ensure_unpacked as ensure_extension_unpacked, info as extension_info, ExtensionInfo};
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};

@@ -3,22 +3,39 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 /// DashScope 单图限制 10MB（base64 后），按 4/3 膨胀反推原始字节上限
-const MAX_IMAGE_BYTES: usize = 7 * 1024 * 1024;
+const MAX_VISION_TOOL_BYTES: usize = 7 * 1024 * 1024;
+/// 主模型直接看图时的单图上限（DeepSeek 文档为 32 MiB，留余量）
+pub const MAX_NATIVE_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
 fn mime_of(path: &Path) -> Option<&'static str> {
-    match path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("png") => Some("image/png"),
-        Some("jpg") | Some("jpeg") => Some("image/jpeg"),
-        Some("gif") => Some("image/gif"),
-        Some("webp") => Some("image/webp"),
-        Some("bmp") => Some("image/bmp"),
-        _ => None,
+    crate::llm::models::native_image_mime(path).or_else(|| {
+        match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("bmp") => Some("image/bmp"),
+            _ => None,
+        }
+    })
+}
+
+/// 把本地图片编成 OpenAI 兼容的 data URL。失败时返回原因（格式/过大/读盘）。
+pub fn encode_image_data_uri(path: &Path, max_bytes: usize) -> Result<String> {
+    let mime = mime_of(path)
+        .ok_or_else(|| anyhow!("不支持的图片格式（支持 png / jpg / jpeg / gif / webp / bmp）"))?;
+    let bytes = std::fs::read(path).map_err(|e| anyhow!("读取图片失败: {}", e))?;
+    if bytes.len() > max_bytes {
+        bail!(
+            "图片过大（约 {}MB，上限 {}MB），请先压缩再识别",
+            bytes.len() / 1024 / 1024,
+            max_bytes / 1024 / 1024
+        );
     }
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{};base64,{}", mime, b64))
 }
 
 /// 调用视觉模型识别图片内容（OpenAI 兼容多模态格式，非流式一次性返回）。
@@ -36,18 +53,7 @@ pub async fn recognize_image(
     path: &Path,
     question: Option<&str>,
 ) -> Result<VisionResult> {
-    let mime = mime_of(path)
-        .ok_or_else(|| anyhow!("不支持的图片格式（支持 png / jpg / jpeg / gif / webp / bmp）"))?;
-    let bytes = std::fs::read(path).map_err(|e| anyhow!("读取图片失败: {}", e))?;
-    if bytes.len() > MAX_IMAGE_BYTES {
-        bail!(
-            "图片过大（约 {}MB，上限 7MB），请先压缩再识别",
-            bytes.len() / 1024 / 1024
-        );
-    }
-    use base64::Engine as _;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    let data_uri = format!("data:{};base64,{}", mime, b64);
+    let data_uri = encode_image_data_uri(path, MAX_VISION_TOOL_BYTES)?;
 
     let q = question
         .map(str::trim)
@@ -67,9 +73,10 @@ pub async fn recognize_image(
     });
 
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let resp = client
-        .post(&url)
-        .bearer_auth(api_key)
+    let resp = crate::llm::provider_headers::apply_llm_headers(
+        client.post(&url).bearer_auth(api_key),
+        base_url,
+    )
         .json(&body)
         .send()
         .await

@@ -56,7 +56,7 @@ npm run tauri:dev
 npm run tauri:build
 ```
 
-产物：`src-tauri/target/release/bundle/nsis/` 下的 NSIS 安装包。
+产物：`src-tauri/target/release/bundle/nsis/` 下的 NSIS 安装包。安装成功后会在安装目录解压 `browser-extension/`（与 exe 同级），换电脑时在 Chrome/Edge 里「加载已解压的扩展」选这个文件夹即可。
 
 > 注意：Windows 通知仅在**安装后**的应用上显示应用名和图标；直接运行 exe 或开发模式下通知会显示为 PowerShell 发起，这是系统限制。
 

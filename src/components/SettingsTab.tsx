@@ -1,106 +1,35 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ipc, onEvent } from "../lib/ipc";
 import type { LlmProfile, ProfileEntry, Settings } from "../lib/ipc";
+import {
+  CUSTOM_CATALOG_MODEL,
+  PROVIDER_GROUPS,
+  PROVIDER_PRESETS,
+  applyProviderPreset,
+  bindingSummary,
+  catalogByGroup,
+  catalogForProvider,
+  catalogOptionLabel,
+  catalogSupportsVision,
+  catalogVisionModels,
+  inferCatalogModel,
+  llmProfileStatus,
+  llmProfileStatusLabel,
+  migrateSettingsProfiles,
+  patchProfileCatalog,
+  presetByBaseUrl,
+  profileCatalogLabel,
+  profileCatalogModel,
+  providerByBaseUrl,
+  syncProfileModel,
+  type CatalogModel,
+  type ProviderPreset,
+} from "../lib/models";
 
-type LlmPreset = {
-  name: string;
-  group: "国内" | "火山" | "国际";
-  baseUrl: string;
-  model: string;
-  models?: string[];
-  thinking?: boolean;
-  hint?: string;
-};
-
-const LLM_PRESETS: LlmPreset[] = [
-  {
-    name: "DeepSeek",
-    group: "国内",
-    baseUrl: "https://api.deepseek.com/v1",
-    model: "deepseek-v4-flash",
-    models: ["deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
-    thinking: true,
-  },
-  {
-    name: "通义千问",
-    group: "国内",
-    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    model: "qwen-plus",
-    models: ["qwen-plus", "qwen-turbo", "qwen-max", "qwen-long"],
-  },
-  {
-    name: "智谱 GLM",
-    group: "国内",
-    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
-    model: "glm-4-flash",
-    models: ["glm-4-flash", "glm-4.5", "glm-4.5-air", "glm-z1-air"],
-  },
-  {
-    name: "Kimi",
-    group: "国内",
-    baseUrl: "https://api.moonshot.cn/v1",
-    model: "kimi-k2.5",
-    models: ["kimi-k2.5", "moonshot-v1-auto", "moonshot-v1-128k"],
-  },
-  {
-    name: "硅基流动",
-    group: "国内",
-    baseUrl: "https://api.siliconflow.cn/v1",
-    model: "deepseek-ai/DeepSeek-V3",
-    models: ["deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-V3.1", "Qwen/Qwen3-235B-A22B"],
-  },
-  {
-    name: "腾讯混元",
-    group: "国内",
-    baseUrl: "https://api.hunyuan.cloud.tencent.com/v1",
-    model: "hunyuan-turbos-latest",
-    models: ["hunyuan-turbos-latest", "hunyuan-large", "hunyuan-lite"],
-  },
-  {
-    name: "MiniMax",
-    group: "国内",
-    baseUrl: "https://api.minimax.chat/v1",
-    model: "MiniMax-M2.5",
-    models: ["MiniMax-M2.5", "MiniMax-Text-01", "abab6.5s-chat"],
-  },
-  {
-    name: "火山 Agent Plan",
-    group: "火山",
-    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
-    model: "doubao-seed-2.0-pro",
-    models: [
-      "doubao-seed-2.0-pro",
-      "doubao-seed-2.0-lite",
-      "doubao-seed-2.0-mini",
-      "doubao-seed-2.0-code",
-      "deepseek-v4-flash",
-      "glm-5.2",
-    ],
-    hint: "个人套餐 OpenAI 兼容接口。Key 在方舟控制台「开通管理」获取，请勿与 Coding Plan 混用。",
-  },
-  {
-    name: "火山 Coding Plan",
-    group: "火山",
-    baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
-    model: "doubao-seed-2.0-code",
-    models: ["doubao-seed-2.0-code", "doubao-seed-2.0-pro", "ark-code-latest", "glm-4.7", "kimi-k2.5"],
-    hint: "编程套餐必须走 /api/coding/v3，误用 /api/v3 会按量计费。",
-  },
-  {
-    name: "OpenAI",
-    group: "国际",
-    baseUrl: "https://api.openai.com/v1",
-    model: "gpt-4o-mini",
-    models: ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "o4-mini"],
-  },
-  {
-    name: "OpenRouter",
-    group: "国际",
-    baseUrl: "https://openrouter.ai/api/v1",
-    model: "openai/gpt-4o-mini",
-    models: ["openai/gpt-4o-mini", "anthropic/claude-sonnet-4", "deepseek/deepseek-chat", "google/gemini-2.5-flash"],
-  },
-];
+const SELECT_CLASS =
+  "w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500";
+const INPUT_CLASS =
+  "w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500 placeholder:text-slate-600";
 
 function uniqueProfileName(base: string, profiles: LlmProfile[]): string {
   if (!profiles.some((p) => p.name === base)) return base;
@@ -121,17 +50,139 @@ function emptyProfile(name = "自定义"): LlmProfile {
     name,
     base_url: "",
     api_key: "",
+    catalog_model: "",
     model: "",
     thinking_enabled: false,
     reasoning_effort: "high",
   };
 }
 
-function suggestedModels(profile: LlmProfile): string[] {
-  const hit = LLM_PRESETS.find(
-    (p) => p.baseUrl.replace(/\/+$/, "") === profile.base_url.replace(/\/+$/, "")
+function CatalogModelSelect({
+  catalogId,
+  baseUrl,
+  apiModel,
+  onChange,
+  allowEmpty,
+  emptyLabel = "跟随主模型",
+  visionOnly,
+}: {
+  catalogId: string;
+  baseUrl: string;
+  apiModel: string;
+  onChange: (catalogId: string, apiModel: string) => void;
+  allowEmpty?: boolean;
+  emptyLabel?: string;
+  visionOnly?: boolean;
+}) {
+  const provider = providerByBaseUrl(baseUrl);
+  const pool = visionOnly ? catalogVisionModels() : catalogForProvider(provider?.id);
+  const knownIds = new Set(pool.map((m) => m.id));
+  const effectiveId =
+    allowEmpty && !catalogId
+      ? ""
+      : catalogId === CUSTOM_CATALOG_MODEL || !knownIds.has(catalogId)
+        ? CUSTOM_CATALOG_MODEL
+        : catalogId;
+  const groups = catalogByGroup();
+
+  return (
+    <div className="space-y-1.5">
+      <select
+        value={effectiveId}
+        onChange={(e) => {
+          const next = e.target.value;
+          if (next === "") {
+            onChange("", "");
+            return;
+          }
+          if (next === CUSTOM_CATALOG_MODEL) {
+            onChange(CUSTOM_CATALOG_MODEL, apiModel);
+            return;
+          }
+          const resolved = patchProfileCatalog(
+            { id: "", name: "", base_url: baseUrl, api_key: "", catalog_model: next, model: "", thinking_enabled: false, reasoning_effort: "high" },
+            next
+          );
+          onChange(next, resolved.model);
+        }}
+        className={SELECT_CLASS}
+      >
+        {allowEmpty && <option value="">{emptyLabel}</option>}
+        {(visionOnly ? [["视觉", pool] as const] : (Object.entries(groups) as [string, CatalogModel[]][])).map(
+          ([group, items]) => {
+            const list = visionOnly ? pool : items.filter((m) => knownIds.has(m.id));
+            if (!list.length) return null;
+            return (
+              <optgroup key={group} label={group}>
+                {list.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {catalogOptionLabel(m, provider?.id)}
+                  </option>
+                ))}
+              </optgroup>
+            );
+          }
+        )}
+        <option value={CUSTOM_CATALOG_MODEL}>自定义 API 模型名…</option>
+      </select>
+      {effectiveId === CUSTOM_CATALOG_MODEL && (
+        <input
+          value={apiModel}
+          onChange={(e) => onChange(CUSTOM_CATALOG_MODEL, e.target.value)}
+          placeholder="输入该供应商要求的 API 模型名"
+          className={INPUT_CLASS}
+        />
+      )}
+      {effectiveId && effectiveId !== CUSTOM_CATALOG_MODEL && provider && (
+        <div className="text-[11px] text-slate-500">
+          当前供应商 API 名：
+          <span className="text-slate-400 font-mono ml-1">
+            {patchProfileCatalog(
+              { id: "", name: "", base_url: baseUrl, api_key: "", catalog_model: effectiveId, model: "", thinking_enabled: false, reasoning_effort: "high" },
+              effectiveId
+            ).model}
+          </span>
+        </div>
+      )}
+    </div>
   );
-  return hit?.models ?? [];
+}
+
+function ModelCatalogPanel() {
+  const [open, setOpen] = useState(false);
+  const groups = catalogByGroup();
+
+  return (
+    <div className="rounded-lg border border-slate-700/50 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between px-3 py-2 text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 transition"
+      >
+        <span>统一模型目录（各供应商 API 名对照）</span>
+        <span>{open ? "收起" : "展开"}</span>
+      </button>
+      {open && (
+        <div className="border-t border-slate-700/50 max-h-64 overflow-y-auto text-[11px]">
+          {(Object.entries(groups) as [string, CatalogModel[]][]).map(([group, items]) => (
+            <div key={group}>
+              <div className="sticky top-0 px-3 py-1 bg-slate-900/95 text-slate-500">{group}</div>
+              {items.map((m) => (
+                <div
+                  key={m.id}
+                  className="px-3 py-1.5 border-b border-slate-800/80 hover:bg-slate-800/30"
+                >
+                  <div className="text-slate-200">{m.label}</div>
+                  <div className="text-slate-500 font-mono mt-0.5">{m.id}</div>
+                  <div className="text-slate-600 mt-0.5 leading-4">{bindingSummary(m)}</div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function SettingsTab() {
@@ -142,13 +193,22 @@ export default function SettingsTab() {
   useEffect(() => {
     ipc
       .getSettings()
-      .then((s) =>
+      .then((s) => {
+        const profiles = migrateSettingsProfiles(s.llm_profiles ?? []);
         setSettings({
           ...s,
-          llm_profiles: s.llm_profiles ?? [],
+          llm_profiles: profiles,
           active_llm_profile_id: s.active_llm_profile_id ?? "",
-        })
-      )
+          vision_catalog_model:
+            s.vision_catalog_model ||
+            (s.vision_model
+              ? inferCatalogModel(s.vision_model, s.vision_base_url)
+              : ""),
+          subagent_catalog_model:
+            s.subagent_catalog_model ||
+            (s.subagent_model ? inferCatalogModel(s.subagent_model, s.base_url) : ""),
+        });
+      })
       .catch((e) => setError(String(e)));
   }, []);
 
@@ -171,11 +231,27 @@ export default function SettingsTab() {
     }
   };
 
+  const chatCatalogId =
+    settings.llm_profiles?.find((p) => p.id === settings.active_llm_profile_id)?.catalog_model ||
+    profileCatalogModel({
+      id: "",
+      name: "",
+      base_url: settings.base_url,
+      api_key: settings.api_key,
+      catalog_model: "",
+      model: settings.model,
+      thinking_enabled: false,
+      reasoning_effort: "high",
+    });
+  const chatSeesImages = catalogSupportsVision(chatCatalogId, settings.model);
+
   return (
     <div className="space-y-5 max-w-2xl">
       <LlmProfilesSection
         settings={settings}
         update={update}
+        saved={saved}
+        onSave={save}
         onActivate={async (next) => {
           setError("");
           try {
@@ -192,7 +268,9 @@ export default function SettingsTab() {
         <div className="text-sm font-medium text-slate-100">
           图像识别（视觉模型）
           <span className="ml-2 text-xs font-normal text-slate-500">
-            独立配置，与上方聊天模型互不影响；用于看图、读截图、提取图中文字
+            {chatSeesImages
+              ? "当前聊天模型已能直接看图，附件和截图会发给它；OCR 仍可用于只要文字、省 token。下方视觉接口仅在主模型不能看图时使用"
+              : "主模型不能看图时，read_image 会调用下面这套视觉接口；OCR 始终可用"}
           </span>
         </div>
         <label className="block">
@@ -201,7 +279,7 @@ export default function SettingsTab() {
             value={settings.vision_base_url}
             onChange={(e) => update({ vision_base_url: e.target.value })}
             placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1"
-            className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500 placeholder:text-slate-600"
+            className={INPUT_CLASS}
           />
         </label>
         <label className="block">
@@ -211,16 +289,22 @@ export default function SettingsTab() {
             value={settings.vision_api_key}
             onChange={(e) => update({ vision_api_key: e.target.value })}
             placeholder="sk-..."
-            className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500 placeholder:text-slate-600"
+            className={INPUT_CLASS}
           />
         </label>
         <label className="block">
           <div className="text-xs text-slate-400 mb-1">视觉模型</div>
-          <input
-            value={settings.vision_model}
-            onChange={(e) => update({ vision_model: e.target.value })}
-            placeholder="qwen-vl-max"
-            className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500 placeholder:text-slate-600"
+          <CatalogModelSelect
+            catalogId={settings.vision_catalog_model || ""}
+            baseUrl={settings.vision_base_url}
+            apiModel={settings.vision_model}
+            onChange={(catalogId, apiModel) =>
+              update({
+                vision_catalog_model: catalogId,
+                vision_model: apiModel,
+              })
+            }
+            visionOnly
           />
         </label>
       </section>
@@ -258,11 +342,18 @@ export default function SettingsTab() {
         )}
         <label className="block">
           <div className="text-xs text-slate-400 mb-1">子代理模型（留空则跟随主模型）</div>
-          <input
-            value={settings.subagent_model}
-            onChange={(e) => update({ subagent_model: e.target.value })}
-            placeholder="如 deepseek-v4-flash；可填更便宜的模型专门跑子任务"
-            className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500 placeholder:text-slate-600"
+          <CatalogModelSelect
+            catalogId={settings.subagent_catalog_model || ""}
+            baseUrl={settings.base_url}
+            apiModel={settings.subagent_model}
+            onChange={(catalogId, apiModel) =>
+              update({
+                subagent_catalog_model: catalogId,
+                subagent_model: apiModel,
+              })
+            }
+            allowEmpty
+            emptyLabel="跟随主模型"
           />
         </label>
       </section>
@@ -421,6 +512,8 @@ export default function SettingsTab() {
         </label>
       </section>
 
+      <BrowserExtensionSection />
+
       <TempCleanupSection tempPath={settings.temp_path} />
 
       <div className="flex items-center gap-3 pt-1">
@@ -440,23 +533,37 @@ export default function SettingsTab() {
 function LlmProfilesSection({
   settings,
   update,
+  saved,
+  onSave,
   onActivate,
 }: {
   settings: Settings;
   update: (patch: Partial<Settings>) => void;
+  saved: boolean;
+  onSave: () => Promise<void>;
   onActivate: (next: Settings) => Promise<void>;
 }) {
   const profiles = settings.llm_profiles ?? [];
-  const [editingId, setEditingId] = useState<string | null>(
+  const [expandedId, setExpandedId] = useState<string | null>(
     settings.active_llm_profile_id || profiles[0]?.id || null
   );
   const [localError, setLocalError] = useState("");
-  const editing = profiles.find((p) => p.id === editingId) ?? null;
+  const [activatingId, setActivatingId] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const keyInputRef = useRef<HTMLInputElement>(null);
+  const pendingKeyFocus = useRef(false);
+
+  const editing = profiles.find((p) => p.id === expandedId) ?? null;
   const active = profiles.find((p) => p.id === settings.active_llm_profile_id) ?? null;
-  const models = editing ? suggestedModels(editing) : [];
-  const editingHint = LLM_PRESETS.find(
-    (p) => editing && p.baseUrl.replace(/\/+$/, "") === editing.base_url.replace(/\/+$/, "")
-  )?.hint;
+  const editingPreset = editing ? presetByBaseUrl(editing.base_url) : undefined;
+  const editingHint = editingPreset?.hint;
+
+  useEffect(() => {
+    if (pendingKeyFocus.current && keyInputRef.current) {
+      keyInputRef.current.focus();
+      pendingKeyFocus.current = false;
+    }
+  }, [expandedId, editing?.id]);
 
   const replaceProfiles = (next: LlmProfile[], extra: Partial<Settings> = {}) => {
     const activeId = extra.active_llm_profile_id ?? settings.active_llm_profile_id;
@@ -477,20 +584,38 @@ function LlmProfilesSection({
   };
 
   const patchProfile = (id: string, patch: Partial<LlmProfile>) => {
-    replaceProfiles(profiles.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+    replaceProfiles(
+      profiles.map((p) => (p.id === id ? syncProfileModel({ ...p, ...patch }) : p))
+    );
   };
 
-  const addFromPreset = (preset: LlmPreset) => {
-    const profile: LlmProfile = {
+  const addFromPreset = (preset: ProviderPreset) => {
+    const existing = profiles.find(
+      (p) => p.base_url.replace(/\/+$/, "") === preset.baseUrl.replace(/\/+$/, "")
+    );
+    if (existing) {
+      setExpandedId(existing.id);
+      setLocalError(`已有「${existing.name}」配置，请在下方编辑 Key 或切换使用`);
+      pendingKeyFocus.current = !existing.api_key.trim();
+      return;
+    }
+    const profile = syncProfileModel({
       ...emptyProfile(uniqueProfileName(preset.name, profiles)),
       base_url: preset.baseUrl,
-      model: preset.model,
+      catalog_model: preset.defaultCatalogModel,
       thinking_enabled: Boolean(preset.thinking),
       reasoning_effort: "high",
-    };
+    });
     const next = [...profiles, profile];
     replaceProfiles(next, profiles.length === 0 ? { active_llm_profile_id: profile.id } : {});
-    setEditingId(profile.id);
+    setExpandedId(profile.id);
+    pendingKeyFocus.current = true;
+    setLocalError("");
+  };
+
+  const applyPreset = (preset: ProviderPreset) => {
+    if (!editing) return;
+    patchProfile(editing.id, applyProviderPreset(editing, preset));
     setLocalError("");
   };
 
@@ -498,34 +623,55 @@ function LlmProfilesSection({
     const profile = emptyProfile(uniqueProfileName("自定义", profiles));
     const next = [...profiles, profile];
     replaceProfiles(next, profiles.length === 0 ? { active_llm_profile_id: profile.id } : {});
-    setEditingId(profile.id);
+    setExpandedId(profile.id);
+    pendingKeyFocus.current = true;
   };
 
   const activate = async (id: string) => {
     const p = profiles.find((x) => x.id === id);
     if (!p) return;
-    if (!p.api_key.trim()) {
-      setLocalError("先填写这套配置的 API Key，再设为当前使用");
-      setEditingId(id);
+    const status = llmProfileStatus(p);
+    if (status === "no-key") {
+      setLocalError("先填写 API Key，再切换使用");
+      setExpandedId(id);
+      pendingKeyFocus.current = true;
       return;
     }
-    if (!p.base_url.trim() || !p.model.trim()) {
+    if (status === "incomplete") {
       setLocalError("Base URL 和模型都不能为空");
-      setEditingId(id);
+      setExpandedId(id);
       return;
     }
     setLocalError("");
-    const next: Settings = {
-      ...settings,
-      llm_profiles: profiles,
-      active_llm_profile_id: id,
-      base_url: p.base_url,
-      api_key: p.api_key,
-      model: p.model,
-      thinking_enabled: p.thinking_enabled,
-      reasoning_effort: p.reasoning_effort,
-    };
-    await onActivate(next);
+    setActivatingId(id);
+    try {
+      const synced = syncProfileModel(p);
+      const next: Settings = {
+        ...settings,
+        llm_profiles: profiles.map((x) => (x.id === id ? synced : x)),
+        active_llm_profile_id: id,
+        base_url: synced.base_url,
+        api_key: synced.api_key,
+        model: synced.model,
+        thinking_enabled: synced.thinking_enabled,
+        reasoning_effort: synced.reasoning_effort,
+      };
+      await onActivate(next);
+    } finally {
+      setActivatingId(null);
+    }
+  };
+
+  const saveSection = async () => {
+    setSaving(true);
+    setLocalError("");
+    try {
+      await onSave();
+    } catch (e) {
+      setLocalError(String(e));
+    } finally {
+      setSaving(false);
+    }
   };
 
   const remove = (id: string) => {
@@ -539,189 +685,264 @@ function LlmProfilesSection({
       extra.active_llm_profile_id = next[0].id;
     }
     replaceProfiles(next, extra);
-    if (editingId === id) setEditingId(next[0].id);
+    if (expandedId === id) setExpandedId(next[0]?.id ?? null);
   };
 
-  const groups: Array<LlmPreset["group"]> = ["国内", "火山", "国际"];
+  const groups = PROVIDER_GROUPS;
 
   return (
     <section className="space-y-3">
-      <div>
-        <div className="text-sm font-medium text-slate-100">大模型 API</div>
-        <div className="text-xs text-slate-500 mt-1 leading-5">
-          可保存多套接口（不同供应商或 Key），手动选择当前对话用哪一套。Key 只存在本机。
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium text-slate-100">大模型 API</div>
+          <div className="text-xs text-slate-500 mt-1 leading-5">
+            保存多套配置，点「切换使用」立即生效；改完字段记得保存。Key 只存在本机。
+          </div>
         </div>
+        <button
+          type="button"
+          onClick={saveSection}
+          disabled={saving}
+          className="shrink-0 px-3 py-1.5 rounded text-xs bg-slate-700 text-slate-200 hover:bg-slate-600 disabled:opacity-50 transition"
+        >
+          {saving ? "保存中…" : saved ? "已保存" : "保存配置"}
+        </button>
       </div>
 
-      <label className="block">
-        <div className="text-xs text-slate-400 mb-1">当前使用</div>
-        <select
-          value={settings.active_llm_profile_id}
-          onChange={(e) => activate(e.target.value)}
-          className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500"
-        >
-          {profiles.length === 0 && <option value="">尚未添加配置</option>}
-          {profiles.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-              {p.model ? ` · ${p.model}` : ""}
-              {p.api_key.trim() ? "" : "（未填 Key）"}
-            </option>
-          ))}
-        </select>
-        {active && (
-          <div className="text-[11px] text-slate-500 mt-1 truncate" title={active.base_url}>
-            {active.base_url || "尚未填写 Base URL"}
+      {active && (
+        <div className="rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-2.5">
+          <div className="text-[11px] text-sky-300/80">当前对话使用</div>
+          <div className="text-sm text-slate-100 mt-0.5">
+            {active.name || "未命名"}
+            {" · "}
+            {profileCatalogLabel(active)}
           </div>
-        )}
-      </label>
+          <div className="text-[11px] text-slate-500 mt-0.5 truncate" title={active.base_url}>
+            {active.base_url || "尚未填写 Base URL"}
+            {active.model ? ` · API: ${active.model}` : ""}
+          </div>
+        </div>
+      )}
 
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         {profiles.map((p) => {
           const isActive = p.id === settings.active_llm_profile_id;
-          const isEditing = p.id === editingId;
+          const isExpanded = p.id === expandedId;
+          const status = llmProfileStatus(p);
+          const preset = presetByBaseUrl(p.base_url);
           return (
             <div
               key={p.id}
-              className={`rounded-lg border px-3 py-2 ${
+              className={`rounded-lg border overflow-hidden transition ${
                 isActive
-                  ? "border-sky-500/40 bg-sky-500/10"
-                  : isEditing
-                    ? "border-slate-600 bg-slate-800/80"
-                    : "border-slate-700/60 bg-slate-800/40"
+                  ? "border-sky-500/35"
+                  : isExpanded
+                    ? "border-slate-600"
+                    : "border-slate-700/60"
               }`}
             >
-              <div className="flex items-center gap-2">
+              <div
+                className={`flex items-center gap-2 px-3 py-2.5 ${
+                  isActive ? "bg-sky-500/10" : isExpanded ? "bg-slate-800/80" : "bg-slate-800/40"
+                }`}
+              >
                 <button
                   type="button"
-                  onClick={() => setEditingId(p.id)}
+                  onClick={() => setExpandedId(isExpanded ? null : p.id)}
                   className="flex-1 min-w-0 text-left"
                 >
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm text-slate-100 truncate">{p.name || "未命名"}</span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm text-slate-100">{p.name || "未命名"}</span>
                     {isActive && (
-                      <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] bg-sky-500/20 text-sky-300">
+                      <span className="px-1.5 py-0.5 rounded text-[10px] bg-sky-500/25 text-sky-200">
                         使用中
                       </span>
                     )}
+                    <span
+                      className={`px-1.5 py-0.5 rounded text-[10px] ${
+                        status === "ready"
+                          ? "bg-emerald-500/15 text-emerald-300"
+                          : status === "no-key"
+                            ? "bg-amber-500/15 text-amber-300"
+                            : "bg-slate-600/40 text-slate-400"
+                      }`}
+                    >
+                      {llmProfileStatusLabel(status)}
+                    </span>
                   </div>
                   <div className="text-[11px] text-slate-500 mt-0.5 truncate">
-                    {p.model || "未填模型"} · {p.api_key.trim() ? "已填 Key" : "未填 Key"}
+                    {profileCatalogLabel(p)}
+                    {preset ? ` · ${preset.name}` : ""}
                   </div>
                 </button>
-                {!isActive && (
+                {!isActive && status === "ready" && (
                   <button
                     type="button"
                     onClick={() => activate(p.id)}
-                    className="shrink-0 px-2 py-1 rounded text-xs text-sky-300 hover:bg-sky-500/15 transition"
+                    disabled={activatingId === p.id}
+                    className="shrink-0 px-2.5 py-1 rounded text-xs font-medium bg-sky-500/20 text-sky-200 hover:bg-sky-500/30 transition disabled:opacity-50"
                   >
-                    设为当前
+                    {activatingId === p.id ? "切换中…" : "切换使用"}
                   </button>
                 )}
                 <button
                   type="button"
-                  onClick={() => setEditingId(p.id)}
+                  onClick={() => setExpandedId(isExpanded ? null : p.id)}
                   className="shrink-0 px-2 py-1 rounded text-xs text-slate-400 hover:text-slate-200 transition"
+                  aria-expanded={isExpanded}
                 >
-                  编辑
-                </button>
-                <button
-                  type="button"
-                  onClick={() => remove(p.id)}
-                  className="shrink-0 px-2 py-1 rounded text-xs text-slate-500 hover:text-rose-400 transition"
-                >
-                  删除
+                  {isExpanded ? "收起" : "编辑"}
                 </button>
               </div>
+
+              {isExpanded && (
+                <div className="border-t border-slate-700/50 p-3 space-y-2.5 bg-slate-900/30">
+                  <label className="block">
+                    <div className="text-xs text-slate-400 mb-1">供应商预设</div>
+                    <select
+                      value={editingPreset?.name ?? ""}
+                      onChange={(e) => {
+                        const name = e.target.value;
+                        if (!name) return;
+                        const preset = PROVIDER_PRESETS.find((x) => x.name === name);
+                        if (preset) applyPreset(preset);
+                      }}
+                      className={SELECT_CLASS}
+                    >
+                      <option value="">自定义 / 未匹配预设</option>
+                      {groups.flatMap((g) =>
+                        PROVIDER_PRESETS.filter((x) => x.group === g).map((x) => (
+                          <option key={x.name} value={x.name}>
+                            {x.group} · {x.name}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </label>
+                  {editingHint && (
+                    <div className="text-[11px] text-amber-300/90 leading-5 rounded bg-amber-500/5 border border-amber-500/20 px-2.5 py-2">
+                      {editingHint}
+                    </div>
+                  )}
+                  <label className="block">
+                    <div className="text-xs text-slate-400 mb-1">名称</div>
+                    <input
+                      value={p.name}
+                      onChange={(e) => patchProfile(p.id, { name: e.target.value })}
+                      className={INPUT_CLASS}
+                    />
+                  </label>
+                  <label className="block">
+                    <div className="text-xs text-slate-400 mb-1">Base URL（OpenAI 兼容接口）</div>
+                    <input
+                      value={p.base_url}
+                      onChange={(e) => patchProfile(p.id, { base_url: e.target.value })}
+                      placeholder="https://api.example.com/v1"
+                      className={INPUT_CLASS}
+                    />
+                  </label>
+                  <label className="block">
+                    <div className="text-xs text-slate-400 mb-1">
+                      API Key（仅保存在本机，不会上传）
+                    </div>
+                    <input
+                      ref={p.id === editing?.id ? keyInputRef : undefined}
+                      type="password"
+                      value={p.api_key}
+                      onChange={(e) => patchProfile(p.id, { api_key: e.target.value })}
+                      placeholder="粘贴 Key…"
+                      className={INPUT_CLASS}
+                    />
+                  </label>
+                  <label className="block">
+                    <div className="text-xs text-slate-400 mb-1">模型（统一目录）</div>
+                    <CatalogModelSelect
+                      catalogId={profileCatalogModel(p)}
+                      baseUrl={p.base_url}
+                      apiModel={p.model}
+                      onChange={(catalogId, apiModel) =>
+                        patchProfile(p.id, { catalog_model: catalogId, model: apiModel })
+                      }
+                    />
+                    {catalogSupportsVision(profileCatalogModel(p), p.model) && (
+                      <div className="text-[11px] text-emerald-400/90 mt-1">
+                        此模型可直接看图；只要文字仍可用 ocr_image 省 token
+                      </div>
+                    )}
+                  </label>
+                  <label className="flex items-center gap-2.5 text-sm text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={p.thinking_enabled}
+                      onChange={(e) =>
+                        patchProfile(p.id, { thinking_enabled: e.target.checked })
+                      }
+                      className="w-4 h-4 accent-sky-500"
+                    />
+                    启用思考模式
+                    <span className="text-xs text-slate-500">仅 DeepSeek 接口会附带该参数</span>
+                  </label>
+                  {p.thinking_enabled && (
+                    <label className="block">
+                      <div className="text-xs text-slate-400 mb-1">思考强度</div>
+                      <select
+                        value={p.reasoning_effort}
+                        onChange={(e) =>
+                          patchProfile(p.id, { reasoning_effort: e.target.value })
+                        }
+                        className={SELECT_CLASS}
+                      >
+                        <option value="low">low — 最快，适合简单问答</option>
+                        <option value="high">high — 默认，兼顾速度与质量</option>
+                        <option value="max">max — 最深思考，慢但更准</option>
+                      </select>
+                    </label>
+                  )}
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    {!isActive && status === "ready" && (
+                      <button
+                        type="button"
+                        onClick={() => activate(p.id)}
+                        disabled={activatingId === p.id}
+                        className="px-3 py-1.5 rounded text-xs font-medium bg-sky-500 text-white hover:bg-sky-400 transition disabled:opacity-50"
+                      >
+                        {activatingId === p.id ? "切换中…" : "切换并使用"}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={saveSection}
+                      disabled={saving}
+                      className="px-3 py-1.5 rounded text-xs bg-slate-700 text-slate-200 hover:bg-slate-600 disabled:opacity-50 transition"
+                    >
+                      保存此套
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => remove(p.id)}
+                      className="px-3 py-1.5 rounded text-xs text-slate-500 hover:text-rose-400 transition"
+                    >
+                      删除
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
       </div>
 
-      {editing && (
-        <div className="rounded-lg border border-slate-700/60 bg-slate-800/30 p-3 space-y-2.5">
-          <div className="text-xs text-slate-400">编辑「{editing.name || "未命名"}」</div>
-          {editingHint && <div className="text-[11px] text-amber-300/90 leading-5">{editingHint}</div>}
-          <label className="block">
-            <div className="text-xs text-slate-400 mb-1">名称</div>
-            <input
-              value={editing.name}
-              onChange={(e) => patchProfile(editing.id, { name: e.target.value })}
-              className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500"
-            />
-          </label>
-          <label className="block">
-            <div className="text-xs text-slate-400 mb-1">Base URL（OpenAI 兼容接口）</div>
-            <input
-              value={editing.base_url}
-              onChange={(e) => patchProfile(editing.id, { base_url: e.target.value })}
-              className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500"
-            />
-          </label>
-          <label className="block">
-            <div className="text-xs text-slate-400 mb-1">API Key（仅保存在本机 SQLite，不会上传）</div>
-            <input
-              type="password"
-              value={editing.api_key}
-              onChange={(e) => patchProfile(editing.id, { api_key: e.target.value })}
-              placeholder="sk-..."
-              className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500 placeholder:text-slate-600"
-            />
-          </label>
-          <label className="block">
-            <div className="text-xs text-slate-400 mb-1">模型</div>
-            <input
-              list={`llm-models-${editing.id}`}
-              value={editing.model}
-              onChange={(e) => patchProfile(editing.id, { model: e.target.value })}
-              className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500"
-            />
-            {models.length > 0 && (
-              <datalist id={`llm-models-${editing.id}`}>
-                {models.map((m) => (
-                  <option key={m} value={m} />
-                ))}
-              </datalist>
-            )}
-          </label>
-          <label className="flex items-center gap-2.5 text-sm text-slate-300 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={editing.thinking_enabled}
-              onChange={(e) => patchProfile(editing.id, { thinking_enabled: e.target.checked })}
-              className="w-4 h-4 accent-sky-500"
-            />
-            启用思考模式
-            <span className="text-xs text-slate-500">仅 DeepSeek 接口会附带该参数</span>
-          </label>
-          {editing.thinking_enabled && (
-            <label className="block">
-              <div className="text-xs text-slate-400 mb-1">思考强度</div>
-              <select
-                value={editing.reasoning_effort}
-                onChange={(e) => patchProfile(editing.id, { reasoning_effort: e.target.value })}
-                className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500"
-              >
-                <option value="low">low — 最快，适合简单问答</option>
-                <option value="high">high — 默认，兼顾速度与质量</option>
-                <option value="max">max — 最深思考，慢但更准</option>
-              </select>
-            </label>
-          )}
-        </div>
-      )}
-
-      <div className="space-y-2">
-        <div className="text-xs text-slate-400">快捷添加供应商</div>
+      <div className="space-y-2 rounded-lg border border-dashed border-slate-700/60 p-3">
+        <div className="text-xs text-slate-400">快捷添加（自动填 Base URL 和默认模型）</div>
         {groups.map((g) => (
           <div key={g} className="space-y-1.5">
             <div className="text-[11px] text-slate-500">{g}</div>
             <div className="flex flex-wrap gap-1.5">
-              {LLM_PRESETS.filter((p) => p.group === g).map((p) => (
+              {PROVIDER_PRESETS.filter((p) => p.group === g).map((p) => (
                 <button
                   key={p.name}
                   type="button"
-                  title={p.hint || `添加 ${p.name}：${p.model}`}
+                  title={p.hint || `添加 ${p.name}`}
                   onClick={() => addFromPreset(p)}
                   className="px-3 py-1.5 rounded-full text-xs bg-slate-700/60 text-slate-300 hover:bg-slate-600 transition"
                 >
@@ -729,11 +950,26 @@ function LlmProfilesSection({
                 </button>
               ))}
             </div>
+            {g === "国内" && (
+              <div className="text-[11px] text-slate-500 leading-5">
+                AgentRouter 须用{" "}
+                <span className="text-slate-400">https://agentrouter.org/v1</span>
+                （OpenAI 兼容），不要用 Claude Code 文档里的根域名。Key 在{" "}
+                <button
+                  type="button"
+                  onClick={() => ipc.openExternal("https://agentrouter.org/console/token")}
+                  className="text-sky-400 hover:text-sky-300"
+                >
+                  控制台
+                </button>
+                获取。
+              </div>
+            )}
             {g === "火山" && (
               <div className="text-[11px] text-slate-500 leading-5">
                 Agent Plan 用 <span className="text-slate-400">/api/v3</span>
                 ，Coding Plan 必须带 <span className="text-slate-400">/coding</span>
-                。                接入说明见
+                。接入说明见
                 <button
                   type="button"
                   onClick={() => ipc.openExternal("https://www.volcengine.com/docs/82379/2366394")}
@@ -744,6 +980,19 @@ function LlmProfilesSection({
                 。
               </div>
             )}
+            {g === "国际" && (
+              <div className="text-[11px] text-slate-500 leading-5">
+                Google Gemini Key 在{" "}
+                <button
+                  type="button"
+                  onClick={() => ipc.openExternal("https://aistudio.google.com/apikey")}
+                  className="text-sky-400 hover:text-sky-300"
+                >
+                  Google AI Studio
+                </button>
+                获取；选「Google Gemini」预设会自动填好兼容地址。
+              </div>
+            )}
           </div>
         ))}
         <button
@@ -751,10 +1000,77 @@ function LlmProfilesSection({
           onClick={addCustom}
           className="px-3 py-1.5 rounded-full text-xs border border-dashed border-slate-600 text-slate-400 hover:text-slate-200 hover:border-slate-400 transition"
         >
-          + 自定义
+          + 自定义接口
         </button>
       </div>
+      <ModelCatalogPanel />
       {localError && <div className="text-xs text-rose-400">{localError}</div>}
+    </section>
+  );
+}
+
+function BrowserExtensionSection() {
+  const [path, setPath] = useState("");
+  const [ready, setReady] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    ipc
+      .getBrowserExtension()
+      .then((info) => {
+        setPath(info.path);
+        setReady(info.ready);
+      })
+      .catch((e) => setErr(String(e)));
+  }, []);
+
+  return (
+    <section className="space-y-2.5">
+      <div className="text-sm font-medium text-slate-100">
+        浏览器扩展
+        <span className="ml-2 text-xs font-normal text-slate-500">
+          安装后会解压到安装目录，换电脑时选这个文件夹加载即可
+        </span>
+      </div>
+      <div className="text-xs text-slate-400 break-all">
+        {path ? `目录：${path}` : "路径加载中…"}
+        {path && (
+          <span className={ready ? "ml-2 text-emerald-400" : "ml-2 text-amber-400"}>
+            {ready ? "已就绪" : "未解压完整"}
+          </span>
+        )}
+      </div>
+      <div className="text-xs text-slate-500 leading-5">
+        Chrome / Edge 打开扩展页 → 开启开发者模式 → 加载已解压的扩展程序 → 选择上面这个文件夹。
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={async () => {
+            setErr("");
+            setMsg("");
+            try {
+              await ipc.openBrowserExtensionDir();
+              setMsg("已打开文件夹");
+            } catch (e) {
+              setErr(String(e));
+            }
+          }}
+          className="px-3.5 py-1.5 rounded bg-slate-700 text-slate-200 text-sm hover:bg-slate-600 transition"
+        >
+          打开扩展文件夹
+        </button>
+        <button
+          type="button"
+          onClick={() => ipc.openExternal("chrome://extensions")}
+          className="px-3 py-1.5 rounded text-slate-400 text-sm hover:text-slate-200 transition"
+        >
+          打开 Chrome 扩展页
+        </button>
+        {msg && <span className="text-xs text-emerald-400">{msg}</span>}
+        {err && <span className="text-xs text-rose-400">{err}</span>}
+      </div>
     </section>
   );
 }

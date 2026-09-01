@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run sidecar:dev && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run sidecar:build && npm run build",
+    "beforeBuildCommand": "npm run pack:extension && npm run sidecar:build && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -74,6 +74,9 @@
     "active": true,
     "targets": ["nsis"],
     "externalBin": ["binaries/shiguang-index-helper"],
+    "resources": {
+      "resources/browser-extension.zip": "browser-extension.zip"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -84,7 +87,8 @@
     "windows": {
       "nsis": {
         "languages": ["SimpChinese"],
-        "displayLanguageSelector": false
+        "displayLanguageSelector": false,
+        "installerHooks": "./windows/hooks.nsh"
       }
     },
     "category": "Utility",

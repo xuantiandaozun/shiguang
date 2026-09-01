@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "sidecar:dev": "node scripts/build-index-helper.mjs dev",
     "sidecar:build": "node scripts/build-index-helper.mjs release",
+    "pack:extension": "node scripts/pack-browser-extension.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

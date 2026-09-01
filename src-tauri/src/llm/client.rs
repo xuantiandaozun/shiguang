@@ -113,9 +113,10 @@ pub async fn stream_chat(
     on_reasoning: impl Fn(&str),
 ) -> Result<AssistantResp> {
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-    let resp = client
-        .post(&url)
-        .bearer_auth(&cfg.api_key)
+    let resp = crate::llm::provider_headers::apply_llm_headers(
+        client.post(&url).bearer_auth(&cfg.api_key),
+        &cfg.base_url,
+    )
         .json(body)
         .send()
         .await
