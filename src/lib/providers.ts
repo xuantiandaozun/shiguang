@@ -12,6 +12,8 @@ export type ProviderPreset = {
   defaultCatalogModel: string;
   thinking?: boolean;
   hint?: string;
+  /** 为 false 时不出现在快捷添加；已保存的档案仍可按 Base URL 识别 */
+  listed?: boolean;
 };
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
@@ -20,7 +22,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     name: "DeepSeek",
     group: "国内",
     baseUrl: "https://api.deepseek.com/v1",
-    defaultCatalogModel: "deepseek-v4-flash",
+    defaultCatalogModel: "deepseek-v4.1-flash",
     thinking: true,
   },
   {
@@ -69,7 +71,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     id: "volc-agent",
     name: "火山 Agent Plan",
     group: "火山",
-    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+    baseUrl: "https://ark.cn-beijing.volces.com/api/plan/v3",
     defaultCatalogModel: "doubao-seed-2.0-pro",
     hint: "个人套餐 OpenAI 兼容接口。Key 在方舟控制台「开通管理」获取，请勿与 Coding Plan 混用。",
   },
@@ -100,16 +102,17 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     name: "Google Gemini",
     group: "国际",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-    defaultCatalogModel: "gemini-2.5-flash",
-    hint: "Key 在 aistudio.google.com 获取。须走 OpenAI 兼容地址（已自动填好 /openai/ 后缀）。",
+    defaultCatalogModel: "gemini-3.5-flash",
+    hint: "Key 在 aistudio.google.com 获取。须走 OpenAI 兼容地址（已自动填好 /openai/ 后缀）。新账号请选 3.5 Flash；不要填 OpenRouter 那种 google/ 前缀。2.5/2.0 已对新用户下架。",
   },
   {
     id: "agentrouter",
     name: "AgentRouter 公益站",
     group: "国内",
     baseUrl: "https://agentrouter.org/v1",
-    defaultCatalogModel: "claude-opus-4-6",
-    hint: "Key 在 agentrouter.org/console/token 获取。须用 OpenAI 兼容地址 …/v1（Claude Code 文档里的根域名不含 /v1，不能用于本应用）。模型名用站内原名如 claude-opus-4-6。",
+    defaultCatalogModel: "deepseek-v4.1-flash",
+    listed: false,
+    hint: "已从快捷添加中撤下。已保存的档案仍可用。须用 OpenAI 兼容地址 …/v1。",
   },
 ];
 
@@ -127,3 +130,7 @@ export function providerById(id: string): ProviderPreset | undefined {
 }
 
 export const PROVIDER_GROUPS: ProviderGroup[] = ["国内", "火山", "国际"];
+
+export function listedProviderPresets(): ProviderPreset[] {
+  return PROVIDER_PRESETS.filter((p) => p.listed !== false);
+}

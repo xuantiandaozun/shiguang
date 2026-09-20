@@ -9,6 +9,9 @@ use tauri::{AppHandle, Emitter, Manager};
 
 /// 单次请求最多直接嵌入的图片数，避免撑爆请求体。
 const MAX_NATIVE_IMAGES: usize = 8;
+/// 先加载足够多的历史，再由 token 预算和持久化检查点裁剪；不能用固定 30 条
+/// 代替上下文管理，否则短消息会在尚未触发摘要前静默丢失。
+const MAX_HISTORY_MESSAGES: usize = 200;
 const NATIVE_VISION_NOTICE: &str = "\n当前对话模型可以直接看图：用户附件和工具截图中的图片已嵌入消息，请直接理解画面。只要文字、想省 token 时用 ocr_image。";
 
 /// 单次任务的工具调用轮次预算。浏览器类任务动辄 10+ 轮，给足余量。
@@ -50,9 +53,17 @@ pub async fn run_chat(
         return Ok(());
     }
 
-    let (history, profile_block, replay_calls, skills_block, lookup_block, stored_compact) = {
+    let (
+        history,
+        profile_block,
+        replay_calls,
+        skills_block,
+        lookup_block,
+        stored_compact,
+        user_goal,
+    ) = {
         let state = app.state::<crate::AppState>();
-        let mut history = state.db.load_chat(session_id, 30)?;
+        let mut history = state.db.load_chat(session_id, MAX_HISTORY_MESSAGES)?;
         let stored_compact = state.db.get_session_compact(session_id).ok().flatten();
         if let Some((cover_until, _)) = &stored_compact {
             history.retain(|m| m.id > *cover_until);
@@ -84,7 +95,15 @@ pub async fn run_chat(
         };
         let skills_block = state.skills.catalog_reminder();
         let lookup_block = state.lookup_cache.catalog_block();
-        (history, profile, replay_calls, skills_block, lookup_block, stored_compact)
+        (
+            history,
+            profile,
+            replay_calls,
+            skills_block,
+            lookup_block,
+            stored_compact,
+            latest_user,
+        )
     };
 
     // 上下文缓存：系统提示必须逐字节稳定；Skills 目录紧随其后（启用集不变则同样稳定）。
@@ -105,12 +124,8 @@ pub async fn run_chat(
         messages.push(crate::compact::checkpoint_message(summary));
     }
     messages.extend(history_with_tool_replay(&history, &replay_calls));
-    let cfg = client::LlmConfig {
-        base_url: settings.base_url.clone(),
-        api_key: settings.api_key.clone(),
-        model: settings.model.clone(),
-    };
-    let native_vision = crate::llm::models::supports_vision(&cfg.model);
+    let cfg = client::LlmConfig::new(&settings.base_url, &settings.api_key, &settings.model);
+    let native_vision = settings.model_supports_vision;
     let mut tail = format!(
         "当前时间：{}",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S %A")
@@ -148,15 +163,9 @@ pub async fn run_chat(
             }));
         }
         trim_context(&app, &mut messages);
-        if let Ok(true) = crate::compact::compact_if_needed(
-            &app,
-            &http,
-            &cfg,
-            &settings,
-            &mut messages,
-            &cancel,
-        )
-        .await
+        if let Ok(true) =
+            crate::compact::compact_if_needed(&app, &http, &cfg, &settings, &mut messages, &cancel)
+                .await
         {
             let cover_until = history
                 .iter()
@@ -245,7 +254,6 @@ pub async fn run_chat(
         messages.push(assistant_msg);
 
         for (call_index, call) in resp.tool_calls.iter().enumerate() {
-            // 正在执行的工具让其跑完（保证文件操作一致性），在下一个工具前中断
             if cancel.is_cancelled() {
                 finalize_cancelled(
                     &app,
@@ -278,9 +286,93 @@ pub async fn run_chat(
             );
             let parsed_args: Value =
                 serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
-            let result = match tools::execute(&app, &call.name, &parsed_args, &cancel, session_id).await {
-                Ok(v) => v,
-                Err(e) => json!({ "error": e.to_string() }),
+            // Jev/System One 不是主模型的替代品。主模型在复杂页面上负责补充候选和
+            // 参数，Jev 始终作为快速复核层参与；只有服务未配置/不可用时保持旧链路。
+            let system_one_review = if call.name.starts_with("browser_")
+                && call.name != "browser_status"
+                && settings.system_one_browser_assist
+                && crate::system_one::configured(&settings)
+            {
+                match crate::system_one::review_browser_action(
+                    &http,
+                    &settings,
+                    &user_goal,
+                    &call.name,
+                    &parsed_args,
+                )
+                .await
+                {
+                    Ok(review)
+                        if review.choice != "execute"
+                            && review.confidence >= settings.system_one_min_confidence =>
+                    {
+                        crate::llm::persist_usage(
+                            &app,
+                            "system_one_browser",
+                            &settings.system_one_model,
+                            &review.usage,
+                        );
+                        Some(json!({
+                            "error": "System One 建议先修正或补充证据，浏览器动作尚未执行",
+                            "system_one": {
+                                "decision": review.choice,
+                                "confidence": review.confidence,
+                                "probabilities": review.probabilities,
+                                "guidance": "请继续观察页面、提出更明确的候选动作后重试；不要绕过 Jev 复核。"
+                            }
+                        }))
+                    }
+                    Ok(review) => {
+                        crate::llm::persist_usage(
+                            &app,
+                            "system_one_browser",
+                            &settings.system_one_model,
+                            &review.usage,
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        log::warn!("System One 浏览器复核失败，沿用现有安全链路: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let execution = async {
+                if let Some(review) = system_one_review {
+                    Ok(review)
+                } else {
+                    tools::execute(&app, &call.name, &parsed_args, &cancel, session_id).await
+                }
+            };
+            let result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    let cancelled = json!({ "status": "cancelled", "error": "用户已中断" });
+                    let content = model_tool_content(&app, &call.name, &call.id, &cancelled);
+                    {
+                        let state = app.state::<crate::AppState>();
+                        state.db.finish_tool_call(tool_record_id, "cancelled", &content)?;
+                    }
+                    let _ = app.emit(
+                        "tool-status",
+                        json!({ "name": call.name, "status": "cancelled", "result": cancelled }),
+                    );
+                    finalize_cancelled(
+                        &app,
+                        session_id,
+                        request_message_id,
+                        &resp.content,
+                        &tool_log,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                result = execution => match result {
+                    Ok(v) => v,
+                    Err(e) => json!({ "error": e.to_string() }),
+                },
             };
             let tool_status = if is_failed_tool_result(&result) {
                 "error"
@@ -358,7 +450,7 @@ fn request_body(
     messages: &[Value],
     allow_tools: bool,
 ) -> Value {
-    let native_vision = crate::llm::models::supports_vision(&cfg.model);
+    let native_vision = settings.model_supports_vision;
     let api_messages = if native_vision {
         prepare_messages_for_api(messages)
     } else {
@@ -851,9 +943,9 @@ pub(crate) fn prepare_messages_for_api(messages: &[Value]) -> Vec<Value> {
         if role != "tool" {
             continue;
         }
-        let Some(path) =
-            crate::llm::models::image_path_from_tool_content(m.get("content").unwrap_or(&Value::Null))
-        else {
+        let Some(path) = crate::llm::models::image_path_from_tool_content(
+            m.get("content").unwrap_or(&Value::Null),
+        ) else {
             continue;
         };
         if embedded >= MAX_NATIVE_IMAGES || !seen.insert(path.clone()) {
@@ -1042,6 +1134,16 @@ mod tests {
             subagent_thinking_enabled: false,
             subagent_reasoning_effort: "low".into(),
             subagent_model: String::new(),
+            compact_model: String::new(),
+            context_window: 128_000,
+            model_supports_vision: false,
+            system_one_enabled: false,
+            system_one_base_url: "https://api.typesafe.ai/v1".into(),
+            system_one_api_key: String::new(),
+            system_one_model: "jev-latest".into(),
+            system_one_min_confidence: 0.75,
+            system_one_browser_assist: true,
+            system_one_context_assist: true,
             command_tools_enabled: true,
             permission_level: "balanced".into(),
             llm_profiles: vec![],
@@ -1095,6 +1197,16 @@ mod tests {
             subagent_thinking_enabled: false,
             subagent_reasoning_effort: "low".into(),
             subagent_model: String::new(),
+            compact_model: String::new(),
+            context_window: 128_000,
+            model_supports_vision: crate::llm::models::supports_vision(model),
+            system_one_enabled: false,
+            system_one_base_url: "https://api.typesafe.ai/v1".into(),
+            system_one_api_key: String::new(),
+            system_one_model: "jev-latest".into(),
+            system_one_min_confidence: 0.75,
+            system_one_browser_assist: true,
+            system_one_context_assist: true,
             command_tools_enabled: true,
             permission_level: "balanced".into(),
             llm_profiles: vec![],
@@ -1111,8 +1223,8 @@ mod tests {
     }
 
     #[test]
-    fn flash_keeps_read_image_and_does_not_switch_model() {
-        let settings = sample_settings("deepseek-v4-flash");
+    fn deepseek_pro_keeps_read_image_and_does_not_switch_model() {
+        let settings = sample_settings("deepseek-v4-pro");
         let cfg = client::LlmConfig {
             base_url: settings.base_url.clone(),
             api_key: String::new(),
@@ -1127,10 +1239,13 @@ mod tests {
             })],
             true,
         );
-        assert_eq!(body["model"], "deepseek-v4-flash");
+        assert_eq!(body["model"], "deepseek-v4-pro");
         assert!(tool_names(&body).iter().any(|n| n == "read_image"));
         assert!(tool_names(&body).iter().any(|n| n == "ocr_image"));
-        assert!(body["messages"][0]["content"].as_str().unwrap().contains("a.png"));
+        assert!(body["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("a.png"));
     }
 
     #[test]
@@ -1154,7 +1269,10 @@ mod tests {
         assert!(!tool_names(&body).iter().any(|n| n == "read_image"));
         assert!(tool_names(&body).iter().any(|n| n == "ocr_image"));
         // 文件不存在时仍发文本，不把损坏的 image_url 塞进请求
-        assert!(body["messages"][0]["content"].as_str().unwrap().contains("missing.png"));
+        assert!(body["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("missing.png"));
     }
 
     #[test]
@@ -1314,7 +1432,8 @@ mod tests {
         let raw = "日报已写好。\n\n【工具预算耗尽前已完成的工具调用与结果】\n- run_command({\"argv\":[\"lark-cli\",\"base\",\"+record-list\"]}) → {\"ok\":true}\n（以上资料已收集完毕，用户说「继续」时请直接基于它们推进，不要重复收集）";
         assert_eq!(visible_assistant_content(raw), "日报已写好。");
 
-        let interrupted = "【中断前已完成的工具调用与结果】\n- load_skill({\"name\":\"windows-cli\"}) → {}";
+        let interrupted =
+            "【中断前已完成的工具调用与结果】\n- load_skill({\"name\":\"windows-cli\"}) → {}";
         assert_eq!(visible_assistant_content(interrupted), "（已中断）");
 
         assert_eq!(visible_assistant_content("普通回复"), "普通回复");

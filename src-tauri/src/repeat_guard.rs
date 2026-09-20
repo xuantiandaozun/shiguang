@@ -14,6 +14,7 @@ const TRANSPARENT_TOOLS: &[&str] = &[
     "list_profile",
     "lookup_cache",
     "get_tool_call_history",
+    "recall_session",
 ];
 
 #[derive(Debug, Default)]
@@ -53,7 +54,9 @@ fn chain_key(tool_name: &str, arguments: &str) -> String {
 
 fn canonical_args(raw: &str) -> String {
     match serde_json::from_str::<Value>(raw.trim()) {
-        Ok(value) => serde_json::to_string(&sort_value(&value)).unwrap_or_else(|_| raw.trim().to_string()),
+        Ok(value) => {
+            serde_json::to_string(&sort_value(&value)).unwrap_or_else(|_| raw.trim().to_string())
+        }
         Err(_) => raw.trim().to_string(),
     }
 }
@@ -97,7 +100,10 @@ fn args_preview(arguments: &str) -> String {
     let omitted = total - ARGS_PREVIEW_CHARS;
     format!(
         "{}…（另有 {omitted} 字）",
-        canonical.chars().take(ARGS_PREVIEW_CHARS).collect::<String>()
+        canonical
+            .chars()
+            .take(ARGS_PREVIEW_CHARS)
+            .collect::<String>()
     )
 }
 
@@ -157,7 +163,10 @@ mod tests {
         assert!(g.observe("read_file", r#"{"path":"a.txt"}"#).is_none());
         assert!(g.observe("read_file", r#"{"path":"b.txt"}"#).is_none());
         assert!(g.observe("read_file", r#"{"path":"b.txt"}"#).is_none());
-        assert!(g.observe("read_file", r#"{"path":"b.txt"}"#).unwrap().contains("完全相同"));
+        assert!(g
+            .observe("read_file", r#"{"path":"b.txt"}"#)
+            .unwrap()
+            .contains("完全相同"));
     }
 
     #[test]

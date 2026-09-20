@@ -260,7 +260,10 @@ mod tests {
         let s = long_text(10_000);
         let bound = bound_text(&s, FRESH, Some("temp/tool-spills/a.txt"));
         assert!(bound.truncated);
-        assert_eq!(bound.omitted_chars, 10_000 - FRESH_HEAD_CHARS - FRESH_TAIL_CHARS);
+        assert_eq!(
+            bound.omitted_chars,
+            10_000 - FRESH_HEAD_CHARS - FRESH_TAIL_CHARS
+        );
         assert!(bound.text.chars().count() <= FRESH_THRESHOLD_CHARS);
         assert!(bound.text.starts_with(&long_text(FRESH_HEAD_CHARS)));
         assert!(bound.text.ends_with(&long_text(FRESH_TAIL_CHARS)));
@@ -279,10 +282,7 @@ mod tests {
 
     #[test]
     fn spill_then_bound_writes_file_and_points_to_it() {
-        let dir = std::env::temp_dir().join(format!(
-            "deskhelper-retention-{}",
-            unique_suffix()
-        ));
+        let dir = std::env::temp_dir().join(format!("deskhelper-retention-{}", unique_suffix()));
         let text = long_text(9_000);
         let out = bound_and_spill(Some(&dir), "browser_read", "call-1", &text, FRESH);
         assert!(out.contains(OMISSION_MARK));
@@ -303,10 +303,8 @@ mod tests {
 
     #[test]
     fn restale_reads_full_spill_instead_of_preview() {
-        let dir = std::env::temp_dir().join(format!(
-            "deskhelper-retention-restale-{}",
-            unique_suffix()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("deskhelper-retention-restale-{}", unique_suffix()));
         let full = long_text(9_000);
         let first = bound_and_spill(Some(&dir), "browser_read", "call-2", &full, FRESH);
         assert!(first.contains(OMISSION_MARK));
@@ -320,10 +318,8 @@ mod tests {
 
     #[test]
     fn trim_old_tool_messages_keeps_recent_and_prunes_old() {
-        let dir = std::env::temp_dir().join(format!(
-            "deskhelper-retention-trim-{}",
-            unique_suffix()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("deskhelper-retention-trim-{}", unique_suffix()));
         let huge = json!({
             "role": "tool",
             "tool_call_id": "old",

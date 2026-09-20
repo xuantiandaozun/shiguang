@@ -21,6 +21,9 @@ pub struct LlmProfile {
     pub thinking_enabled: bool,
     #[serde(default = "default_reasoning_effort")]
     pub reasoning_effort: String,
+    /// 自定义模型的识图能力覆盖；None 时继续按内置目录/模型名推断。
+    #[serde(default)]
+    pub supports_vision: Option<bool>,
 }
 
 fn default_reasoning_effort() -> String {
@@ -58,6 +61,30 @@ pub struct Settings {
     pub subagent_reasoning_effort: String,
     /// 子代理模型，留空则跟随主模型
     pub subagent_model: String,
+    /// 摘要压缩模型；留空时跟随主模型。
+    #[serde(default)]
+    pub compact_model: String,
+    /// 当前主模型上下文窗口，用于按预算而不是固定字节数触发压缩。
+    #[serde(default = "default_context_window")]
+    pub context_window: usize,
+    /// 当前主模型最终是否支持图像输入，由激活的档案派生。
+    #[serde(default)]
+    pub model_supports_vision: bool,
+    // ---- System One（高速结构化决策，不是聊天模型）----
+    #[serde(default)]
+    pub system_one_enabled: bool,
+    #[serde(default = "default_system_one_base_url")]
+    pub system_one_base_url: String,
+    #[serde(default)]
+    pub system_one_api_key: String,
+    #[serde(default = "default_system_one_model")]
+    pub system_one_model: String,
+    #[serde(default = "default_system_one_confidence")]
+    pub system_one_min_confidence: f64,
+    #[serde(default = "default_true")]
+    pub system_one_browser_assist: bool,
+    #[serde(default = "default_true")]
+    pub system_one_context_assist: bool,
     /// 允许 AI 执行命令行（后台任务类工具总开关）
     pub command_tools_enabled: bool,
     /// confirmation: 每次有副作用都确认；balanced: 仅敏感/危险动作确认；autopilot: 非危险动作自动执行
@@ -73,6 +100,22 @@ pub struct Settings {
     pub profile_city: String,
     /// 应用临时目录（只读展示，不入库；路径由 app_data/temp 决定）
     pub temp_path: String,
+}
+
+fn default_context_window() -> usize {
+    128_000
+}
+fn default_system_one_base_url() -> String {
+    "https://api.typesafe.ai/v1".into()
+}
+fn default_system_one_model() -> String {
+    "jev-latest".into()
+}
+fn default_system_one_confidence() -> f64 {
+    0.75
+}
+fn default_true() -> bool {
+    true
 }
 
 pub fn load_settings(db: &Db) -> Settings {
@@ -131,6 +174,36 @@ pub fn load_settings(db: &Db) -> Settings {
             _ => "low".to_string(),
         },
         subagent_model: get("subagent_model", ""),
+        compact_model: get("compact_model", ""),
+        context_window: get("context_window", "128000")
+            .parse()
+            .unwrap_or(128_000)
+            .clamp(16_000, 20_000_000),
+        model_supports_vision: false,
+        system_one_enabled: db
+            .get_setting("system_one_enabled")
+            .ok()
+            .flatten()
+            .is_some_and(|v| v == "true"),
+        system_one_base_url: get("system_one_base_url", "https://api.typesafe.ai/v1"),
+        system_one_api_key: get("system_one_api_key", ""),
+        system_one_model: get("system_one_model", "jev-latest"),
+        system_one_min_confidence: get("system_one_min_confidence", "0.75")
+            .parse::<f64>()
+            .unwrap_or(0.75)
+            .clamp(0.0, 1.0),
+        system_one_browser_assist: db
+            .get_setting("system_one_browser_assist")
+            .ok()
+            .flatten()
+            .map(|v| v == "true")
+            .unwrap_or(true),
+        system_one_context_assist: db
+            .get_setting("system_one_context_assist")
+            .ok()
+            .flatten()
+            .map(|v| v == "true")
+            .unwrap_or(true),
         command_tools_enabled: db
             .get_setting("command_tools_enabled")
             .ok()
@@ -206,6 +279,12 @@ fn apply_active_llm_profile(settings: &mut Settings) {
         "low" | "high" | "max" => effort.to_string(),
         _ => "high".to_string(),
     };
+    settings.model_supports_vision = if p.catalog_model == "__custom__" {
+        p.supports_vision
+            .unwrap_or_else(|| crate::llm::models::supports_vision(&p.model))
+    } else {
+        crate::llm::models::supports_vision(&p.model)
+    };
 }
 
 /// 把旧的单套 base_url/api_key/model 迁成可切换档案；之后以档案为源，回写到生效字段。
@@ -237,6 +316,7 @@ fn hydrate_llm_profiles(db: &Db, settings: &mut Settings) {
             model: settings.model.clone(),
             thinking_enabled: settings.thinking_enabled,
             reasoning_effort: settings.reasoning_effort.clone(),
+            supports_vision: None,
         });
         settings.llm_profiles = profiles;
         settings.active_llm_profile_id = id;
@@ -245,6 +325,9 @@ fn hydrate_llm_profiles(db: &Db, settings: &mut Settings) {
     }
 
     settings.llm_profiles = profiles;
+    for p in &mut settings.llm_profiles {
+        p.model = crate::llm::provider_headers::sanitize_model(&p.base_url, &p.model);
+    }
     settings.active_llm_profile_id = if settings.llm_profiles.iter().any(|p| p.id == stored_active)
     {
         stored_active
@@ -412,19 +495,16 @@ pub async fn send_chat_message(
     }
     let native_vision = {
         let settings = load_settings(&state.db);
-        crate::llm::models::supports_vision(&settings.model)
+        settings.model_supports_vision
     };
-    let composed = match compose_user_message(
-        &text,
-        attachments.as_deref().unwrap_or(&[]),
-        native_vision,
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            state.chat_busy.store(false, Ordering::SeqCst);
-            return Err(e);
-        }
-    };
+    let composed =
+        match compose_user_message(&text, attachments.as_deref().unwrap_or(&[]), native_vision) {
+            Ok(s) => s,
+            Err(e) => {
+                state.chat_busy.store(false, Ordering::SeqCst);
+                return Err(e);
+            }
+        };
     let session_id = state.db.current_session_id().map_err(|e| e.to_string())?;
     let msg_id = match state.db.save_chat(session_id, "user", &composed) {
         Ok(id) => id,
@@ -459,8 +539,8 @@ pub async fn send_chat_message(
     Ok(msg_id)
 }
 
-/// 中断当前正在生成的回复：流式输出立即停止（已生成的部分内容保留），
-/// 正在执行的工具会跑完当前这个再停，保证文件操作的一致性。
+/// 中断当前回复：模型连接/流式输出、正在执行的工具、子代理以及本轮启动的
+/// 后台命令都会收到取消信号；命令会强制结束整棵进程树。
 #[tauri::command]
 pub fn stop_chat_message(state: State<AppState>) -> Result<(), String> {
     let token = state.chat_cancel.lock().map_err(|e| e.to_string())?.take();
@@ -965,6 +1045,7 @@ pub fn save_settings(
             model: settings.model.clone(),
             thinking_enabled: settings.thinking_enabled,
             reasoning_effort: settings.reasoning_effort.clone(),
+            supports_vision: None,
         });
         settings.active_llm_profile_id = "legacy".into();
     }
@@ -1033,6 +1114,51 @@ pub fn save_settings(
     .map_err(|e| e.to_string())?;
     db.set_setting("subagent_model", settings.subagent_model.trim())
         .map_err(|e| e.to_string())?;
+    for (k, v) in [
+        ("compact_model", settings.compact_model.trim().to_string()),
+        (
+            "context_window",
+            settings
+                .context_window
+                .clamp(16_000, 20_000_000)
+                .to_string(),
+        ),
+        (
+            "system_one_base_url",
+            settings.system_one_base_url.trim().to_string(),
+        ),
+        (
+            "system_one_api_key",
+            settings.system_one_api_key.trim().to_string(),
+        ),
+        (
+            "system_one_model",
+            settings.system_one_model.trim().to_string(),
+        ),
+        (
+            "system_one_min_confidence",
+            settings
+                .system_one_min_confidence
+                .clamp(0.0, 1.0)
+                .to_string(),
+        ),
+    ] {
+        db.set_setting(k, &v).map_err(|e| e.to_string())?;
+    }
+    for (k, enabled) in [
+        ("system_one_enabled", settings.system_one_enabled),
+        (
+            "system_one_browser_assist",
+            settings.system_one_browser_assist,
+        ),
+        (
+            "system_one_context_assist",
+            settings.system_one_context_assist,
+        ),
+    ] {
+        db.set_setting(k, if enabled { "true" } else { "false" })
+            .map_err(|e| e.to_string())?;
+    }
     db.set_setting(
         "command_tools_enabled",
         if settings.command_tools_enabled {
@@ -1042,10 +1168,14 @@ pub fn save_settings(
         },
     )
     .map_err(|e| e.to_string())?;
-    db.set_setting("permission_level", match settings.permission_level.as_str() {
-        "confirmation" | "balanced" | "autopilot" => settings.permission_level.as_str(),
-        _ => "balanced",
-    }).map_err(|e| e.to_string())?;
+    db.set_setting(
+        "permission_level",
+        match settings.permission_level.as_str() {
+            "confirmation" | "balanced" | "autopilot" => settings.permission_level.as_str(),
+            _ => "balanced",
+        },
+    )
+    .map_err(|e| e.to_string())?;
     for (k, v) in [
         ("profile_name", settings.profile_name.trim()),
         ("profile_alias", settings.profile_alias.trim()),
@@ -1182,50 +1312,104 @@ fn validate_workflow(input: &AutomationWorkflowInput) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn list_automation_workflows(state: State<AppState>) -> Result<Vec<crate::db::AutomationWorkflow>, String> {
-    state.db.automation_workflow_list().map_err(|e| e.to_string())
+pub fn list_automation_workflows(
+    state: State<AppState>,
+) -> Result<Vec<crate::db::AutomationWorkflow>, String> {
+    state
+        .db
+        .automation_workflow_list()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn save_automation_workflow(app: AppHandle, state: State<AppState>, input: AutomationWorkflowInput) -> Result<crate::db::AutomationWorkflow, String> {
+pub fn save_automation_workflow(
+    app: AppHandle,
+    state: State<AppState>,
+    input: AutomationWorkflowInput,
+) -> Result<crate::db::AutomationWorkflow, String> {
     validate_workflow(&input)?;
-    let saved = state.db.automation_workflow_save(&crate::db::AutomationWorkflow {
-        id: input.id.unwrap_or(0), name: input.name, description: input.description, prompt: input.prompt,
-        schedule_rule: input.schedule_rule, next_run_at: input.next_run_at, enabled: input.enabled,
-        run_count: 0, last_run_at: None, created_at: String::new(), updated_at: String::new(),
-    }).map_err(|e| e.to_string())?;
+    let saved = state
+        .db
+        .automation_workflow_save(&crate::db::AutomationWorkflow {
+            id: input.id.unwrap_or(0),
+            name: input.name,
+            description: input.description,
+            prompt: input.prompt,
+            schedule_rule: input.schedule_rule,
+            next_run_at: input.next_run_at,
+            enabled: input.enabled,
+            run_count: 0,
+            last_run_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .map_err(|e| e.to_string())?;
     let _ = app.emit("automation-workflows-changed", ());
     Ok(saved)
 }
 
 #[tauri::command]
-pub fn delete_automation_workflow(app: AppHandle, state: State<AppState>, id: i64) -> Result<(), String> {
-    state.db.automation_workflow_delete(id).map_err(|e| e.to_string())?;
+pub fn delete_automation_workflow(
+    app: AppHandle,
+    state: State<AppState>,
+    id: i64,
+) -> Result<(), String> {
+    state
+        .db
+        .automation_workflow_delete(id)
+        .map_err(|e| e.to_string())?;
     let _ = app.emit("automation-workflows-changed", ());
     Ok(())
 }
 
 fn next_workflow_run(rule: &str, current: Option<&str>) -> Option<String> {
-    let current = current.and_then(|value| chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok())?;
-    let days = match rule { "daily" => 1, "weekly" => 7, _ => return None };
-    Some((current + chrono::Duration::days(days)).format("%Y-%m-%d %H:%M:%S").to_string())
+    let current = current
+        .and_then(|value| chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok())?;
+    let days = match rule {
+        "daily" => 1,
+        "weekly" => 7,
+        _ => return None,
+    };
+    Some(
+        (current + chrono::Duration::days(days))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+    )
 }
 
-pub async fn run_automation_workflow(app: AppHandle, id: i64, scheduled: bool) -> Result<i64, String> {
+pub async fn run_automation_workflow(
+    app: AppHandle,
+    id: i64,
+    scheduled: bool,
+) -> Result<i64, String> {
     let state = app.state::<AppState>();
-    let workflow = state.db.automation_workflow_get(id).map_err(|e| e.to_string())?
+    let workflow = state
+        .db
+        .automation_workflow_get(id)
+        .map_err(|e| e.to_string())?
         .ok_or_else(|| "工作流不存在".to_string())?;
-    if scheduled && !workflow.enabled { return Err("工作流已停用".into()); }
+    if scheduled && !workflow.enabled {
+        return Err("工作流已停用".into());
+    }
     // 定时工作流不应在当前对话忙碌时被标记为已运行；保留到下一轮调度重试。
     if state.chat_busy.load(Ordering::SeqCst) {
         return Err("聊天正在处理另一项任务，将在下一次调度时重试".into());
     }
     let next = next_workflow_run(&workflow.schedule_rule, workflow.next_run_at.as_deref());
-    state.db.mark_automation_workflow_run(id, next.as_deref()).map_err(|e| e.to_string())?;
+    state
+        .db
+        .mark_automation_workflow_run(id, next.as_deref())
+        .map_err(|e| e.to_string())?;
     let _ = app.emit("automation-workflows-changed", ());
-    let origin = if scheduled { "定时触发" } else { "手动执行" };
+    let origin = if scheduled {
+        "定时触发"
+    } else {
+        "手动执行"
+    };
     let result = send_chat_message(app.clone(), format!("【运行工作流：{}｜{}】\n这是一次自主执行任务，不是预设脚本，也不是 Skill。请像处理聊天请求一样，依据目标自行规划并使用当前可用的全部工具完成工作；不要等待用户逐步发送下一条指令。按当前权限策略直接执行允许的操作，仅在危险、不可逆、提权或范围不明时确认。\n\n工作流目标与约束：\n{}", workflow.name, origin, workflow.prompt), None).await;
-    if result.is_ok() { windows::show_chat(&app); }
+    if result.is_ok() {
+        windows::show_chat(&app);
+    }
     result
 }
 
@@ -1235,13 +1419,22 @@ pub async fn run_automation_workflow_cmd(app: AppHandle, id: i64) -> Result<i64,
 }
 
 #[tauri::command]
-pub fn list_browser_recipes_cmd(state: State<AppState>) -> Result<Vec<crate::db::BrowserRecipe>, String> {
+pub fn list_browser_recipes_cmd(
+    state: State<AppState>,
+) -> Result<Vec<crate::db::BrowserRecipe>, String> {
     state.db.browser_recipe_list().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn delete_browser_recipe_cmd(app: AppHandle, state: State<AppState>, id: i64) -> Result<(), String> {
-    state.db.browser_recipe_delete(id).map_err(|e| e.to_string())?;
+pub fn delete_browser_recipe_cmd(
+    app: AppHandle,
+    state: State<AppState>,
+    id: i64,
+) -> Result<(), String> {
+    state
+        .db
+        .browser_recipe_delete(id)
+        .map_err(|e| e.to_string())?;
     let _ = app.emit("browser-recipes-changed", ());
     Ok(())
 }
@@ -1390,8 +1583,25 @@ mod llm_profile_tests {
     }
 
     #[test]
+    fn custom_profile_can_override_vision_capability() {
+        let (db, path) = test_db();
+        db.set_setting(
+            "llm_profiles",
+            r#"[{"id":"custom","name":"自定义","base_url":"https://api.example.com/v1","api_key":"sk-test","catalog_model":"__custom__","model":"step-3.7-flash","thinking_enabled":false,"reasoning_effort":"high","supports_vision":true}]"#,
+        )
+        .unwrap();
+        db.set_setting("active_llm_profile_id", "custom").unwrap();
+
+        let s = load_settings(&db);
+        assert_eq!(s.model, "step-3.7-flash");
+        assert!(s.model_supports_vision);
+        cleanup(db, &path);
+    }
+
+    #[test]
     fn compose_user_message_hints_native_vision() {
-        let img = std::env::temp_dir().join(format!("shiguang-compose-{}.png", uuid::Uuid::new_v4()));
+        let img =
+            std::env::temp_dir().join(format!("shiguang-compose-{}.png", uuid::Uuid::new_v4()));
         std::fs::write(&img, b"x").unwrap();
         let path = img.to_string_lossy().replace('\\', "/");
         let native = compose_user_message("看图", &[path.clone()], true).unwrap();

@@ -1,16 +1,20 @@
 import { useEffect, useRef, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import { ipc, onEvent } from "../lib/ipc";
 import type { LlmProfile, ProfileEntry, Settings } from "../lib/ipc";
 import {
   CUSTOM_CATALOG_MODEL,
   PROVIDER_GROUPS,
   PROVIDER_PRESETS,
+  listedProviderPresets,
   applyProviderPreset,
   bindingSummary,
   catalogByGroup,
   catalogForProvider,
   catalogOptionLabel,
   catalogSupportsVision,
+  catalogContextWindow,
   catalogVisionModels,
   inferCatalogModel,
   llmProfileStatus,
@@ -54,7 +58,49 @@ function emptyProfile(name = "自定义"): LlmProfile {
     model: "",
     thinking_enabled: false,
     reasoning_effort: "high",
+    supports_vision: null,
   };
+}
+
+function profileSupportsVision(profile: LlmProfile): boolean {
+  return profileCatalogModel(profile) === CUSTOM_CATALOG_MODEL
+    ? profile.supports_vision ?? catalogSupportsVision(CUSTOM_CATALOG_MODEL, profile.model)
+    : catalogSupportsVision(profileCatalogModel(profile), profile.model);
+}
+
+function formatContextWindow(value: number): string {
+  if (value >= 1_000_000 && value % 1_000_000 === 0) return `${value / 1_000_000}m`;
+  if (value >= 1_000 && value % 1_000 === 0) return `${value / 1_000}k`;
+  return String(value);
+}
+
+function parseContextWindow(value: string): number | null {
+  const match = value.trim().toLowerCase().match(/^(\d+(?:\.\d+)?)\s*([km]?)$/);
+  if (!match) return null;
+  const multiplier = match[2] === "m" ? 1_000_000 : match[2] === "k" ? 1_000 : 1;
+  const parsed = Math.round(Number(match[1]) * multiplier);
+  return Number.isFinite(parsed) && parsed >= 16_000 && parsed <= 20_000_000 ? parsed : null;
+}
+
+function ContextWindowInput({ value, disabled, onChange }: { value: number; disabled?: boolean; onChange: (value: number) => void }) {
+  const [text, setText] = useState(() => formatContextWindow(value));
+  const [invalid, setInvalid] = useState(false);
+  useEffect(() => setText(formatContextWindow(value)), [value]);
+  const commit = () => {
+    const parsed = parseContextWindow(text);
+    if (parsed === null) { setInvalid(true); return; }
+    setInvalid(false);
+    setText(formatContextWindow(parsed));
+    onChange(parsed);
+  };
+  return <>
+    <input type="text" inputMode="decimal" value={text} disabled={disabled}
+      onChange={(e) => { setText(e.target.value); setInvalid(false); }}
+      onBlur={commit} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+      placeholder="例如 256k、1m" aria-invalid={invalid}
+      className={`${INPUT_CLASS} disabled:opacity-60 disabled:cursor-not-allowed ${invalid ? "border-rose-500" : ""}`} />
+    {invalid && <div className="text-[11px] mt-1 text-rose-400">请输入 16k～20m，例如 128k、256k 或 1m</div>}
+  </>;
 }
 
 function CatalogModelSelect({
@@ -195,10 +241,15 @@ export default function SettingsTab() {
       .getSettings()
       .then((s) => {
         const profiles = migrateSettingsProfiles(s.llm_profiles ?? []);
+        const active = profiles.find((p) => p.id === s.active_llm_profile_id);
+        const automaticWindow = active
+          ? catalogContextWindow(profileCatalogModel(active), active.model)
+          : undefined;
         setSettings({
           ...s,
           llm_profiles: profiles,
           active_llm_profile_id: s.active_llm_profile_id ?? "",
+          context_window: automaticWindow ?? s.context_window,
           vision_catalog_model:
             s.vision_catalog_model ||
             (s.vision_model
@@ -243,7 +294,10 @@ export default function SettingsTab() {
       thinking_enabled: false,
       reasoning_effort: "high",
     });
-  const chatSeesImages = catalogSupportsVision(chatCatalogId, settings.model);
+  const activeChatProfile = settings.llm_profiles?.find((p) => p.id === settings.active_llm_profile_id);
+  const chatSeesImages = activeChatProfile
+    ? profileSupportsVision(activeChatProfile)
+    : catalogSupportsVision(chatCatalogId, settings.model);
 
   return (
     <div className="space-y-5 max-w-2xl">
@@ -263,6 +317,80 @@ export default function SettingsTab() {
           }
         }}
       />
+
+      <section className="space-y-2.5 rounded-xl border border-sky-500/20 bg-sky-500/[0.04] p-4">
+        <div className="text-sm font-medium text-slate-100">
+          智能加速
+          <span className="ml-2 text-xs font-normal text-slate-500">
+            用高速结构化判断辅助浏览器和上下文管理；复杂页面仍由主模型补充候选，再交给加速模型复核
+          </span>
+        </div>
+        <label className="flex items-center gap-2.5 text-sm text-slate-300 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={settings.system_one_enabled}
+            onChange={(e) => update({ system_one_enabled: e.target.checked })}
+            className="w-4 h-4 accent-sky-500"
+          />
+          启用 TypeSafe System One
+        </label>
+        {settings.system_one_enabled && (
+          <div className="space-y-2.5 border-l border-slate-700 pl-3">
+            <label className="block">
+              <div className="text-xs text-slate-400 mb-1">API 地址</div>
+              <input value={settings.system_one_base_url} onChange={(e) => update({ system_one_base_url: e.target.value })} className={INPUT_CLASS} />
+            </label>
+            <label className="block">
+              <div className="text-xs text-slate-400 mb-1">API Key（仅保存在本机）</div>
+              <input type="password" value={settings.system_one_api_key} onChange={(e) => update({ system_one_api_key: e.target.value })} placeholder="输入 TypeSafe API Key" className={INPUT_CLASS} />
+            </label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <label className="block">
+                <div className="text-xs text-slate-400 mb-1">模型</div>
+                <input value={settings.system_one_model} onChange={(e) => update({ system_one_model: e.target.value })} placeholder="jev-latest" className={INPUT_CLASS} />
+              </label>
+              <label className="block">
+                <div className="text-xs text-slate-400 mb-1">自动采纳最低置信度</div>
+                <input type="number" min="0.5" max="1" step="0.05" value={settings.system_one_min_confidence} onChange={(e) => update({ system_one_min_confidence: Number(e.target.value) })} className={INPUT_CLASS} />
+              </label>
+            </div>
+            <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer">
+              <input type="checkbox" checked={settings.system_one_browser_assist} onChange={(e) => update({ system_one_browser_assist: e.target.checked })} className="w-4 h-4 accent-sky-500" />
+              浏览器动作持续复核
+            </label>
+            <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer">
+              <input type="checkbox" checked={settings.system_one_context_assist} onChange={(e) => update({ system_one_context_assist: e.target.checked })} className="w-4 h-4 accent-sky-500" />
+              上下文智能保留（按内容决定近期原文保留量）
+            </label>
+          </div>
+        )}
+      </section>
+
+      <section className="space-y-2.5">
+        <div className="text-sm font-medium text-slate-100">
+          上下文与压缩
+          <span className="ml-2 text-xs font-normal text-slate-500">按模型窗口的 80% 动态触发，不再使用固定 64KB 阈值</span>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          <label className="block">
+            <div className="text-xs text-slate-400 mb-1">主模型上下文窗口（Token）</div>
+            {(() => {
+              const current = settings.llm_profiles.find((p) => p.id === settings.active_llm_profile_id);
+              const automatic = current ? catalogContextWindow(profileCatalogModel(current), current.model) : undefined;
+              return <>
+                <ContextWindowInput value={automatic ?? settings.context_window} disabled={Boolean(automatic)} onChange={(context_window) => update({ context_window })} />
+                <div className="text-[11px] mt-1 text-slate-500">
+                  {automatic ? `已由统一模型目录自动维护：${formatContextWindow(automatic)}` : "支持 128k、256k、1m 等写法，保存时自动换算为 Token"}
+                </div>
+              </>;
+            })()}
+          </label>
+          <label className="block">
+            <div className="text-xs text-slate-400 mb-1">摘要模型（留空跟随主模型）</div>
+            <input value={settings.compact_model} onChange={(e) => update({ compact_model: e.target.value })} placeholder="留空跟随主模型" className={INPUT_CLASS} />
+          </label>
+        </div>
+      </section>
 
       <section className="space-y-2.5">
         <div className="text-sm font-medium text-slate-100">
@@ -512,6 +640,8 @@ export default function SettingsTab() {
         </label>
       </section>
 
+      <ManualUpdateSection />
+
       <BrowserExtensionSection />
 
       <TempCleanupSection tempPath={settings.temp_path} />
@@ -527,6 +657,102 @@ export default function SettingsTab() {
         {error && <span className="text-xs text-rose-400">{error}</span>}
       </div>
     </div>
+  );
+}
+
+function ManualUpdateSection() {
+  const [currentVersion, setCurrentVersion] = useState("…");
+  const [available, setAvailable] = useState<Update | null>(null);
+  const [status, setStatus] = useState<"idle" | "checking" | "downloading">("idle");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [progress, setProgress] = useState<number | null>(null);
+
+  useEffect(() => {
+    getVersion().then(setCurrentVersion).catch(() => setCurrentVersion("未知"));
+  }, []);
+
+  const checkNow = async () => {
+    setStatus("checking");
+    setError("");
+    setMessage("");
+    if (available) await available.close().catch(() => undefined);
+    setAvailable(null);
+    try {
+      const update = await check({ timeout: 20_000 });
+      if (update) {
+        setAvailable(update);
+        setMessage(`发现新版本 ${update.version}`);
+      } else {
+        setMessage("当前已是最新版本");
+      }
+    } catch (e) {
+      setError(`检查更新失败：${String(e)}`);
+    } finally {
+      setStatus("idle");
+    }
+  };
+
+  const install = async () => {
+    if (!available) return;
+    setStatus("downloading");
+    setError("");
+    setMessage("正在下载更新…");
+    setProgress(0);
+    let downloaded = 0;
+    let total: number | undefined;
+    try {
+      await available.downloadAndInstall((event) => {
+        if (event.event === "Started") total = event.data.contentLength;
+        if (event.event === "Progress") downloaded += event.data.chunkLength;
+        if (event.event === "Finished") setProgress(100);
+        else if (total) setProgress(Math.min(99, Math.round((downloaded / total) * 100)));
+      }, { timeout: 120_000, restartAfterInstall: true });
+    } catch (e) {
+      setError(`更新失败：${String(e)}`);
+      setMessage("");
+      setStatus("idle");
+      setProgress(null);
+    }
+  };
+
+  const dismiss = async () => {
+    await available?.close().catch(() => undefined);
+    setAvailable(null);
+    setMessage("");
+  };
+
+  return (
+    <section className="space-y-2.5">
+      <div className="text-sm font-medium text-slate-100">软件更新</div>
+      <div className="flex flex-wrap items-center gap-2.5">
+        <span className="text-xs text-slate-500">当前版本：v{currentVersion}</span>
+        <button type="button" onClick={checkNow} disabled={status !== "idle"}
+          className="px-3 py-1.5 rounded text-xs bg-slate-700 text-slate-200 hover:bg-slate-600 disabled:opacity-50 transition">
+          {status === "checking" ? "检查中…" : "检查更新"}
+        </button>
+      </div>
+      <div className="text-[11px] text-slate-500">仅在点击后检查，不会自动更新或强制升级。</div>
+      {available && status !== "downloading" && (
+        <div className="rounded-lg border border-sky-500/30 bg-sky-500/[0.06] px-3 py-2.5 space-y-2">
+          <div className="text-sm text-slate-200">{message}</div>
+          {available.body && <div className="text-xs text-slate-400 whitespace-pre-wrap max-h-28 overflow-y-auto">{available.body}</div>}
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={install} className="px-3 py-1.5 rounded text-xs font-medium bg-sky-500 text-white hover:bg-sky-400 transition">下载并安装</button>
+            <button type="button" onClick={dismiss} className="px-3 py-1.5 rounded text-xs text-slate-400 hover:text-slate-200 transition">稍后再说</button>
+          </div>
+        </div>
+      )}
+      {status === "downloading" && (
+        <div className="space-y-1.5">
+          <div className="flex justify-between text-xs text-slate-400"><span>{message}</span><span>{progress === null ? "" : `${progress}%`}</span></div>
+          <div className="h-1.5 rounded-full bg-slate-800 overflow-hidden"><div className="h-full bg-sky-500 transition-all" style={{ width: `${progress ?? 8}%` }} /></div>
+          <div className="text-[11px] text-slate-500">下载完成后将退出拾光并启动安装程序。</div>
+        </div>
+      )}
+      {!available && message && <div className="text-xs text-emerald-400">{message}</div>}
+      {error && <div className="text-xs text-rose-400 break-all">{error}</div>}
+    </section>
   );
 }
 
@@ -568,6 +794,9 @@ function LlmProfilesSection({
   const replaceProfiles = (next: LlmProfile[], extra: Partial<Settings> = {}) => {
     const activeId = extra.active_llm_profile_id ?? settings.active_llm_profile_id;
     const current = next.find((p) => p.id === activeId);
+    const automaticWindow = current
+      ? catalogContextWindow(profileCatalogModel(current), current.model)
+      : undefined;
     update({
       llm_profiles: next,
       ...extra,
@@ -578,6 +807,8 @@ function LlmProfilesSection({
             model: current.model,
             thinking_enabled: current.thinking_enabled,
             reasoning_effort: current.reasoning_effort,
+            model_supports_vision: profileSupportsVision(current),
+            ...(automaticWindow ? { context_window: automaticWindow } : {}),
           }
         : {}),
     });
@@ -655,6 +886,9 @@ function LlmProfilesSection({
         model: synced.model,
         thinking_enabled: synced.thinking_enabled,
         reasoning_effort: synced.reasoning_effort,
+        model_supports_vision: profileSupportsVision(synced),
+        context_window:
+          catalogContextWindow(profileCatalogModel(synced), synced.model) ?? settings.context_window,
       };
       await onActivate(next);
     } finally {
@@ -811,7 +1045,11 @@ function LlmProfilesSection({
                     >
                       <option value="">自定义 / 未匹配预设</option>
                       {groups.flatMap((g) =>
-                        PROVIDER_PRESETS.filter((x) => x.group === g).map((x) => (
+                        PROVIDER_PRESETS.filter(
+                          (x) =>
+                            x.group === g &&
+                            (x.listed !== false || x.id === editingPreset?.id)
+                        ).map((x) => (
                           <option key={x.name} value={x.name}>
                             {x.group} · {x.name}
                           </option>
@@ -861,7 +1099,11 @@ function LlmProfilesSection({
                       baseUrl={p.base_url}
                       apiModel={p.model}
                       onChange={(catalogId, apiModel) =>
-                        patchProfile(p.id, { catalog_model: catalogId, model: apiModel })
+                        patchProfile(p.id, {
+                          catalog_model: catalogId,
+                          model: apiModel,
+                          ...(catalogId === CUSTOM_CATALOG_MODEL ? {} : { supports_vision: null }),
+                        })
                       }
                     />
                     {catalogSupportsVision(profileCatalogModel(p), p.model) && (
@@ -870,6 +1112,15 @@ function LlmProfilesSection({
                       </div>
                     )}
                   </label>
+                  {profileCatalogModel(p) === CUSTOM_CATALOG_MODEL && (
+                    <label className="flex items-start gap-2.5 text-sm text-slate-300 cursor-pointer">
+                      <input type="checkbox"
+                        checked={p.supports_vision ?? catalogSupportsVision(CUSTOM_CATALOG_MODEL, p.model)}
+                        onChange={(e) => patchProfile(p.id, { supports_vision: e.target.checked })}
+                        className="w-4 h-4 mt-0.5 accent-sky-500" />
+                      <span>支持图像输入<span className="block text-xs text-slate-500 mt-0.5">开启后，聊天中的图片和网页截图会直接发送给此模型</span></span>
+                    </label>
+                  )}
                   <label className="flex items-center gap-2.5 text-sm text-slate-300 cursor-pointer">
                     <input
                       type="checkbox"
@@ -938,7 +1189,9 @@ function LlmProfilesSection({
           <div key={g} className="space-y-1.5">
             <div className="text-[11px] text-slate-500">{g}</div>
             <div className="flex flex-wrap gap-1.5">
-              {PROVIDER_PRESETS.filter((p) => p.group === g).map((p) => (
+              {listedProviderPresets()
+                .filter((p) => p.group === g)
+                .map((p) => (
                 <button
                   key={p.name}
                   type="button"
@@ -950,21 +1203,6 @@ function LlmProfilesSection({
                 </button>
               ))}
             </div>
-            {g === "国内" && (
-              <div className="text-[11px] text-slate-500 leading-5">
-                AgentRouter 须用{" "}
-                <span className="text-slate-400">https://agentrouter.org/v1</span>
-                （OpenAI 兼容），不要用 Claude Code 文档里的根域名。Key 在{" "}
-                <button
-                  type="button"
-                  onClick={() => ipc.openExternal("https://agentrouter.org/console/token")}
-                  className="text-sky-400 hover:text-sky-300"
-                >
-                  控制台
-                </button>
-                获取。
-              </div>
-            )}
             {g === "火山" && (
               <div className="text-[11px] text-slate-500 leading-5">
                 Agent Plan 用 <span className="text-slate-400">/api/v3</span>

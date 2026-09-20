@@ -6,9 +6,12 @@ import {
   catalogModel,
   catalogOptionLabel,
   catalogSupportsVision,
+  catalogContextWindow,
   catalogVisionModels,
   inferCatalogModel,
   resolveApiModel,
+  sanitizeApiModel,
+  apiModelForProvider,
 } from "./model-catalog";
 import {
   PROVIDER_GROUPS,
@@ -26,13 +29,16 @@ export {
   catalogModel,
   catalogOptionLabel,
   catalogSupportsVision,
+  catalogContextWindow,
   catalogVisionModels,
   bindingSummary,
   inferCatalogModel,
+  sanitizeApiModel,
 } from "./model-catalog";
 export {
   PROVIDER_GROUPS,
   PROVIDER_PRESETS,
+  listedProviderPresets,
   providerByBaseUrl,
   providerById,
   normalizeBaseUrl,
@@ -97,16 +103,23 @@ export function syncProfileModel(profile: LlmProfile): LlmProfile {
   const catalogId = profileCatalogModel(profile);
   const model =
     catalogId === CUSTOM_CATALOG_MODEL
-      ? profile.model
+      ? sanitizeApiModel(profile.base_url, profile.model)
       : resolveApiModel(catalogId, profile.base_url, profile.model);
   return { ...profile, catalog_model: catalogId, model };
 }
 
 export function migrateProfile(profile: LlmProfile): LlmProfile {
-  const catalogId = profile.catalog_model?.trim()
-    ? profile.catalog_model.trim()
-    : inferCatalogModel(profile.model, profile.base_url);
-  return syncProfileModel({ ...profile, catalog_model: catalogId });
+  const model = sanitizeApiModel(profile.base_url, profile.model);
+  const provider = providerByBaseUrl(profile.base_url);
+  let catalogId = profile.catalog_model?.trim() || "";
+  const bound =
+    catalogId && catalogId !== CUSTOM_CATALOG_MODEL
+      ? apiModelForProvider(catalogId, provider?.id)
+      : undefined;
+  if (!catalogId || catalogId === CUSTOM_CATALOG_MODEL || (provider && !bound)) {
+    catalogId = inferCatalogModel(model || profile.model, profile.base_url);
+  }
+  return syncProfileModel({ ...profile, catalog_model: catalogId, model });
 }
 
 export function migrateSettingsProfiles(profiles: LlmProfile[]): LlmProfile[] {

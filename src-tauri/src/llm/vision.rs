@@ -60,6 +60,7 @@ pub async fn recognize_image(
         .filter(|s| !s.is_empty())
         .unwrap_or("请详细描述这张图片的内容。如果是软件/网页截图，说明界面上的关键信息；如果图中有文字，请完整提取。");
 
+    let model = crate::llm::provider_headers::sanitize_model(base_url, model);
     let body = json!({
         "model": model,
         "messages": [{
@@ -77,10 +78,10 @@ pub async fn recognize_image(
         client.post(&url).bearer_auth(api_key),
         base_url,
     )
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| anyhow!("请求视觉模型失败: {}", e))?;
+    .json(&body)
+    .send()
+    .await
+    .map_err(|e| anyhow!("请求视觉模型失败: {}", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();

@@ -17,15 +17,17 @@ fs.mkdirSync(destDir, { recursive: true });
 if (fs.existsSync(dest)) fs.unlinkSync(dest);
 
 const quote = (p) => `'${p.replace(/'/g, "''")}'`;
-const r = spawnSync(
-  "powershell.exe",
-  [
-    "-NoProfile",
-    "-Command",
-    `Compress-Archive -LiteralPath (Get-ChildItem -LiteralPath ${quote(src)} -File | ForEach-Object { $_.FullName }) -DestinationPath ${quote(dest)} -Force`,
-  ],
-  { stdio: "inherit" }
-);
+const archiveCommand = `Compress-Archive -LiteralPath (Get-ChildItem -LiteralPath ${quote(src)} -File | ForEach-Object { $_.FullName }) -DestinationPath ${quote(dest)} -Force`;
+// PowerShell 7 ships the archive module independently from the occasionally
+// broken Windows PowerShell module registration. Prefer it when installed.
+let r = spawnSync("pwsh.exe", ["-NoProfile", "-Command", archiveCommand], {
+  stdio: "inherit",
+});
+if (r.error?.code === "ENOENT") {
+  r = spawnSync("powershell.exe", ["-NoProfile", "-Command", archiveCommand], {
+    stdio: "inherit",
+  });
+}
 
 if (r.status !== 0 || !fs.existsSync(dest)) {
   console.error("打包浏览器扩展失败");

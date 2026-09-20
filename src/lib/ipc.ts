@@ -68,6 +68,8 @@ export interface LlmProfile {
   model: string;
   thinking_enabled: boolean;
   reasoning_effort: string;
+  /** 自定义模型是否支持直接接收图像；未设置时按模型目录/名称自动判断 */
+  supports_vision?: boolean | null;
 }
 
 export interface Settings {
@@ -90,6 +92,17 @@ export interface Settings {
   subagent_thinking_enabled: boolean;
   subagent_reasoning_effort: string;
   subagent_model: string;
+  compact_model: string;
+  context_window: number;
+  /** 当前生效主模型的最终识图能力（由档案配置派生） */
+  model_supports_vision: boolean;
+  system_one_enabled: boolean;
+  system_one_base_url: string;
+  system_one_api_key: string;
+  system_one_model: string;
+  system_one_min_confidence: number;
+  system_one_browser_assist: boolean;
+  system_one_context_assist: boolean;
   /** 子代理模型在统一目录中的 id */
   subagent_catalog_model?: string;
   command_tools_enabled: boolean;

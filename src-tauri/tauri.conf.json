@@ -73,6 +73,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "externalBin": ["binaries/shiguang-index-helper"],
     "resources": {
       "resources/browser-extension.zip": "browser-extension.zip"
@@ -94,5 +95,13 @@
     "category": "Utility",
     "shortDescription": "拾光 - AI 桌面助手",
     "longDescription": "拾光 —— 常驻 Windows 托盘的 AI 桌面助手：整理桌面文件、待办准时提醒、操作浏览器。"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNEQzRCNTY3QjAxMEI2QjMKUldTenRoQ3daN1hFUGRvWUNuejF5QlBJcFNCNFRNWGUvcGtnOWMzTlpGOGdEYzUxQ2x5STJWQTYK",
+      "endpoints": [
+        "https://github.com/xuantiandaozun/shiguang/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

@@ -114,7 +114,9 @@ impl SessionTodoHub {
     }
 
     fn lock_active(&self) -> std::sync::MutexGuard<'_, Option<i64>> {
-        self.active_session.lock().unwrap_or_else(|e| e.into_inner())
+        self.active_session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -123,9 +125,8 @@ pub fn parse_todos(args: &Value) -> Result<Vec<SessionTodo>> {
     let items: &[Value] = match args.get("todos") {
         Some(Value::Array(items)) => items,
         Some(Value::String(raw)) => {
-            let parsed: Value = serde_json::from_str(raw.trim()).map_err(|_| {
-                anyhow::anyhow!("todos 必须是对象数组，不要把数组序列化成字符串")
-            })?;
+            let parsed: Value = serde_json::from_str(raw.trim())
+                .map_err(|_| anyhow::anyhow!("todos 必须是对象数组，不要把数组序列化成字符串"))?;
             owned = parsed
                 .as_array()
                 .cloned()

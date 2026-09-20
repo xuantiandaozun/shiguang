@@ -22,6 +22,7 @@ pub mod repeat_guard;
 pub mod retention;
 pub mod session_todo;
 pub mod skills;
+pub mod system_one;
 pub mod tasks;
 pub mod tempfs;
 pub mod todo;
@@ -87,6 +88,7 @@ pub fn run() {
         }
     }
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             windows::show_chat(app);
         }))

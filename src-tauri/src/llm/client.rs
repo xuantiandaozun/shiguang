@@ -9,6 +9,23 @@ pub struct LlmConfig {
     pub model: String,
 }
 
+impl LlmConfig {
+    pub fn new(
+        base_url: impl AsRef<str>,
+        api_key: impl AsRef<str>,
+        model: impl AsRef<str>,
+    ) -> Self {
+        let base_url = base_url.as_ref().to_string();
+        let api_key = api_key.as_ref().to_string();
+        let model = crate::llm::provider_headers::sanitize_model(&base_url, model.as_ref());
+        Self {
+            base_url,
+            api_key,
+            model,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolCall {
     pub id: String,
@@ -113,14 +130,21 @@ pub async fn stream_chat(
     on_reasoning: impl Fn(&str),
 ) -> Result<AssistantResp> {
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-    let resp = crate::llm::provider_headers::apply_llm_headers(
+    let request = crate::llm::provider_headers::apply_llm_headers(
         client.post(&url).bearer_auth(&cfg.api_key),
         &cfg.base_url,
     )
-        .json(body)
-        .send()
-        .await
-        .map_err(|e| anyhow!("请求 LLM 失败: {}", e))?;
+    .json(body)
+    .send();
+    // 连接、等待响应头也属于模型“思考中”。此前只在收到响应头后的 SSE
+    // 读取阶段监听取消，导致服务端迟迟不返回响应头时停止按钮看起来无效。
+    let resp = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            return Ok(AssistantResp { interrupted: true, ..Default::default() });
+        }
+        result = request => result.map_err(|e| anyhow!("请求 LLM 失败: {}", e))?,
+    };
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -135,6 +159,7 @@ pub async fn stream_chat(
 
     loop {
         let chunk = tokio::select! {
+            biased;
             _ = cancel.cancelled() => {
                 out.interrupted = true;
                 return Ok(out);
@@ -169,17 +194,19 @@ pub async fn stream_chat(
             else {
                 continue;
             };
-            if let Some(rc) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
+            if let Some(rc) = delta
+                .get("reasoning_content")
+                .and_then(|c| c.as_str())
+                .or_else(|| delta.get("reasoning").and_then(|c| c.as_str()))
+            {
                 if !rc.is_empty() {
                     out.reasoning_content.push_str(rc);
                     on_reasoning(rc);
                 }
             }
-            if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                if !content.is_empty() {
-                    out.content.push_str(content);
-                    on_text(content);
-                }
+            if let Some(content) = delta_content_text(delta) {
+                out.content.push_str(&content);
+                on_text(&content);
             }
             if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                 for tc in tcs {
@@ -210,6 +237,31 @@ pub async fn stream_chat(
         }
     }
     Ok(out)
+}
+
+fn delta_content_text(delta: &Value) -> Option<String> {
+    let content = delta.get("content")?;
+    if let Some(s) = content.as_str() {
+        return if s.is_empty() {
+            None
+        } else {
+            Some(s.to_string())
+        };
+    }
+    let arr = content.as_array()?;
+    let mut out = String::new();
+    for part in arr {
+        if let Some(s) = part.as_str() {
+            out.push_str(s);
+        } else if let Some(s) = part.get("text").and_then(Value::as_str) {
+            out.push_str(s);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 #[cfg(test)]
@@ -262,5 +314,31 @@ mod tests {
         assert!(TokenUsage::from_response(&json!({ "delta": "hi" })).is_empty());
         assert!(TokenUsage::from_response(&json!({ "usage": null })).is_empty());
         assert!(TokenUsage::from_response(&json!({ "usage": {} })).is_empty());
+    }
+
+    #[test]
+    fn delta_content_reads_string_and_text_parts() {
+        assert_eq!(
+            delta_content_text(&json!({ "content": "ok" })).as_deref(),
+            Some("ok")
+        );
+        assert_eq!(
+            delta_content_text(&json!({
+                "content": [{ "type": "text", "text": "he" }, { "type": "text", "text": "llo" }]
+            }))
+            .as_deref(),
+            Some("hello")
+        );
+        assert_eq!(delta_content_text(&json!({ "content": "" })), None);
+    }
+
+    #[test]
+    fn new_config_strips_google_gemini_openrouter_prefix() {
+        let cfg = LlmConfig::new(
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "k",
+            "google/gemini-2.5-flash",
+        );
+        assert_eq!(cfg.model, "gemini-3.5-flash");
     }
 }

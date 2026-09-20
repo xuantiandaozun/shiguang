@@ -36,9 +36,8 @@ pub fn ensure_unpacked(app: &AppHandle) -> Result<PathBuf> {
 }
 
 pub fn info(app: &AppHandle) -> ExtensionInfo {
-    let path = ensure_unpacked(app).unwrap_or_else(|_| {
-        install_dir_dest(app).unwrap_or_else(dev_extension_dir)
-    });
+    let path = ensure_unpacked(app)
+        .unwrap_or_else(|_| install_dir_dest(app).unwrap_or_else(dev_extension_dir));
     ExtensionInfo {
         ready: path.join("manifest.json").is_file(),
         path: path.to_string_lossy().replace('\\', "/"),
@@ -50,10 +49,11 @@ fn install_dir_dest(app: &AppHandle) -> Option<PathBuf> {
 }
 
 fn exe_dir(app: &AppHandle) -> Option<PathBuf> {
-    app.path()
-        .resource_dir()
-        .ok()
-        .or_else(|| std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())))
+    app.path().resource_dir().ok().or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    })
 }
 
 fn find_zip(app: &AppHandle) -> Option<PathBuf> {
@@ -61,7 +61,10 @@ fn find_zip(app: &AppHandle) -> Option<PathBuf> {
     if let Ok(dir) = app.path().resource_dir() {
         cands.push(dir.join(ZIP_NAME));
     }
-    if let Ok(p) = app.path().resolve(ZIP_NAME, tauri::path::BaseDirectory::Resource) {
+    if let Ok(p) = app
+        .path()
+        .resolve(ZIP_NAME, tauri::path::BaseDirectory::Resource)
+    {
         cands.push(p);
     }
     if let Some(dir) = exe_dir(app) {
@@ -71,14 +74,15 @@ fn find_zip(app: &AppHandle) -> Option<PathBuf> {
 }
 
 fn dev_extension_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join(DIR_NAME)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(DIR_NAME)
 }
 
 pub fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest)?;
     let file = File::open(zip_path).map_err(|e| anyhow!("打开扩展压缩包失败: {e}"))?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| anyhow!("解析扩展压缩包失败: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| anyhow!("解析扩展压缩包失败: {e}"))?;
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)

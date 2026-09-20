@@ -1,10 +1,47 @@
-//! 部分聚合网关（如 AgentRouter）会校验客户端身份，需附加与已放行 Coding Agent 一致的请求头。
+//! 部分供应商需要改请求头或清洗模型名（AgentRouter 客户端校验、Gemini OpenRouter 前缀等）。
 
 use reqwest::RequestBuilder;
 use serde_json::Value;
 
 pub fn is_agentrouter(base_url: &str) -> bool {
     base_url.to_ascii_lowercase().contains("agentrouter.org")
+}
+
+pub fn is_google_gemini(base_url: &str) -> bool {
+    let u = base_url.to_ascii_lowercase();
+    u.contains("generativelanguage") || u.contains("googleapis.com")
+}
+
+pub fn is_deepseek(base_url: &str) -> bool {
+    base_url.to_ascii_lowercase().contains("api.deepseek.com")
+}
+
+/// Google 直连不要带 OpenRouter 的 `google/` 前缀；2.5/2.0 对新账号已 404，改发 3.5 Flash。
+pub fn sanitize_model(base_url: &str, model: &str) -> String {
+    let mut m = model.trim().to_string();
+    if m.is_empty() {
+        return m;
+    }
+    if is_deepseek(base_url)
+        && matches!(
+            m.as_str(),
+            "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp"
+        )
+    {
+        return "deepseek-flash".into();
+    }
+    if !is_google_gemini(base_url) {
+        return m;
+    }
+    if let Some(rest) = m.strip_prefix("google/") {
+        m = rest.to_string();
+    }
+    match m.as_str() {
+        "gemini-2.5-flash" | "gemini-2.5-pro" | "gemini-2.5-flash-lite" | "gemini-2.0-flash" => {
+            "gemini-3.5-flash".into()
+        }
+        _ => m,
+    }
 }
 
 /// 为 LLM HTTP 请求附加供应商要求的头；不改变 URL 与 body。
@@ -54,13 +91,51 @@ mod tests {
     }
 
     #[test]
+    fn sanitizes_google_gemini_openrouter_prefix_and_retired_models() {
+        let gemini = "https://generativelanguage.googleapis.com/v1beta/openai";
+        assert_eq!(
+            sanitize_model(gemini, "google/gemini-2.5-flash"),
+            "gemini-3.5-flash"
+        );
+        assert_eq!(
+            sanitize_model(gemini, "gemini-2.0-flash"),
+            "gemini-3.5-flash"
+        );
+        assert_eq!(
+            sanitize_model(gemini, "gemini-3.5-flash"),
+            "gemini-3.5-flash"
+        );
+        assert_eq!(
+            sanitize_model("https://openrouter.ai/api/v1", "google/gemini-2.5-flash"),
+            "google/gemini-2.5-flash"
+        );
+    }
+
+    #[test]
+    fn migrates_retired_deepseek_flash_aliases_on_official_api() {
+        let deepseek = "https://api.deepseek.com/v1";
+        assert_eq!(
+            sanitize_model(deepseek, "deepseek-v4-flash"),
+            "deepseek-flash"
+        );
+        assert_eq!(
+            sanitize_model(deepseek, "deepseek-v4-flash-vision-exp"),
+            "deepseek-flash"
+        );
+        assert_eq!(
+            sanitize_model("https://openrouter.ai/api/v1", "deepseek-v4-flash"),
+            "deepseek-v4-flash"
+        );
+    }
+
+    #[test]
     fn strips_reasoning_for_claude_on_agentrouter() {
         let mut body = json!({
-            "model": "claude-opus-4-6",
+            "model": "claude-opus-4-8",
             "reasoning_effort": "high",
             "messages": []
         });
-        sanitize_agentrouter_body(&mut body, "https://agentrouter.org/v1", "claude-opus-4-6");
+        sanitize_agentrouter_body(&mut body, "https://agentrouter.org/v1", "claude-opus-4-8");
         assert!(body.get("reasoning_effort").is_none());
         assert_eq!(body["thinking"]["type"], "adaptive");
     }

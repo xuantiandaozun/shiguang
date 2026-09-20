@@ -11,10 +11,7 @@ pub struct ClipboardImport {
     pub skipped_dirs: u32,
 }
 
-pub fn import_attachments(
-    app: &AppHandle,
-    include_image: bool,
-) -> Result<ClipboardImport, String> {
+pub fn import_attachments(app: &AppHandle, include_image: bool) -> Result<ClipboardImport, String> {
     #[cfg(windows)]
     {
         win::import(app, include_image)
@@ -26,11 +23,7 @@ pub fn import_attachments(
     }
 }
 
-pub fn save_pasted_bytes(
-    app: &AppHandle,
-    filename: &str,
-    data: &[u8],
-) -> Result<String, String> {
+pub fn save_pasted_bytes(app: &AppHandle, filename: &str, data: &[u8]) -> Result<String, String> {
     if data.is_empty() {
         return Err("粘贴内容为空".into());
     }

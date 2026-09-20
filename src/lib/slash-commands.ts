@@ -13,25 +13,26 @@ export type SlashCommand = {
 };
 
 export function buildSlashCommands(workflows: AutomationWorkflow[]): SlashCommand[] {
-  const items: SlashCommand[] = [
-    {
-      id: "help",
-      trigger: "help",
-      label: "help",
-      description: "查看可用 / 快捷命令",
-      kind: "meta",
-    },
-  ];
+  const items: SlashCommand[] = [];
   for (const w of workflows) {
+    const name = w.name?.trim();
+    if (!name) continue;
     items.push({
       id: `workflow-${w.id}`,
-      trigger: w.name,
-      label: w.name,
+      trigger: name,
+      label: name,
       description: w.description?.trim() || "运行此工作流",
       kind: "workflow",
       workflowId: w.id,
     });
   }
+  items.push({
+    id: "help",
+    trigger: "help",
+    label: "help",
+    description: "查看可用 / 快捷命令",
+    kind: "meta",
+  });
   return items;
 }
 

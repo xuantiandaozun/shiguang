@@ -109,6 +109,16 @@ pub struct ChatMsg {
     pub created_at: String,
 }
 
+/// 写在工具轮里、没有进入最终助手气泡的中间草稿。
+#[derive(Debug, Clone)]
+pub struct SessionDraftHit {
+    pub tool_call_id: i64,
+    pub request_message_id: i64,
+    pub response_message_id: Option<i64>,
+    pub tool_name: String,
+    pub assistant_content: String,
+}
+
 /// 一次主代理工具调用。通过 request_message_id / response_message_id 与原聊天消息组成完整调用链。
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolCallRecord {
@@ -285,17 +295,33 @@ pub struct BrowserRecipe {
 
 fn browser_recipe_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BrowserRecipe> {
     Ok(BrowserRecipe {
-        id: row.get(0)?, name: row.get(1)?, site_pattern: row.get(2)?, goal: row.get(3)?,
-        recipe_json: row.get(4)?, verification_json: row.get(5)?, success_count: row.get(6)?,
-        failure_count: row.get(7)?, last_used_at: row.get(8)?, created_at: row.get(9)?, updated_at: row.get(10)?,
+        id: row.get(0)?,
+        name: row.get(1)?,
+        site_pattern: row.get(2)?,
+        goal: row.get(3)?,
+        recipe_json: row.get(4)?,
+        verification_json: row.get(5)?,
+        success_count: row.get(6)?,
+        failure_count: row.get(7)?,
+        last_used_at: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 
 fn automation_workflow_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AutomationWorkflow> {
     Ok(AutomationWorkflow {
-        id: row.get(0)?, name: row.get(1)?, description: row.get(2)?, prompt: row.get(3)?,
-        schedule_rule: row.get(4)?, next_run_at: row.get(5)?, enabled: row.get::<_, i32>(6)? != 0,
-        run_count: row.get(7)?, last_run_at: row.get(8)?, created_at: row.get(9)?, updated_at: row.get(10)?,
+        id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        prompt: row.get(3)?,
+        schedule_rule: row.get(4)?,
+        next_run_at: row.get(5)?,
+        enabled: row.get::<_, i32>(6)? != 0,
+        run_count: row.get(7)?,
+        last_run_at: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 
@@ -1104,7 +1130,10 @@ impl Db {
     /// 删除会话及其消息；若删的是当前会话则切换到最新会话（没有则新建），返回新的当前会话 id
     pub fn delete_session(&self, id: i64) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM session_compacts WHERE session_id=?1", params![id])?;
+        conn.execute(
+            "DELETE FROM session_compacts WHERE session_id=?1",
+            params![id],
+        )?;
         conn.execute("DELETE FROM chat_messages WHERE session_id=?1", params![id])?;
         conn.execute("DELETE FROM chat_sessions WHERE id=?1", params![id])?;
         let cur: Option<String> = conn
@@ -1210,6 +1239,194 @@ impl Db {
             .collect();
         rows.reverse();
         Ok(rows)
+    }
+
+    /// 按 id 读取本会话的一条聊天消息。压缩只是不把旧消息塞进上下文，原文仍在这里。
+    pub fn get_session_message(&self, session_id: i64, id: i64) -> Result<Option<ChatMsg>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT id, role, content, created_at FROM chat_messages
+                 WHERE session_id=?1 AND id=?2",
+                params![session_id, id],
+                |r| {
+                    Ok(ChatMsg {
+                        id: r.get(0)?,
+                        role: r.get(1)?,
+                        content: r.get(2)?,
+                        created_at: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// 在本会话全部消息里检索，包括已被检查点盖住、不再进入上下文的消息。
+    pub fn search_session_messages(
+        &self,
+        session_id: i64,
+        query: Option<&str>,
+        before_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<ChatMsg>> {
+        let conn = self.conn.lock().unwrap();
+        let tokens = query_like_tokens(query);
+        let mut sql = String::from(
+            "SELECT id, role, content, created_at FROM chat_messages
+             WHERE session_id=?1 AND (?2 IS NULL OR id<?2)",
+        );
+        if !tokens.is_empty() {
+            sql.push_str(" AND (");
+            for (index, _) in tokens.iter().enumerate() {
+                if index > 0 {
+                    sql.push_str(" OR ");
+                }
+                sql.push_str(&format!("content LIKE ?{}", 3 + index));
+            }
+            sql.push_str(")");
+        }
+        let limit_idx = 3 + tokens.len();
+        sql.push_str(&format!(" ORDER BY id DESC LIMIT ?{limit_idx}"));
+        let mut stmt = conn.prepare(&sql)?;
+        let limit_i = limit.clamp(1, 30) as i64;
+        let mut bind: Vec<&dyn rusqlite::ToSql> = vec![&session_id, &before_id];
+        for token in &tokens {
+            bind.push(token);
+        }
+        bind.push(&limit_i);
+        let mut rows: Vec<ChatMsg> = stmt
+            .query_map(bind.as_slice(), |r| {
+                Ok(ChatMsg {
+                    id: r.get(0)?,
+                    role: r.get(1)?,
+                    content: r.get(2)?,
+                    created_at: r.get(3)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        rows.reverse();
+        Ok(rows)
+    }
+
+    /// 工具轮里写下、但没有进入最终助手气泡的中间草稿。
+    pub fn search_session_drafts(
+        &self,
+        session_id: i64,
+        query: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SessionDraftHit>> {
+        let conn = self.conn.lock().unwrap();
+        let tokens = query_like_tokens(query);
+        let mut sql = String::from(
+            "SELECT t.id, t.request_message_id, t.response_message_id, t.tool_name, t.assistant_content
+             FROM chat_tool_calls t
+             LEFT JOIN chat_messages resp ON resp.id=t.response_message_id
+             WHERE t.session_id=?1
+               AND length(trim(t.assistant_content)) >= 40
+               AND t.tool_name NOT IN ('recall_session', 'get_tool_call_history')
+               AND trim(t.assistant_content) <> COALESCE(resp.content, '')",
+        );
+        if !tokens.is_empty() {
+            sql.push_str(" AND (");
+            for (index, _) in tokens.iter().enumerate() {
+                if index > 0 {
+                    sql.push_str(" OR ");
+                }
+                sql.push_str(&format!("t.assistant_content LIKE ?{}", 2 + index));
+            }
+            sql.push_str(")");
+        }
+        let limit_idx = 2 + tokens.len();
+        sql.push_str(&format!(" ORDER BY t.id DESC LIMIT ?{limit_idx}"));
+        let mut stmt = conn.prepare(&sql)?;
+        let limit_i = limit.clamp(1, 20) as i64;
+        let mut bind: Vec<&dyn rusqlite::ToSql> = vec![&session_id];
+        for token in &tokens {
+            bind.push(token);
+        }
+        bind.push(&limit_i);
+        let mut rows: Vec<SessionDraftHit> = stmt
+            .query_map(bind.as_slice(), |r| {
+                Ok(SessionDraftHit {
+                    tool_call_id: r.get(0)?,
+                    request_message_id: r.get(1)?,
+                    response_message_id: r.get(2)?,
+                    tool_name: r.get(3)?,
+                    assistant_content: r.get(4)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        rows.reverse();
+        Ok(rows)
+    }
+
+    pub fn drafts_for_request(
+        &self,
+        session_id: i64,
+        request_message_id: i64,
+    ) -> Result<Vec<SessionDraftHit>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.request_message_id, t.response_message_id, t.tool_name, t.assistant_content
+             FROM chat_tool_calls t
+             LEFT JOIN chat_messages resp ON resp.id=t.response_message_id
+             WHERE t.session_id=?1 AND t.request_message_id=?2
+               AND length(trim(t.assistant_content)) >= 40
+               AND t.tool_name NOT IN ('recall_session', 'get_tool_call_history')
+               AND trim(t.assistant_content) <> COALESCE(resp.content, '')
+             ORDER BY t.id",
+        )?;
+        let rows = stmt
+            .query_map(params![session_id, request_message_id], |r| {
+                Ok(SessionDraftHit {
+                    tool_call_id: r.get(0)?,
+                    request_message_id: r.get(1)?,
+                    response_message_id: r.get(2)?,
+                    tool_name: r.get(3)?,
+                    assistant_content: r.get(4)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// 助手回复对应的用户消息：优先用工具调用上的关联，否则取它前面最近的用户消息。
+    pub fn request_id_for_message(
+        &self,
+        session_id: i64,
+        message_id: i64,
+        role: &str,
+    ) -> Result<Option<i64>> {
+        if role == "user" {
+            return Ok(Some(message_id));
+        }
+        let conn = self.conn.lock().unwrap();
+        let linked: Option<i64> = conn
+            .query_row(
+                "SELECT request_message_id FROM chat_tool_calls
+                 WHERE session_id=?1 AND response_message_id=?2
+                 ORDER BY id DESC LIMIT 1",
+                params![session_id, message_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if linked.is_some() {
+            return Ok(linked);
+        }
+        let previous = conn
+            .query_row(
+                "SELECT id FROM chat_messages
+                 WHERE session_id=?1 AND role='user' AND id<?2
+                 ORDER BY id DESC LIMIT 1",
+                params![session_id, message_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(previous)
     }
 
     /// 执行工具前先写入 running 记录。如果触发消息不属于该会话，拒绝执行，
@@ -1343,7 +1560,7 @@ impl Db {
         let include_idx = 5 + query_tokens.len();
         let limit_idx = include_idx + 1;
         sql.push_str(&format!(
-            " AND (?{include_idx}=1 OR t.tool_name<>'get_tool_call_history')
+            " AND (?{include_idx}=1 OR t.tool_name NOT IN ('get_tool_call_history', 'recall_session'))
               ORDER BY t.id DESC
               LIMIT ?{limit_idx}"
         ));
@@ -1595,7 +1812,10 @@ impl Db {
         ).optional()?)
     }
 
-    pub fn automation_workflow_save(&self, workflow: &AutomationWorkflow) -> Result<AutomationWorkflow> {
+    pub fn automation_workflow_save(
+        &self,
+        workflow: &AutomationWorkflow,
+    ) -> Result<AutomationWorkflow> {
         let conn = self.conn.lock().unwrap();
         let now = now_str();
         if workflow.id == 0 {
@@ -1606,18 +1826,24 @@ impl Db {
             )?;
             let id = conn.last_insert_rowid();
             drop(conn);
-            return Ok(self.automation_workflow_get(id)?.expect("inserted workflow"));
+            return Ok(self
+                .automation_workflow_get(id)?
+                .expect("inserted workflow"));
         }
         conn.execute(
             "UPDATE automation_workflows SET name=?1, description=?2, prompt=?3, schedule_rule=?4, next_run_at=?5, enabled=?6, updated_at=?7 WHERE id=?8",
             params![workflow.name.trim(), workflow.description.trim(), workflow.prompt.trim(), workflow.schedule_rule, workflow.next_run_at, workflow.enabled as i32, now, workflow.id],
         )?;
         drop(conn);
-        self.automation_workflow_get(workflow.id)?.ok_or_else(|| anyhow!("工作流不存在"))
+        self.automation_workflow_get(workflow.id)?
+            .ok_or_else(|| anyhow!("工作流不存在"))
     }
 
     pub fn automation_workflow_delete(&self, id: i64) -> Result<()> {
-        self.conn.lock().unwrap().execute("DELETE FROM automation_workflows WHERE id=?1", params![id])?;
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM automation_workflows WHERE id=?1", params![id])?;
         Ok(())
     }
 
@@ -1658,29 +1884,53 @@ impl Db {
         let now = now_str();
         if recipe.id == 0 {
             conn.execute("INSERT INTO browser_recipes(name, site_pattern, goal, recipe_json, verification_json, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?6)", params![recipe.name.trim(), recipe.site_pattern.trim(), recipe.goal.trim(), recipe.recipe_json, recipe.verification_json, now])?;
-            let id = conn.last_insert_rowid(); drop(conn);
+            let id = conn.last_insert_rowid();
+            drop(conn);
             return Ok(self.browser_recipe_get(id)?.expect("inserted recipe"));
         }
         conn.execute("UPDATE browser_recipes SET name=?1, site_pattern=?2, goal=?3, recipe_json=?4, verification_json=?5, updated_at=?6 WHERE id=?7", params![recipe.name.trim(), recipe.site_pattern.trim(), recipe.goal.trim(), recipe.recipe_json, recipe.verification_json, now, recipe.id])?;
         drop(conn);
-        self.browser_recipe_get(recipe.id)?.ok_or_else(|| anyhow!("浏览器配方不存在"))
+        self.browser_recipe_get(recipe.id)?
+            .ok_or_else(|| anyhow!("浏览器配方不存在"))
     }
 
     pub fn browser_recipe_delete(&self, id: i64) -> Result<()> {
-        self.conn.lock().unwrap().execute("DELETE FROM browser_recipes WHERE id=?1", params![id])?;
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM browser_recipes WHERE id=?1", params![id])?;
         Ok(())
     }
 
-    pub fn browser_recipe_find(&self, url: &str, goal: &str, limit: usize) -> Result<Vec<BrowserRecipe>> {
+    pub fn browser_recipe_find(
+        &self,
+        url: &str,
+        goal: &str,
+        limit: usize,
+    ) -> Result<Vec<BrowserRecipe>> {
         let mut all = self.browser_recipe_list()?;
-        let u = url.to_lowercase(); let g = goal.to_lowercase();
-        all.retain(|recipe| u.contains(&recipe.site_pattern.to_lowercase()) && (g.is_empty() || recipe.goal.to_lowercase().contains(&g) || recipe.name.to_lowercase().contains(&g)));
-        all.sort_by(|a, b| (b.success_count - b.failure_count).cmp(&(a.success_count - a.failure_count)).then(b.updated_at.cmp(&a.updated_at)));
+        let u = url.to_lowercase();
+        let g = goal.to_lowercase();
+        all.retain(|recipe| {
+            u.contains(&recipe.site_pattern.to_lowercase())
+                && (g.is_empty()
+                    || recipe.goal.to_lowercase().contains(&g)
+                    || recipe.name.to_lowercase().contains(&g))
+        });
+        all.sort_by(|a, b| {
+            (b.success_count - b.failure_count)
+                .cmp(&(a.success_count - a.failure_count))
+                .then(b.updated_at.cmp(&a.updated_at))
+        });
         Ok(all.into_iter().take(limit).collect())
     }
 
     pub fn browser_recipe_mark(&self, id: i64, success: bool) -> Result<()> {
-        let field = if success { "success_count" } else { "failure_count" };
+        let field = if success {
+            "success_count"
+        } else {
+            "failure_count"
+        };
         self.conn.lock().unwrap().execute(&format!("UPDATE browser_recipes SET {field}={field}+1, last_used_at=?1, updated_at=?1 WHERE id=?2"), params![now_str(), id])?;
         Ok(())
     }
@@ -2044,6 +2294,68 @@ mod tool_call_tests {
             .load_tool_calls_for_messages(session_id, &[])
             .unwrap()
             .is_empty());
+
+        cleanup(db, &path);
+    }
+
+    #[test]
+    fn session_recall_finds_covered_messages_and_unpublished_drafts() {
+        let (db, path) = test_db();
+        let session_id = db.current_session_id().unwrap();
+        let request_id = db.save_chat(session_id, "user", "把定稿发出去").unwrap();
+        let draft = "这是只写在工具轮里的中间草稿，提到了蓝绿部署，没有进入最终气泡。后面再补一句，避免短状态句被当成草稿。";
+        db.start_tool_call(
+            session_id,
+            request_id,
+            0,
+            0,
+            "call-draft",
+            "ask_user",
+            "{}",
+            draft,
+            "",
+        )
+        .unwrap();
+        let response_id = db
+            .save_chat(session_id, "assistant", "好的，先不发布。")
+            .unwrap();
+        db.link_tool_calls_response(session_id, request_id, response_id)
+            .unwrap();
+        let covered_id = db
+            .save_chat(
+                session_id,
+                "assistant",
+                "四条定稿里第二条讲的是蓝绿部署代理，原文必须原样发布。",
+            )
+            .unwrap();
+        db.put_session_compact(session_id, covered_id, "摘要里没有定稿原文")
+            .unwrap();
+
+        let hits = db
+            .search_session_messages(session_id, Some("蓝绿"), None, 8)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, covered_id);
+        let drafts = db
+            .search_session_drafts(session_id, Some("蓝绿"), 8)
+            .unwrap();
+        assert_eq!(drafts.len(), 1);
+        assert!(drafts[0].assistant_content.contains("蓝绿部署"));
+        assert_eq!(
+            db.request_id_for_message(session_id, response_id, "assistant")
+                .unwrap(),
+            Some(request_id)
+        );
+        let msg = db
+            .get_session_message(session_id, response_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg.content, "好的，先不发布。");
+        let other = db.create_session().unwrap();
+        assert!(db
+            .get_session_message(other, response_id)
+            .unwrap()
+            .is_none());
 
         cleanup(db, &path);
     }

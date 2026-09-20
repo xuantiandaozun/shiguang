@@ -182,13 +182,47 @@ export default function ChatPanel() {
   }, []);
 
   useEffect(() => {
-    reloadWorkflows();
-    let unlisten: (() => void) | undefined;
-    onEvent("automation-workflows-changed", reloadWorkflows).then((u) => {
-      unlisten = u;
+    let disposed = false;
+    let timer: number | undefined;
+    const hydrate = (attempt = 0) => {
+      ipc
+        .listAutomationWorkflows()
+        .then((list) => {
+          if (!disposed) setWorkflows(list);
+        })
+        .catch(() => {
+          if (disposed || attempt >= 20) return;
+          timer = window.setTimeout(() => hydrate(attempt + 1), 100);
+        });
+    };
+    hydrate();
+    const cleanups: Array<() => void> = [];
+    onEvent("automation-workflows-changed", () => {
+      if (!disposed) reloadWorkflows();
+    }).then((u) => {
+      if (disposed) u();
+      else cleanups.push(u);
     });
-    return () => unlisten?.();
+    getCurrentWindow()
+      .onFocusChanged((e) => {
+        if (!disposed && e.payload) reloadWorkflows();
+      })
+      .then((u) => {
+        if (disposed) u();
+        else cleanups.push(u);
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      cleanups.forEach((u) => u());
+    };
   }, [reloadWorkflows]);
+
+  useEffect(() => {
+    if (!slashOpen) return;
+    reloadWorkflows();
+  }, [slashOpen, reloadWorkflows]);
 
   // 输入框随内容自动增高（上限 max-h-28），未超高时不出现滚动条
   useEffect(() => {
@@ -350,8 +384,15 @@ export default function ChatPanel() {
       if (p.name === "todo_write") return;
       if (p.status === "running") {
         addMessage({ role: "tool", toolName: p.name, content: "", streaming: true });
-      } else if (p.status === "done" || p.status === "error") {
-        completeTool(p.name, p.status === "error" ? toolFailureSummary(p.result) : undefined);
+      } else if (p.status === "done" || p.status === "error" || p.status === "cancelled") {
+        completeTool(
+          p.name,
+          p.status === "cancelled"
+            ? "已中断"
+            : p.status === "error"
+              ? toolFailureSummary(p.result)
+              : undefined,
+        );
       }
     });
     add<Plan>("plan-proposed", (p) => {
@@ -655,7 +696,16 @@ export default function ChatPanel() {
         <div className="h-1" />
       </div>
 
-      <div className="shrink-0 p-2.5 border-t border-slate-700/60 bg-slate-800/50 relative">
+      <div className="shrink-0 p-2.5 border-t border-slate-700/60 bg-slate-800/50 relative z-20 overflow-visible">
+        {slashOpen && (
+          <div className="absolute bottom-full left-2 right-2 z-30 mb-1">
+            <ChatSlashMenu
+              commands={filteredSlash}
+              activeIndex={Math.min(slashIndex, Math.max(0, filteredSlash.length - 1))}
+              onPick={(cmd) => void executeSlashCommand(cmd)}
+            />
+          </div>
+        )}
         {dragOver && (
           <div className="absolute inset-0 z-10 flex items-center justify-center rounded-b-2xl bg-sky-500/15 border-2 border-dashed border-sky-400 pointer-events-none">
             <span className="text-sm text-sky-300 font-medium">松开以添加文件</span>
@@ -681,14 +731,7 @@ export default function ChatPanel() {
             ))}
           </div>
         )}
-        <div className="flex items-end gap-2 relative">
-          {slashOpen && (
-            <ChatSlashMenu
-              commands={filteredSlash}
-              activeIndex={Math.min(slashIndex, Math.max(0, filteredSlash.length - 1))}
-              onPick={(cmd) => void executeSlashCommand(cmd)}
-            />
-          )}
+        <div className="flex items-end gap-2">
           <button
             onClick={pickFiles}
             disabled={streaming}
@@ -820,6 +863,7 @@ export default function ChatPanel() {
 const TOOL_LABELS: Record<string, string> = {
   discover_capabilities: "发现所需能力",
   get_tool_call_history: "查询工具调用历史",
+  recall_session: "查回对话原文",
   scan_desktop: "扫描目录",
   search_files: "搜索本机文件",
   read_file: "读取文件",

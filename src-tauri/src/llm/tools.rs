@@ -15,6 +15,7 @@ pub fn core_tool_names() -> Vec<String> {
     vec![
         DISCOVER_TOOL.to_string(),
         "get_tool_call_history".to_string(),
+        "recall_session".to_string(),
         "load_skill".to_string(),
         "ask_user".to_string(),
         "todo_write".to_string(),
@@ -49,6 +50,7 @@ fn tools_for_category(category: &str) -> &'static [&'static str] {
             "browser_screenshot",
             "browser_evaluate",
             "browser_status",
+            "browser_fast_loop",
             "find_browser_recipes",
             "save_browser_recipe",
             "run_browser_recipe",
@@ -127,7 +129,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "get_tool_call_history",
-                "description": "查询当前这次会话内已持久化的工具调用历史，用于复盘本会话过去操作、追踪“失败 → 调整 → 验证”过程、排障或总结可复用 Skill。不能查看其他会话。记录与触发它的用户消息及最终 AI 回复相关联。search 先找到相关调用和 id；需要某次调用的完整参数/结果时再用 get，避免一次载入过多历史。不要用它代替对当前环境的实际验证。",
+                "description": "查询当前这次会话内已持久化的工具调用历史，用于复盘本会话过去操作、追踪“失败 → 调整 → 验证”过程、排障或总结可复用 Skill。不能查看其他会话。search 返回的 id 是工具调用 id；对话消息 id 不能拿来 get。被压缩从上下文拿掉的用户原话、定稿和中间草稿要用 recall_session，不要用本工具猜。不要用它代替对当前环境的实际验证。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -139,6 +141,25 @@ pub fn definitions() -> Value {
                         "before_id": { "type": "integer", "description": "分页：只返回小于该 id 的更早记录" },
                         "limit": { "type": "integer", "description": "search 返回数，默认 20，最大 50" },
                         "include_history_queries": { "type": "boolean", "description": "是否也返回历史查询工具自身的调用，默认 false" }
+                    },
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "recall_session",
+                "description": "查回当前这次会话里的对话原文。上下文压缩后，检查点没写进去的用户原话、已保存的助手回复、定稿和只出现在工具轮里的中间草稿都还在，不会被删掉。需要原样使用这些内容时先 search 再 get，不要凭摘要重写，也不要改用 get_tool_call_history（那是工具调用 id，不是消息 id）。不能查看其他会话。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["search", "get"], "description": "默认 search。search 按关键词找消息和中间草稿；get 按 message_id 返回全文" },
+                        "query": { "type": "string", "description": "search 用的关键词。多个词按空格分开，命中任一即可。用摘要里记下的检索词、专有名称或用户原话中的短句" },
+                        "id": { "type": "integer", "description": "action=get 时必填，必须是 search 结果里的 message_id，不是工具调用 id" },
+                        "offset": { "type": "integer", "description": "action=get 时的字符偏移，正文超过单次返回长度时用返回的 next_offset 续读" },
+                        "before_id": { "type": "integer", "description": "search 分页：只返回 id 小于该 message_id 的更早消息" },
+                        "limit": { "type": "integer", "description": "search 返回条数，默认 8，最大 20" }
                     },
                     "required": []
                 }
@@ -482,6 +503,18 @@ pub fn definitions() -> Value {
                 "name": "browser_status",
                 "description": "查看浏览器连接通道状态（扩展桥 / CDP 调试实例 / 未连接）。浏览器工具异常时用它诊断。",
                 "parameters": { "type": "object", "properties": {}, "required": [] }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_fast_loop",
+                "description": "让 Jev 在一次主模型规划后连续执行多个低风险浏览器步骤。适合导航、查找、打开普通控件和填写用户已明确给出的非敏感文本；它会逐步重新观察页面并由 Jev 选择动作。复杂或低置信度状态会返回给你补充候选后再次调用，不要改成由主模型逐步点击。提交、发布、发送、删除、支付等敏感动作不会进入快速候选，仍须使用普通浏览器工具并遵守确认策略。",
+                "parameters": { "type": "object", "properties": {
+                    "goal": { "type": "string", "description": "本次浏览器任务的明确完成目标" },
+                    "inputs": { "type": "object", "description": "可选：字段语义到用户明确输入值的映射，如 {\"搜索\":\"关键词\"}。不得包含密码、Cookie、Token；不要自行编造值" },
+                    "max_steps": { "type": "integer", "description": "最多连续步骤，默认 8，范围 1-15" }
+                }, "required": ["goal"] }
             }
         },
         {
@@ -1148,6 +1181,197 @@ pub fn chat_definitions(native_vision: bool) -> Value {
     )
 }
 
+const RECALL_PAGE_CHARS: usize = 6_000;
+const RECALL_SNIPPET_CHARS: usize = 180;
+
+fn recall_needles(query: Option<&str>) -> Vec<String> {
+    query
+        .map(|value| {
+            value
+                .split_whitespace()
+                .filter(|token| token.chars().count() >= 2)
+                .take(8)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn snippet_around(text: &str, needles: &[String]) -> String {
+    let lower = text.to_lowercase();
+    let found = needles.iter().find_map(|needle| {
+        let needle = needle.to_lowercase();
+        lower
+            .find(&needle)
+            .map(|byte_at| text[..byte_at].chars().count())
+    });
+    let Some(char_at) = found else {
+        return text_preview(text, RECALL_SNIPPET_CHARS);
+    };
+    let radius = RECALL_SNIPPET_CHARS / 2;
+    let start = char_at.saturating_sub(radius);
+    let chars: Vec<char> = text.chars().collect();
+    let end = (start + RECALL_SNIPPET_CHARS).min(chars.len());
+    let mut snippet: String = chars[start..end].iter().collect();
+    if start > 0 {
+        snippet.insert_str(0, "…");
+    }
+    if end < chars.len() {
+        snippet.push('…');
+    }
+    snippet
+}
+
+fn text_page(text: &str, offset: usize) -> (String, usize, Option<usize>) {
+    let chars: Vec<char> = text.chars().collect();
+    let start = offset.min(chars.len());
+    let end = (start + RECALL_PAGE_CHARS).min(chars.len());
+    let page: String = chars[start..end].iter().collect();
+    let next_offset = (end < chars.len()).then_some(end);
+    (page, chars.len(), next_offset)
+}
+
+fn recall_current_session(db: &Db, session_id: i64, args: &Value) -> Result<Value> {
+    let action = args
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("search");
+    let cover_until = db
+        .get_session_compact(session_id)
+        .ok()
+        .flatten()
+        .map(|(id, _)| id)
+        .unwrap_or(0);
+    match action {
+        "get" => {
+            let id = args
+                .get("id")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| anyhow!("action=get 需要 message_id"))?;
+            let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+            if let Some(msg) = db.get_session_message(session_id, id)? {
+                return Ok(recall_message_detail(
+                    db,
+                    session_id,
+                    &msg,
+                    cover_until,
+                    offset,
+                )?);
+            }
+            if db
+                .get_tool_call(id)?
+                .is_some_and(|record| record.session_id == session_id)
+            {
+                bail!(
+                    "id {id} 是工具调用 id，不是对话消息 id。工具参数和结果用 get_tool_call_history action=get id={id}；对话原文请用本工具 search 返回的 message_id。"
+                );
+            }
+            bail!("当前会话没有 message_id={id} 的消息")
+        }
+        "search" => {
+            let query = args
+                .get("query")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let before_id = args.get("before_id").and_then(Value::as_i64);
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(8)
+                .clamp(1, 20) as usize;
+            let needles = recall_needles(query);
+            let messages = db.search_session_messages(session_id, query, before_id, limit)?;
+            let drafts = if query.is_some() {
+                db.search_session_drafts(session_id, query, limit)?
+            } else {
+                Vec::new()
+            };
+            let next_before_id = (messages.len() == limit)
+                .then(|| messages.first().map(|msg| msg.id))
+                .flatten();
+            let message_items: Vec<Value> = messages
+                .iter()
+                .map(|msg| {
+                    json!({
+                        "message_id": msg.id,
+                        "role": msg.role,
+                        "created_at": msg.created_at,
+                        "covered": msg.id <= cover_until,
+                        "chars": msg.content.chars().count(),
+                        "snippet": snippet_around(&msg.content, &needles),
+                    })
+                })
+                .collect();
+            let draft_items: Vec<Value> = drafts
+                .iter()
+                .map(|draft| {
+                    json!({
+                        "message_id": draft.response_message_id,
+                        "request_message_id": draft.request_message_id,
+                        "tool_call_id": draft.tool_call_id,
+                        "tool_name": draft.tool_name,
+                        "covered": draft.request_message_id <= cover_until,
+                        "chars": draft.assistant_content.chars().count(),
+                        "snippet": snippet_around(&draft.assistant_content, &needles),
+                        "note": "这是工具轮里的中间草稿，没有进入最终助手气泡。读取全文用 action=get，id 填 request_message_id。",
+                    })
+                })
+                .collect();
+            Ok(json!({
+                "count": message_items.len(),
+                "messages": message_items,
+                "drafts": draft_items,
+                "next_before_id": next_before_id,
+                "cover_until_message_id": (cover_until > 0).then_some(cover_until),
+                "note": "message_id 只能交给 recall_session 的 action=get。covered=true 表示这条原文已被检查点盖住，不在当前上下文里。不要把 message_id 传给 get_tool_call_history。",
+            }))
+        }
+        other => bail!("未知 action: {other}"),
+    }
+}
+
+fn recall_message_detail(
+    db: &Db,
+    session_id: i64,
+    msg: &crate::db::ChatMsg,
+    cover_until: i64,
+    offset: usize,
+) -> Result<Value> {
+    let (content, chars, next_offset) = text_page(&msg.content, offset);
+    let request_id = db.request_id_for_message(session_id, msg.id, &msg.role)?;
+    let drafts = match request_id {
+        Some(request_id) => db.drafts_for_request(session_id, request_id)?,
+        None => Vec::new(),
+    };
+    let draft_items: Vec<Value> = drafts
+        .into_iter()
+        .map(|draft| {
+            let (draft_text, draft_chars, draft_next) = text_page(&draft.assistant_content, 0);
+            json!({
+                "tool_call_id": draft.tool_call_id,
+                "tool_name": draft.tool_name,
+                "chars": draft_chars,
+                "content": draft_text,
+                "next_offset": draft_next,
+                "note": "中间草稿，未进入最终助手气泡。",
+            })
+        })
+        .collect();
+    Ok(json!({
+        "message_id": msg.id,
+        "role": msg.role,
+        "created_at": msg.created_at,
+        "covered": msg.id <= cover_until,
+        "offset": offset,
+        "chars": chars,
+        "content": content,
+        "next_offset": next_offset,
+        "request_message_id": request_id,
+        "drafts": draft_items,
+    }))
+}
+
 fn query_current_session_tool_history(db: &Db, session_id: i64, args: &Value) -> Result<Value> {
     if let Some(scope) = args.get("scope").and_then(Value::as_str) {
         match scope {
@@ -1166,11 +1390,18 @@ fn query_current_session_tool_history(db: &Db, session_id: i64, args: &Value) ->
                 .get("id")
                 .and_then(Value::as_i64)
                 .ok_or_else(|| anyhow!("action=get 需要有效 id"))?;
-            let record = db
+            if let Some(record) = db
                 .get_tool_call(id)?
                 .filter(|record| record.session_id == session_id)
-                .ok_or_else(|| anyhow!("未找到工具调用记录 {}", id))?;
-            Ok(tool_call_detail(&record))
+            {
+                return Ok(tool_call_detail(&record));
+            }
+            if db.get_session_message(session_id, id)?.is_some() {
+                bail!(
+                    "未找到工具调用记录 {id}。id {id} 是对话消息 id，不是工具调用 id。读取这条原文请调用 recall_session，action=get，id={id}。"
+                );
+            }
+            bail!("未找到工具调用记录 {id}。get 的 id 必须来自本工具 search 结果；对话原文请用 recall_session。")
         }
         "search" => {
             let tool_name = args
@@ -1218,7 +1449,7 @@ fn query_current_session_tool_history(db: &Db, session_id: i64, args: &Value) ->
                 "count": items.len(),
                 "calls": items,
                 "next_before_id": next_before_id,
-                "note": "search 返回截断预览；需要某条记录的完整参数和结果时，用 action=get + id。",
+                "note": "search 返回截断预览；需要某次工具调用的完整参数和结果时，用 action=get + 结果里的工具调用 id。最终回复若被截断，用 recall_session action=get + response_message.id 读取全文，不要把 message_id 传给本工具。",
             }))
         }
         other => bail!("未知 action: {}", other),
@@ -1312,6 +1543,7 @@ pub async fn execute(
             }))
         }
         "get_tool_call_history" => query_current_session_tool_history(db, session_id, args),
+        "recall_session" => recall_current_session(db, session_id, args),
         "scan_desktop" => {
             let recursive = args
                 .get("recursive")
@@ -1684,13 +1916,19 @@ pub async fn execute(
             Ok(serde_json::to_value(&result)?)
         }
         "find_browser_recipes" => {
-            let url = args.get("url").and_then(Value::as_str).ok_or_else(|| anyhow!("缺少 url"))?;
+            let url = args
+                .get("url")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("缺少 url"))?;
             let goal = args.get("goal").and_then(Value::as_str).unwrap_or("");
             let recipes = db.browser_recipe_find(url, goal, 8)?;
-            Ok(json!({ "count": recipes.len(), "recipes": recipes, "note": "配方只作加速参考；运行前仍会预检当前 URL 与唯一候选。" }))
+            Ok(
+                json!({ "count": recipes.len(), "recipes": recipes, "note": "配方只作加速参考；运行前仍会预检当前 URL 与唯一候选。" }),
+            )
         }
         "save_browser_recipe" => save_browser_recipe(app, db, args),
         "run_browser_recipe" => run_browser_recipe(app, db, args).await,
+        "browser_fast_loop" => crate::system_one::fast_browser_loop(app, args).await,
         n if n.starts_with("browser_") => browser_tool(app, n, args).await,
         "propose_organization" => propose_organization(app, db, args),
         "add_todo" => {
@@ -1890,29 +2128,71 @@ pub async fn execute(
             Ok(json!({ "count": list.len(), "workflows": list }))
         }
         "create_workflow" => {
-            let name = args.get("name").and_then(Value::as_str).unwrap_or("").trim();
-            let prompt = args.get("prompt").and_then(Value::as_str).unwrap_or("").trim();
-            let schedule_rule = args.get("schedule_rule").and_then(Value::as_str).unwrap_or("manual");
-            if name.is_empty() || prompt.is_empty() { bail!("name 和 prompt 不能为空"); }
-            if !["manual", "once", "daily", "weekly"].contains(&schedule_rule) { bail!("schedule_rule 无效"); }
-            let next_run_at = args.get("next_run_at").and_then(Value::as_str).map(str::to_string);
-            if schedule_rule != "manual" && next_run_at.as_deref().unwrap_or("").is_empty() { bail!("定时工作流必须提供 next_run_at"); }
+            let name = args
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let prompt = args
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let schedule_rule = args
+                .get("schedule_rule")
+                .and_then(Value::as_str)
+                .unwrap_or("manual");
+            if name.is_empty() || prompt.is_empty() {
+                bail!("name 和 prompt 不能为空");
+            }
+            if !["manual", "once", "daily", "weekly"].contains(&schedule_rule) {
+                bail!("schedule_rule 无效");
+            }
+            let next_run_at = args
+                .get("next_run_at")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if schedule_rule != "manual" && next_run_at.as_deref().unwrap_or("").is_empty() {
+                bail!("定时工作流必须提供 next_run_at");
+            }
             let workflow = db.automation_workflow_save(&crate::db::AutomationWorkflow {
-                id: args.get("id").and_then(Value::as_i64).unwrap_or(0), name: name.into(),
-                description: args.get("description").and_then(Value::as_str).unwrap_or("").into(), prompt: prompt.into(),
-                schedule_rule: schedule_rule.into(), next_run_at, enabled: args.get("enabled").and_then(Value::as_bool).unwrap_or(true),
-                run_count: 0, last_run_at: None, created_at: String::new(), updated_at: String::new(),
+                id: args.get("id").and_then(Value::as_i64).unwrap_or(0),
+                name: name.into(),
+                description: args
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .into(),
+                prompt: prompt.into(),
+                schedule_rule: schedule_rule.into(),
+                next_run_at,
+                enabled: args.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+                run_count: 0,
+                last_run_at: None,
+                created_at: String::new(),
+                updated_at: String::new(),
             })?;
             let _ = app.emit("automation-workflows-changed", ());
             Ok(json!({ "ok": true, "workflow": workflow }))
         }
         "manage_workflow" => {
-            let id = args.get("id").and_then(Value::as_i64).ok_or_else(|| anyhow!("缺少 id"))?;
+            let id = args
+                .get("id")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| anyhow!("缺少 id"))?;
             match args.get("action").and_then(Value::as_str).unwrap_or("") {
-                "run" => Ok(json!({ "message": "请用户在工作流页点击「运行」，或在聊天中发送要执行的流程名称；这样能确保当前聊天未忙。", "workflow_id": id })),
-                "delete" => { db.automation_workflow_delete(id)?; let _ = app.emit("automation-workflows-changed", ()); Ok(json!({"ok": true, "deleted_id": id})) }
+                "run" => Ok(
+                    json!({ "message": "请用户在工作流页点击「运行」，或在聊天中发送要执行的流程名称；这样能确保当前聊天未忙。", "workflow_id": id }),
+                ),
+                "delete" => {
+                    db.automation_workflow_delete(id)?;
+                    let _ = app.emit("automation-workflows-changed", ());
+                    Ok(json!({"ok": true, "deleted_id": id}))
+                }
                 "enable" | "disable" => {
-                    let mut workflow = db.automation_workflow_get(id)?.ok_or_else(|| anyhow!("工作流不存在"))?;
+                    let mut workflow = db
+                        .automation_workflow_get(id)?
+                        .ok_or_else(|| anyhow!("工作流不存在"))?;
                     workflow.enabled = args.get("action").and_then(Value::as_str) == Some("enable");
                     let workflow = db.automation_workflow_save(&workflow)?;
                     let _ = app.emit("automation-workflows-changed", ());
@@ -2520,6 +2800,14 @@ fn tool_call_search_item(record: &ToolCallRecord) -> Value {
         "response_message": {
             "id": record.response_message_id,
             "content_preview": record.response_content.as_deref().map(|value| text_preview(value, 180)),
+            "recall": record.response_message_id.filter(|_| {
+                record
+                    .response_content
+                    .as_deref()
+                    .is_some_and(|value| value.chars().count() > 180)
+            }).map(|id| format!(
+                "最终回复已截断。完整正文请调用 recall_session，action=get，id={id}。不要把这个 message_id 传给 get_tool_call_history。"
+            )),
         },
         "round_index": record.round_index,
         "call_index": record.call_index,
@@ -2590,11 +2878,12 @@ mod capability_tests {
             .iter()
             .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
             .collect();
-            assert_eq!(
+        assert_eq!(
             names,
             vec![
                 "discover_capabilities",
                 "get_tool_call_history",
+                "recall_session",
                 "load_skill",
                 "ask_user",
                 "todo_write"
@@ -2758,15 +3047,26 @@ mod capability_tests {
     #[test]
     fn command_tools_expose_await_instead_of_polling() {
         let definitions = definitions_for(&["run_command_background", "await_task", "check_task"]);
-        let bg = definitions.as_array().unwrap().iter().find(|tool| {
-            tool.pointer("/function/name").and_then(Value::as_str) == Some("run_command_background")
-        }).unwrap();
+        let bg = definitions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| {
+                tool.pointer("/function/name").and_then(Value::as_str)
+                    == Some("run_command_background")
+            })
+            .unwrap();
         assert!(bg
             .pointer("/function/parameters/properties/await")
             .is_some());
-        let await_tool = definitions.as_array().unwrap().iter().find(|tool| {
-            tool.pointer("/function/name").and_then(Value::as_str) == Some("await_task")
-        }).unwrap();
+        let await_tool = definitions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| {
+                tool.pointer("/function/name").and_then(Value::as_str) == Some("await_task")
+            })
+            .unwrap();
         let await_desc = await_tool
             .pointer("/function/description")
             .and_then(Value::as_str)
@@ -2777,7 +3077,9 @@ mod capability_tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("check_task"))
+            .find(|tool| {
+                tool.pointer("/function/name").and_then(Value::as_str) == Some("check_task")
+            })
             .unwrap()
             .pointer("/function/description")
             .and_then(Value::as_str)
@@ -2975,9 +3277,12 @@ mod tool_history_scope_tests {
         assert_eq!(calls[0]["id"], current_call);
         assert_eq!(calls[0]["tool_name"], "browser_status");
 
-        let detail =
-            query_current_session_tool_history(&db, current, &json!({ "action": "get", "id": current_call }))
-                .unwrap();
+        let detail = query_current_session_tool_history(
+            &db,
+            current,
+            &json!({ "action": "get", "id": current_call }),
+        )
+        .unwrap();
         assert_eq!(detail["id"], current_call);
 
         let leaked = query_current_session_tool_history(
@@ -2985,13 +3290,13 @@ mod tool_history_scope_tests {
             current,
             &json!({ "action": "get", "id": other_call }),
         );
-        assert!(leaked.unwrap_err().to_string().contains("未找到工具调用记录"));
+        assert!(leaked
+            .unwrap_err()
+            .to_string()
+            .contains("未找到工具调用记录"));
 
-        let cross_session = query_current_session_tool_history(
-            &db,
-            current,
-            &json!({ "scope": "all_sessions" }),
-        );
+        let cross_session =
+            query_current_session_tool_history(&db, current, &json!({ "scope": "all_sessions" }));
         assert!(cross_session
             .unwrap_err()
             .to_string()
@@ -3080,6 +3385,7 @@ async fn command_tool(
                         environment: &environment,
                     },
                     timeout,
+                    cancel,
                 )
                 .await?;
             Ok(command_result_with_json(
@@ -3123,6 +3429,7 @@ async fn command_tool(
                     script_args: &script_args,
                     environment: &environment,
                 },
+                Some(cancel),
             )?;
             let wait_now = args.get("await").and_then(|v| v.as_bool()).unwrap_or(false);
             if wait_now {
@@ -3132,7 +3439,10 @@ async fn command_tool(
                     .unwrap_or(7200);
                 let tail_chars =
                     args.get("tail_chars").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let json_pointer = args.get("json_pointer").and_then(|v| v.as_str()).unwrap_or("");
+                let json_pointer = args
+                    .get("json_pointer")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 return awaited_task_result(
                     app,
                     tasks,
@@ -3168,7 +3478,10 @@ async fn command_tool(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(7200);
             let tail_chars = args.get("tail_chars").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let json_pointer = args.get("json_pointer").and_then(|v| v.as_str()).unwrap_or("");
+            let json_pointer = args
+                .get("json_pointer")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             awaited_task_result(
                 app,
                 tasks,
@@ -3411,8 +3724,15 @@ async fn awaited_task_result(
     workdir: Option<&str>,
 ) -> Result<Value> {
     let (info, wait) = tasks.wait_for(app, task_id, timeout_secs, cancel).await?;
-    let mut result =
-        command_result_with_json(app, tasks, &info, tail_chars, json_pointer, input_files, workdir)?;
+    let mut result = command_result_with_json(
+        app,
+        tasks,
+        &info,
+        tail_chars,
+        json_pointer,
+        input_files,
+        workdir,
+    )?;
     if let Some(obj) = result.as_object_mut() {
         obj.insert("wait".into(), json!(wait));
         match wait {
@@ -3426,10 +3746,7 @@ async fn awaited_task_result(
             }
             "cancelled" => {
                 obj.insert("ok".into(), json!(false));
-                obj.insert(
-                    "note".into(),
-                    json!("用户中断了等待，已尝试停止该任务。"),
-                );
+                obj.insert("note".into(), json!("用户中断了等待，已尝试停止该任务。"));
             }
             _ => {
                 obj.insert(
@@ -3699,24 +4016,63 @@ pub fn apply_rule_to_path(db: &Db, path: &Path) -> Result<Option<(String, String
 }
 
 fn save_browser_recipe(app: &AppHandle, db: &Db, args: &Value) -> Result<Value> {
-    let name = args.get("name").and_then(Value::as_str).unwrap_or("").trim();
-    let site = args.get("site_pattern").and_then(Value::as_str).unwrap_or("").trim();
-    let goal = args.get("goal").and_then(Value::as_str).unwrap_or("").trim();
-    let actions = args.get("actions").and_then(Value::as_array).ok_or_else(|| anyhow!("缺少 actions"))?;
-    if name.is_empty() || site.is_empty() || goal.is_empty() || actions.is_empty() { bail!("名称、站点、目标和至少一个动作不能为空"); }
-    if actions.len() > 12 { bail!("浏览器配方最多 12 个动作"); }
+    let name = args
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let site = args
+        .get("site_pattern")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let goal = args
+        .get("goal")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let actions = args
+        .get("actions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("缺少 actions"))?;
+    if name.is_empty() || site.is_empty() || goal.is_empty() || actions.is_empty() {
+        bail!("名称、站点、目标和至少一个动作不能为空");
+    }
+    if actions.len() > 12 {
+        bail!("浏览器配方最多 12 个动作");
+    }
     for action in actions {
         let kind = action.get("action").and_then(Value::as_str).unwrap_or("");
-        if !["find_click", "find_type"].contains(&kind) || action.get("query").and_then(Value::as_str).unwrap_or("").trim().is_empty() {
+        if !["find_click", "find_type"].contains(&kind)
+            || action
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+        {
             bail!("动作只允许带 query 的 find_click 或 find_type");
         }
-        if kind == "find_type" && action.get("value").and_then(Value::as_str).is_none() { bail!("find_type 需要 value"); }
+        if kind == "find_type" && action.get("value").and_then(Value::as_str).is_none() {
+            bail!("find_type 需要 value");
+        }
     }
-    let verification = args.get("verification").cloned().unwrap_or_else(|| json!({}));
+    let verification = args
+        .get("verification")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     let recipe = db.browser_recipe_save(&crate::db::BrowserRecipe {
-        id: args.get("id").and_then(Value::as_i64).unwrap_or(0), name: name.into(), site_pattern: site.into(), goal: goal.into(),
-        recipe_json: serde_json::to_string(actions)?, verification_json: serde_json::to_string(&verification)?,
-        success_count: 0, failure_count: 0, last_used_at: None, created_at: String::new(), updated_at: String::new(),
+        id: args.get("id").and_then(Value::as_i64).unwrap_or(0),
+        name: name.into(),
+        site_pattern: site.into(),
+        goal: goal.into(),
+        recipe_json: serde_json::to_string(actions)?,
+        verification_json: serde_json::to_string(&verification)?,
+        success_count: 0,
+        failure_count: 0,
+        last_used_at: None,
+        created_at: String::new(),
+        updated_at: String::new(),
     })?;
     let _ = app.emit("browser-recipes-changed", ());
     Ok(json!({ "ok": true, "recipe": recipe }))
@@ -3727,57 +4083,127 @@ fn recipe_value(template: &str, vars: &Value) -> Result<String> {
     let object = vars.as_object();
     for capture in template.match_indices("{{") {
         let start = capture.0 + 2;
-        let Some(end) = template[start..].find("}}") else { bail!("变量模板未闭合"); };
+        let Some(end) = template[start..].find("}}") else {
+            bail!("变量模板未闭合");
+        };
         let key = &template[start..start + end];
-        let value = object.and_then(|map| map.get(key)).and_then(Value::as_str).ok_or_else(|| anyhow!("缺少配方变量：{}", key))?;
+        let value = object
+            .and_then(|map| map.get(key))
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("缺少配方变量：{}", key))?;
         let lower = key.to_lowercase();
-        if lower.contains("password") || lower.contains("cookie") || lower.contains("token") || lower.contains("secret") { bail!("配方不接受密码、cookie、token 或密钥变量"); }
+        if lower.contains("password")
+            || lower.contains("cookie")
+            || lower.contains("token")
+            || lower.contains("secret")
+        {
+            bail!("配方不接受密码、cookie、token 或密钥变量");
+        }
         output = output.replace(&format!("{{{{{key}}}}}"), value);
     }
     Ok(output)
 }
 
 async fn run_browser_recipe(app: &AppHandle, db: &Db, args: &Value) -> Result<Value> {
-    let id = args.get("id").and_then(Value::as_i64).ok_or_else(|| anyhow!("缺少 id"))?;
-    let recipe = db.browser_recipe_get(id)?.ok_or_else(|| anyhow!("浏览器配方不存在"))?;
+    let id = args
+        .get("id")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("缺少 id"))?;
+    let recipe = db
+        .browser_recipe_get(id)?
+        .ok_or_else(|| anyhow!("浏览器配方不存在"))?;
     let state = app.state::<crate::AppState>();
     let info = state.browser.call("info", json!({})).await?;
     let url = info.get("url").and_then(Value::as_str).unwrap_or("");
-    if !url.to_lowercase().contains(&recipe.site_pattern.to_lowercase()) {
+    if !url
+        .to_lowercase()
+        .contains(&recipe.site_pattern.to_lowercase())
+    {
         db.browser_recipe_mark(id, false)?;
-        bail!("配方适用于「{}」，当前页面为「{}」；已停止，请正常快照后处理", recipe.site_pattern, url);
+        bail!(
+            "配方适用于「{}」，当前页面为「{}」；已停止，请正常快照后处理",
+            recipe.site_pattern,
+            url
+        );
     }
-    let actions: Vec<Value> = serde_json::from_str(&recipe.recipe_json).map_err(|_| anyhow!("配方动作格式损坏"))?;
+    let actions: Vec<Value> =
+        serde_json::from_str(&recipe.recipe_json).map_err(|_| anyhow!("配方动作格式损坏"))?;
     let vars = args.get("variables").cloned().unwrap_or_else(|| json!({}));
     let mut completed = Vec::new();
     for action in actions {
         let kind = action.get("action").and_then(Value::as_str).unwrap_or("");
-        let query = recipe_value(action.get("query").and_then(Value::as_str).unwrap_or(""), &vars)?;
-        let found = state.browser.call("find", json!({ "query": query, "limit": 4 })).await?;
-        let candidates = found.get("candidates").and_then(Value::as_array).cloned().unwrap_or_default();
+        let query = recipe_value(
+            action.get("query").and_then(Value::as_str).unwrap_or(""),
+            &vars,
+        )?;
+        let found = state
+            .browser
+            .call("find", json!({ "query": query, "limit": 4 }))
+            .await?;
+        let candidates = found
+            .get("candidates")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         if candidates.len() != 1 {
             db.browser_recipe_mark(id, false)?;
-            bail!("配方步骤「{}」找到 {} 个候选，无法安全选择；已停止，请用 browser_snapshot 接管", kind, candidates.len());
+            bail!(
+                "配方步骤「{}」找到 {} 个候选，无法安全选择；已停止，请用 browser_snapshot 接管",
+                kind,
+                candidates.len()
+            );
         }
-        let reference = candidates[0].get("ref").and_then(Value::as_u64).ok_or_else(|| anyhow!("候选缺少 ref"))?;
+        let reference = candidates[0]
+            .get("ref")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("候选缺少 ref"))?;
         let result = match kind {
-            "find_click" => state.browser.call("click", json!({ "ref": reference })).await?,
+            "find_click" => {
+                state
+                    .browser
+                    .call("click", json!({ "ref": reference }))
+                    .await?
+            }
             "find_type" => {
-                let value = recipe_value(action.get("value").and_then(Value::as_str).unwrap_or(""), &vars)?;
+                let value = recipe_value(
+                    action.get("value").and_then(Value::as_str).unwrap_or(""),
+                    &vars,
+                )?;
                 state.browser.call("type", json!({ "ref": reference, "text": value, "clear": action.get("clear").and_then(Value::as_bool).unwrap_or(true) })).await?
             }
-            _ => { db.browser_recipe_mark(id, false)?; bail!("配方含不支持的动作"); }
+            _ => {
+                db.browser_recipe_mark(id, false)?;
+                bail!("配方含不支持的动作");
+            }
         };
         completed.push(json!({ "action": kind, "query": query, "result": result }));
     }
-    let verify: Value = serde_json::from_str(&recipe.verification_json).unwrap_or_else(|_| json!({}));
+    let verify: Value =
+        serde_json::from_str(&recipe.verification_json).unwrap_or_else(|_| json!({}));
     let verified = if let Some(expected) = verify.get("url_contains").and_then(Value::as_str) {
-        state.browser.call("info", json!({})).await?.get("url").and_then(Value::as_str).is_some_and(|current| current.contains(expected))
+        state
+            .browser
+            .call("info", json!({}))
+            .await?
+            .get("url")
+            .and_then(Value::as_str)
+            .is_some_and(|current| current.contains(expected))
     } else if let Some(query) = verify.get("find_query").and_then(Value::as_str) {
-        state.browser.call("find", json!({ "query": query, "limit": 1 })).await?.get("count").and_then(Value::as_u64).unwrap_or(0) > 0
-    } else { true };
+        state
+            .browser
+            .call("find", json!({ "query": query, "limit": 1 }))
+            .await?
+            .get("count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+    } else {
+        true
+    };
     db.browser_recipe_mark(id, verified)?;
-    if !verified { bail!("配方已执行但未通过成功校验；已停止，请用正常浏览器工具核验和处理"); }
+    if !verified {
+        bail!("配方已执行但未通过成功校验；已停止，请用正常浏览器工具核验和处理");
+    }
     Ok(json!({ "ok": true, "recipe": recipe.name, "completed": completed, "verified": verified }))
 }
 
@@ -3820,7 +4246,7 @@ async fn browser_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
         std::fs::write(&file, &bytes)?;
         let saved = file.to_string_lossy().replace('\\', "/");
         let settings = crate::commands::load_settings(&state.db);
-        let hint = if crate::llm::models::supports_vision(&settings.model) {
+        let hint = if settings.model_supports_vision {
             "截图已保存。当前对话模型可直接看图，无需再调 read_image；只要文字仍可用 ocr_image。"
         } else {
             "截图已保存。提取文字用 ocr_image（本地免费）；理解画面用 read_image。"

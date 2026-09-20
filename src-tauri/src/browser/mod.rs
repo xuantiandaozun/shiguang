@@ -11,7 +11,9 @@ mod ext;
 mod launch;
 mod unpack;
 
-pub use unpack::{ensure_unpacked as ensure_extension_unpacked, info as extension_info, ExtensionInfo};
+pub use unpack::{
+    ensure_unpacked as ensure_extension_unpacked, info as extension_info, ExtensionInfo,
+};
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
@@ -37,7 +39,8 @@ pub fn wrap_evaluate_expression(expr: &str, ref_: Option<u64>, args: &Value) -> 
     let args_json = serde_json::to_string(args).unwrap_or_else(|_| "null".to_string());
     if let Some(ref_) = ref_ {
         let missing = format!("元素 [{ref_}] 不存在或已失效，请重新获取快照");
-        let missing_json = serde_json::to_string(&missing).unwrap_or_else(|_| "\"元素已失效\"".into());
+        let missing_json =
+            serde_json::to_string(&missing).unwrap_or_else(|_| "\"元素已失效\"".into());
         format!(
             "(async()=>{{const $el=window.__dh.ref({ref_});if(!$el)throw new Error({missing_json});const $args={args_json};return await ({expr});}})()"
         )
@@ -276,10 +279,7 @@ mod tests {
         assert!(wrapped.contains("const $args="));
         assert!(wrapped.contains("names"));
         assert!(!wrapped.contains("$el"));
-        assert_eq!(
-            wrap_evaluate_expression("1+1", None, &Value::Null),
-            "1+1"
-        );
+        assert_eq!(wrap_evaluate_expression("1+1", None, &Value::Null), "1+1");
     }
 
     #[test]

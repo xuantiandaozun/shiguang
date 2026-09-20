@@ -14,6 +14,8 @@ export type CatalogModel = {
   tags?: CatalogTag[];
   vision?: boolean;
   thinking?: boolean;
+  /** 官方公布的上下文窗口；未确认时省略并允许用户手动填写。 */
+  contextWindow?: number;
   /** provider id → 该供应商下的 API 模型名 */
   bindings: Partial<Record<string, string>>;
 };
@@ -23,31 +25,29 @@ export const CUSTOM_CATALOG_MODEL = "__custom__";
 /** 程序内维护的统一模型列表 */
 export const MODEL_CATALOG: CatalogModel[] = [
   {
-    id: "deepseek-v4-flash",
-    label: "DeepSeek V4 Flash",
-    tags: ["对话"],
-    bindings: { deepseek: "deepseek-v4-flash", "volc-agent": "deepseek-v4-flash" },
-  },
-  {
-    id: "deepseek-v4-flash-vision",
-    label: "DeepSeek V4 Flash Vision",
+    id: "deepseek-v4.1-flash",
+    label: "DeepSeek V4.1 Flash",
     tags: ["对话", "视觉"],
     vision: true,
+    contextWindow: 1_000_000,
     bindings: {
-      deepseek: "deepseek-v4-flash-vision-exp",
-      "volc-agent": "deepseek-v4-flash-vision-exp",
+      deepseek: "deepseek-flash",
+      "volc-agent": "deepseek-v4.1-flash",
+      agentrouter: "deepseek-v4-flash",
     },
   },
   {
     id: "deepseek-v4-pro",
     label: "DeepSeek V4 Pro",
     tags: ["对话"],
+    contextWindow: 1_000_000,
     bindings: { deepseek: "deepseek-v4-pro" },
   },
   {
     id: "deepseek-chat",
     label: "DeepSeek Chat",
     tags: ["对话"],
+    contextWindow: 128_000,
     bindings: { deepseek: "deepseek-chat", openrouter: "deepseek/deepseek-chat" },
   },
   {
@@ -55,6 +55,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     label: "DeepSeek Reasoner",
     tags: ["推理"],
     thinking: true,
+    contextWindow: 128_000,
     bindings: { deepseek: "deepseek-reasoner" },
   },
   {
@@ -73,6 +74,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     id: "qwen-plus",
     label: "通义千问 Plus",
     tags: ["对话"],
+    contextWindow: 1_000_000,
     bindings: { dashscope: "qwen-plus" },
   },
   {
@@ -91,6 +93,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     id: "qwen-long",
     label: "通义千问 Long",
     tags: ["对话"],
+    contextWindow: 10_000_000,
     bindings: { dashscope: "qwen-long" },
   },
   {
@@ -118,6 +121,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     id: "qwen3-235b",
     label: "Qwen3 235B",
     tags: ["对话"],
+    contextWindow: 262_144,
     bindings: { siliconflow: "Qwen/Qwen3-235B-A22B" },
   },
   {
@@ -181,6 +185,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     id: "kimi-k2.5",
     label: "Kimi K2.5",
     tags: ["对话"],
+    contextWindow: 262_144,
     bindings: { moonshot: "kimi-k2.5", "volc-coding": "kimi-k2.5" },
   },
   {
@@ -193,6 +198,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     id: "moonshot-v1-128k",
     label: "Moonshot V1 128K",
     tags: ["对话"],
+    contextWindow: 131_072,
     bindings: { moonshot: "moonshot-v1-128k" },
   },
   {
@@ -200,6 +206,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     label: "Moonshot V1 Vision",
     tags: ["视觉"],
     vision: true,
+    contextWindow: 131_072,
     bindings: { moonshot: "moonshot-v1-128k-vision-preview" },
   },
   {
@@ -237,6 +244,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     label: "GPT-4o Mini",
     tags: ["对话", "视觉"],
     vision: true,
+    contextWindow: 128_000,
     bindings: { openai: "gpt-4o-mini", openrouter: "openai/gpt-4o-mini" },
   },
   {
@@ -244,6 +252,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     label: "GPT-4o",
     tags: ["对话", "视觉"],
     vision: true,
+    contextWindow: 128_000,
     bindings: { openai: "gpt-4o", openrouter: "openai/gpt-4o" },
   },
   {
@@ -251,6 +260,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     label: "GPT-4.1",
     tags: ["对话", "视觉"],
     vision: true,
+    contextWindow: 1_047_576,
     bindings: { openai: "gpt-4.1" },
   },
   {
@@ -258,6 +268,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     label: "O4 Mini",
     tags: ["推理"],
     thinking: true,
+    contextWindow: 200_000,
     bindings: { openai: "o4-mini" },
   },
   {
@@ -265,13 +276,31 @@ export const MODEL_CATALOG: CatalogModel[] = [
     label: "Gemini 2.5 Flash",
     tags: ["对话", "视觉"],
     vision: true,
-    bindings: { "google-gemini": "gemini-2.5-flash", openrouter: "google/gemini-2.5-flash" },
+    contextWindow: 1_048_576,
+    bindings: { openrouter: "google/gemini-2.5-flash" },
+  },
+  {
+    id: "gemini-3.5-flash",
+    label: "Gemini 3.5 Flash",
+    tags: ["对话", "视觉"],
+    vision: true,
+    contextWindow: 1_048_576,
+    bindings: { "google-gemini": "gemini-3.5-flash" },
+  },
+  {
+    id: "gemini-3.6-flash",
+    label: "Gemini 3.6 Flash",
+    tags: ["对话", "视觉"],
+    vision: true,
+    contextWindow: 1_048_576,
+    bindings: { "google-gemini": "gemini-3.6-flash" },
   },
   {
     id: "gemini-3.7-flash",
     label: "Gemini 3.7 Flash",
     tags: ["对话", "视觉"],
     vision: true,
+    contextWindow: 1_048_576,
     bindings: { "google-gemini": "gemini-3.7-flash" },
   },
   {
@@ -279,6 +308,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
     label: "Gemini 3 Flash Preview",
     tags: ["对话", "视觉"],
     vision: true,
+    contextWindow: 1_048_576,
     bindings: { "google-gemini": "gemini-3-flash-preview" },
   },
   {
@@ -286,70 +316,88 @@ export const MODEL_CATALOG: CatalogModel[] = [
     label: "Gemini 2.5 Pro",
     tags: ["对话", "视觉"],
     vision: true,
-    bindings: { "google-gemini": "gemini-2.5-pro" },
+    contextWindow: 1_048_576,
+    bindings: { openrouter: "google/gemini-2.5-pro" },
+  },
+  {
+    id: "gemini-3.1-pro-preview",
+    label: "Gemini 3.1 Pro Preview",
+    tags: ["对话", "视觉"],
+    vision: true,
+    contextWindow: 1_048_576,
+    bindings: { "google-gemini": "gemini-3.1-pro-preview" },
   },
   {
     id: "gemini-2.0-flash",
     label: "Gemini 2.0 Flash",
     tags: ["对话", "视觉"],
     vision: true,
-    bindings: { "google-gemini": "gemini-2.0-flash" },
+    contextWindow: 1_048_576,
+    bindings: {},
   },
   {
     id: "claude-sonnet-4",
     label: "Claude Sonnet 4",
     tags: ["对话", "视觉"],
     vision: true,
-    bindings: { openrouter: "anthropic/claude-sonnet-4", agentrouter: "claude-sonnet-4-5-20250929" },
+    contextWindow: 200_000,
+    bindings: { openrouter: "anthropic/claude-sonnet-4" },
   },
   {
     id: "claude-opus-4-6",
-    label: "Claude Opus 4.6",
+    label: "Claude Opus 4.8",
     tags: ["对话", "推理"],
     vision: true,
     thinking: true,
-    bindings: { agentrouter: "claude-opus-4-6" },
+    bindings: { agentrouter: "claude-opus-4-8" },
   },
   {
     id: "claude-opus-4-7",
-    label: "Claude Opus 4.7",
+    label: "Claude Opus 5",
     tags: ["对话", "推理"],
     vision: true,
     thinking: true,
-    bindings: { agentrouter: "claude-opus-4-7" },
+    bindings: { agentrouter: "claude-opus-5" },
+  },
+  {
+    id: "gpt-5.6-sol",
+    label: "GPT 5.6 Sol",
+    tags: ["对话", "推理"],
+    thinking: true,
+    bindings: { agentrouter: "gpt-5.6-sol" },
   },
   {
     id: "deepseek-r1",
     label: "DeepSeek R1",
     tags: ["推理"],
     thinking: true,
-    bindings: { agentrouter: "deepseek-r1-0528", openrouter: "deepseek/deepseek-reasoner" },
+    bindings: { openrouter: "deepseek/deepseek-reasoner" },
   },
   {
     id: "deepseek-v3.1",
     label: "DeepSeek V3.1",
     tags: ["对话"],
-    bindings: { agentrouter: "deepseek-v3.1" },
+    bindings: {},
   },
   {
     id: "deepseek-v3.2",
     label: "DeepSeek V3.2",
     tags: ["对话"],
-    bindings: { agentrouter: "deepseek-v3.2" },
+    bindings: {},
   },
   {
     id: "glm-4.6",
     label: "GLM 4.6",
     tags: ["对话", "推理"],
     thinking: true,
-    bindings: { agentrouter: "glm-4.6" },
+    bindings: {},
   },
   {
     id: "glm-5.1",
-    label: "GLM 5.1",
+    label: "GLM 5.3",
     tags: ["对话", "推理"],
     thinking: true,
-    bindings: { agentrouter: "glm-5.1" },
+    bindings: { agentrouter: "glm-5.3" },
   },
   {
     id: "hunyuan-turbos",
@@ -411,6 +459,30 @@ export function catalogVisionModels(): CatalogModel[] {
   return MODEL_CATALOG.filter((m) => m.vision);
 }
 
+const RETIRED_GOOGLE_GEMINI = new Set([
+  "gemini-2.5-flash",
+  "gemini-2.5-pro",
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash",
+]);
+
+const GOOGLE_GEMINI_REPLACEMENT = "gemini-3.5-flash";
+
+export function isGoogleGeminiBaseUrl(baseUrl: string): boolean {
+  const u = baseUrl.toLowerCase();
+  return u.includes("generativelanguage") || u.includes("googleapis.com");
+}
+
+/** Google 直连不要发 OpenRouter 的 google/ 前缀；已下架的 2.5/2.0 改到 3.5 Flash。 */
+export function sanitizeApiModel(baseUrl: string, model: string): string {
+  let m = model.trim();
+  if (!m) return m;
+  if (!isGoogleGeminiBaseUrl(baseUrl)) return m;
+  if (m.startsWith("google/")) m = m.slice("google/".length);
+  if (RETIRED_GOOGLE_GEMINI.has(m)) return GOOGLE_GEMINI_REPLACEMENT;
+  return m;
+}
+
 export function apiModelForProvider(
   catalogId: string,
   providerId: string | undefined,
@@ -421,12 +493,10 @@ export function apiModelForProvider(
   }
   const entry = catalogModel(catalogId);
   if (!entry) return catalogId.trim() || undefined;
-  if (providerId && entry.bindings[providerId]) {
-    return entry.bindings[providerId];
+  if (!providerId) {
+    return Object.values(entry.bindings)[0] ?? catalogId;
   }
-  const bound = Object.values(entry.bindings);
-  if (bound.length === 1) return bound[0];
-  return catalogId;
+  return entry.bindings[providerId];
 }
 
 export function resolveApiModel(
@@ -435,17 +505,23 @@ export function resolveApiModel(
   customApiModel?: string
 ): string {
   const provider = providerByBaseUrl(baseUrl);
-  return (
+  const raw =
     apiModelForProvider(catalogId, provider?.id, customApiModel) ??
     customApiModel?.trim() ??
-    catalogId
-  );
+    catalogId;
+  return sanitizeApiModel(baseUrl, raw);
 }
 
 export function inferCatalogModel(apiModel: string, baseUrl: string): string {
   const model = apiModel.trim();
   if (!model) return "";
   const provider = providerByBaseUrl(baseUrl);
+  if (
+    provider?.id === "deepseek" &&
+    ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"].includes(model)
+  ) {
+    return "deepseek-v4.1-flash";
+  }
   if (provider) {
     for (const entry of MODEL_CATALOG) {
       if (entry.bindings[provider.id] === model) return entry.id;
@@ -465,6 +541,21 @@ export function catalogSupportsVision(catalogId: string, apiModel?: string): boo
   const entry = catalogModel(catalogId);
   if (entry?.vision) return true;
   return inferVisionFromApiName(apiModel ?? catalogId);
+}
+
+export function catalogContextWindow(catalogId: string, apiModel?: string): number | undefined {
+  if (catalogId && catalogId !== CUSTOM_CATALOG_MODEL) {
+    const known = catalogModel(catalogId)?.contextWindow;
+    if (known) return known;
+  }
+  const name = (apiModel ?? "").trim().toLowerCase();
+  if (!name) return undefined;
+  if (name.includes("moonshot-v1-128k")) return 131_072;
+  if (/(?:^|\/)gpt-4o(?:-mini)?(?:-|$)/.test(name)) return 128_000;
+  if (/(?:^|\/)gpt-4\.1(?:-|$)/.test(name)) return 1_047_576;
+  if (name.includes("o4-mini")) return 200_000;
+  if (name.includes("gemini")) return 1_048_576;
+  return undefined;
 }
 
 function inferVisionFromApiName(name: string): boolean {

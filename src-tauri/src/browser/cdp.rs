@@ -116,16 +116,27 @@ impl CdpClient {
             }
             "find" => {
                 let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(12).clamp(1, 30);
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(12)
+                    .clamp(1, 30);
                 self.dh("find", json!([query, limit])).await
             }
             "request" => {
-                let method = params.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+                let method = params
+                    .get("method")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("GET");
                 let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("");
                 let body = params.get("body").cloned().unwrap_or(Value::Null);
                 let headers = params.get("headers").cloned().unwrap_or_else(|| json!({}));
-                let max = params.get("max_chars").and_then(|v| v.as_u64()).unwrap_or(6000);
-                self.dh("request", json!([method, url, body, headers, max])).await
+                let max = params
+                    .get("max_chars")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(6000);
+                self.dh("request", json!([method, url, body, headers, max]))
+                    .await
             }
             "type" => {
                 let r = req_u64(&params, "ref")?;

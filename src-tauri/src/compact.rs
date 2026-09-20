@@ -8,17 +8,17 @@ use tauri::{AppHandle, Manager};
 use crate::commands::Settings;
 use crate::llm::client::{self, LlmConfig};
 
-/// 裁剪工具结果后，对话序列化字节仍超过该值才做摘要
-pub const COMPACT_THRESHOLD_BYTES: usize = 64_000;
 /// 摘要后逐字保留的近期消息预算
 pub const RETAIN_TAIL_BYTES: usize = 12_000;
+const CONTEXT_USAGE_RATIO: f64 = 0.80;
+const RESERVED_OUTPUT_TOKENS: usize = 4_096;
 const MIN_COMPACTABLE_MESSAGES: usize = 6;
 const MAX_SUMMARY_CHARS: usize = 4_000;
 
 const SUMMARY_OPEN: &str = "<compacted-summary>";
 const SUMMARY_CLOSE: &str = "</compacted-summary>";
 
-const CHECKPOINT_PREAMBLE: &str = "这是自动生成的检查点，把更早的对话收成既定背景。直接接着后面的消息继续做，不要复述这段摘要，也不要向用户提起这次压缩。";
+const CHECKPOINT_PREAMBLE: &str = "这是自动生成的检查点，把更早的对话收成既定背景。直接接着后面的消息继续做，不要复述这段摘要，也不要向用户提起这次压缩。检查点没写进去的用户原话、定稿、路径和数字仍在本会话记录里，需要原样使用时先调用 recall_session 查回再继续，不要凭这段摘要重写，也不要把 message_id 传给 get_tool_call_history。";
 
 const COMPACTION_INSTRUCTION: &str = r#"你现在只负责压缩上面的对话，让另一个模型能接着做完用户的事。
 
@@ -53,10 +53,35 @@ const COMPACTION_INSTRUCTION: &str = r#"你现在只负责压缩上面的对话�
 - 忠实保留用户纠正和明确指令。
 - 不要提及这次压缩请求本身。
 - 只输出检查点正文，不要调用工具。
-- 若上面已有 <compacted-summary>，那是旧检查点：保留仍成立的事实，丢掉过时内容，合并成一份。"#;
+- 若上面已有 <compacted-summary>，那是旧检查点：保留仍成立的事实，丢掉过时内容，合并成一份。
+- 不必把长正文抄进摘要。定稿、原文、用户纠正过的措辞如果没有逐字保留，就在对应小节写上可用 recall_session 命中的检索词（专有名称或原话短句），并注明「原文未收入摘要」。"#;
 
 pub fn messages_bytes(messages: &[Value]) -> usize {
     messages.iter().map(|m| m.to_string().len()).sum()
+}
+
+/// 轻量、保守的 token 估算：ASCII 文本约 4 字符/token，中文及其它 Unicode
+/// 大致按 1 字符/token，并为 JSON 结构留少量余量。真正触发点由模型窗口决定。
+pub fn estimate_tokens(value: &Value) -> usize {
+    let text = value.to_string();
+    let (ascii, non_ascii) = text.chars().fold((0usize, 0usize), |(a, n), ch| {
+        if ch.is_ascii() {
+            (a + 1, n)
+        } else {
+            (a, n + 1)
+        }
+    });
+    ascii.div_ceil(4) + non_ascii + 64
+}
+
+fn context_tokens(messages: &[Value]) -> usize {
+    messages.iter().map(estimate_tokens).sum::<usize>()
+        + estimate_tokens(&crate::llm::tools::definitions())
+}
+
+fn should_compact(settings: &Settings, messages: &[Value]) -> bool {
+    let usable = ((settings.context_window as f64) * CONTEXT_USAGE_RATIO) as usize;
+    context_tokens(messages).saturating_add(RESERVED_OUTPUT_TOKENS) >= usable
 }
 
 pub fn stable_prefix_len(messages: &[Value]) -> usize {
@@ -136,8 +161,6 @@ fn compact_request_body(cfg: &LlmConfig, _settings: &Settings, messages: &[Value
         "stream_options": { "include_usage": true },
         "temperature": 0.2,
         "max_tokens": 2048,
-        "tools": crate::llm::tools::definitions(),
-        "tool_choice": "none",
     });
     if cfg.base_url.contains("deepseek") {
         body["thinking"] = json!({ "type": "disabled" });
@@ -176,10 +199,38 @@ pub async fn compact_if_needed(
     messages: &mut Vec<Value>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<bool> {
-    if messages_bytes(messages) < COMPACT_THRESHOLD_BYTES {
+    if !should_compact(settings, messages) {
         return Ok(false);
     }
-    let Some(cut) = find_retain_start(messages, RETAIN_TAIL_BYTES) else {
+    let retain_bytes =
+        if settings.system_one_context_assist && crate::system_one::configured(settings) {
+            match crate::system_one::context_retention_strategy(http, settings, messages).await {
+                Ok(answer) => {
+                    crate::llm::persist_usage(
+                        app,
+                        "system_one_context",
+                        &settings.system_one_model,
+                        &answer.usage,
+                    );
+                    if answer.confidence < settings.system_one_min_confidence {
+                        RETAIN_TAIL_BYTES
+                    } else {
+                        match answer.choice.as_str() {
+                            "preserve_more" => RETAIN_TAIL_BYTES * 2,
+                            "compress_more" => RETAIN_TAIL_BYTES * 2 / 3,
+                            _ => RETAIN_TAIL_BYTES,
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("System One 上下文策略失败，使用标准保留预算: {e}");
+                    RETAIN_TAIL_BYTES
+                }
+            }
+        } else {
+            RETAIN_TAIL_BYTES
+        };
+    let Some(cut) = find_retain_start(messages, retain_bytes) else {
         return Ok(false);
     };
     let prefix = stable_prefix_len(messages);
@@ -188,9 +239,14 @@ pub async fn compact_if_needed(
         return Ok(false);
     }
 
-    let body = compact_request_body(cfg, settings, &messages[..cut]);
-    let resp = client::stream_chat(http, cfg, &body, cancel, |_| {}, |_| {}).await?;
-    crate::llm::persist_usage(app, "compact", &cfg.model, &resp.usage);
+    let compact_cfg = if settings.compact_model.trim().is_empty() {
+        cfg.clone()
+    } else {
+        LlmConfig::new(&cfg.base_url, &cfg.api_key, &settings.compact_model)
+    };
+    let body = compact_request_body(&compact_cfg, settings, &messages[..cut]);
+    let resp = client::stream_chat(http, &compact_cfg, &body, cancel, |_| {}, |_| {}).await?;
+    crate::llm::persist_usage(app, "compact", &compact_cfg.model, &resp.usage);
     if resp.interrupted || cancel.is_cancelled() {
         return Ok(false);
     }
@@ -215,12 +271,7 @@ pub async fn compact_if_needed(
     Ok(true)
 }
 
-pub fn persist_cover(
-    app: &AppHandle,
-    session_id: i64,
-    cover_until_id: i64,
-    messages: &[Value],
-) {
+pub fn persist_cover(app: &AppHandle, session_id: i64, cover_until_id: i64, messages: &[Value]) {
     let prefix = stable_prefix_len(messages);
     let Some(content) = messages
         .get(prefix)
@@ -312,5 +363,29 @@ mod tests {
         let got = sanitize_summary(&raw).unwrap();
         assert!(got.contains("用户目标"));
         assert!(!got.contains(SUMMARY_OPEN));
+    }
+
+    #[test]
+    fn token_estimate_counts_chinese_more_than_ascii_per_character() {
+        let ascii = estimate_tokens(&json!("a".repeat(400)));
+        let chinese = estimate_tokens(&json!("中".repeat(400)));
+        assert!(chinese > ascii * 2);
+    }
+
+    #[test]
+    fn large_context_does_not_compact_at_old_fixed_byte_threshold() {
+        let mut settings: Settings = serde_json::from_value(json!({
+            "base_url":"x","api_key":"x","model":"x","llm_profiles":[],"active_llm_profile_id":"",
+            "organize_root":"","auto_organize":false,"autostart":false,"desktop_path":"",
+            "thinking_enabled":false,"reasoning_effort":"low","vision_base_url":"","vision_api_key":"","vision_model":"",
+            "subagent_thinking_enabled":false,"subagent_reasoning_effort":"low","subagent_model":"",
+            "context_window":128000,"command_tools_enabled":false,"permission_level":"balanced",
+            "profile_name":"","profile_alias":"","profile_gender":"","profile_birth":"","profile_phone":"","profile_email":"","profile_city":"","temp_path":""
+        })).unwrap();
+        settings.context_window = 128_000;
+        assert!(!should_compact(
+            &settings,
+            &[json!({"role":"user","content":"x".repeat(64_000)})]
+        ));
     }
 }

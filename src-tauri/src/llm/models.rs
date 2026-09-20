@@ -5,6 +5,8 @@ use std::path::Path;
 
 /// 确认支持图像输入的模型（精确匹配，大小写不敏感）。
 const VISION_MODELS: &[&str] = &[
+    "deepseek-flash",
+    "deepseek-v4-flash",
     "deepseek-v4-flash-vision-exp",
     "qwen-vl-max",
     "qwen-vl-plus",
@@ -25,7 +27,10 @@ const VISION_MODELS: &[&str] = &[
     "google/gemini-2.5-flash",
     "gemini-2.5-flash",
     "gemini-2.5-pro",
+    "gemini-3.6-flash",
     "gemini-3.7-flash",
+    "gemini-3.5-flash",
+    "gemini-3.1-pro-preview",
     "gemini-3-flash-preview",
     "gemini-2.0-flash",
     "anthropic/claude-sonnet-4",
@@ -47,7 +52,10 @@ pub fn supports_vision(model: &str) -> bool {
 }
 
 fn infer_vision(lower: &str) -> bool {
-    if lower.contains("vision") || lower.contains("-vl") || lower.contains("_vl") || lower.contains("/vl")
+    if lower.contains("vision")
+        || lower.contains("-vl")
+        || lower.contains("_vl")
+        || lower.contains("/vl")
     {
         return true;
     }
@@ -104,7 +112,19 @@ pub fn is_image_file(path: &str) -> bool {
             .and_then(|e| e.to_str())
             .map(|s| s.to_ascii_lowercase())
             .as_deref(),
-        Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "tif" | "tiff" | "heic" | "avif")
+        Some(
+            "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "bmp"
+                | "webp"
+                | "ico"
+                | "tif"
+                | "tiff"
+                | "heic"
+                | "avif"
+        )
     )
 }
 
@@ -174,8 +194,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn flash_does_not_auto_switch_to_vision() {
-        assert!(!supports_vision("deepseek-v4-flash"));
+    fn deepseek_v41_flash_has_native_vision() {
+        assert!(supports_vision("deepseek-flash"));
+        assert!(supports_vision("deepseek-v4-flash"));
         assert!(!supports_vision("deepseek-chat"));
         assert!(supports_vision("deepseek-v4-flash-vision-exp"));
     }

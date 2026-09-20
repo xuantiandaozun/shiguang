@@ -18,11 +18,7 @@ const MAX_RESPONSE_BYTES: usize = 2_000_000;
 const MAX_BODY_CHARS: usize = 80_000;
 const USER_AGENT: &str = "ShiGuang/0.1 (desktop assistant; +https://github.com)";
 
-pub async fn execute(
-    name: &str,
-    args: &Value,
-    cancel: &CancellationToken,
-) -> Result<Value> {
+pub async fn execute(name: &str, args: &Value, cancel: &CancellationToken) -> Result<Value> {
     match name {
         "web_search" => search(args, cancel).await,
         "web_fetch" => fetch(args, cancel).await,
@@ -200,7 +196,9 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
 
 fn is_html(content_type: &str, body: &str) -> bool {
     let ct = content_type.to_ascii_lowercase();
-    ct.contains("text/html") || ct.contains("application/xhtml") || body.trim_start().starts_with("<!")
+    ct.contains("text/html")
+        || ct.contains("application/xhtml")
+        || body.trim_start().starts_with("<!")
 }
 
 fn is_binary(content_type: &str) -> bool {
@@ -263,7 +261,9 @@ fn collect_results(
         if !seen.insert(url.clone()) {
             continue;
         }
-        let title = strip_tags(cap.get(2).map(|m| m.as_str()).unwrap_or("")).trim().to_string();
+        let title = strip_tags(cap.get(2).map(|m| m.as_str()).unwrap_or(""))
+            .trim()
+            .to_string();
         if title.is_empty() {
             continue;
         }
@@ -294,16 +294,24 @@ pub fn html_to_text(html: &str) -> String {
     static STYLE: OnceLock<Regex> = OnceLock::new();
     static NOSCRIPT: OnceLock<Regex> = OnceLock::new();
     static TAG: OnceLock<Regex> = OnceLock::new();
-    let script = SCRIPT.get_or_init(|| Regex::new(r"(?is)<script[^>]*>.*?</script>").expect("script regex"));
-    let style = STYLE.get_or_init(|| Regex::new(r"(?is)<style[^>]*>.*?</style>").expect("style regex"));
-    let noscript =
-        NOSCRIPT.get_or_init(|| Regex::new(r"(?is)<noscript[^>]*>.*?</noscript>").expect("noscript regex"));
+    let script =
+        SCRIPT.get_or_init(|| Regex::new(r"(?is)<script[^>]*>.*?</script>").expect("script regex"));
+    let style =
+        STYLE.get_or_init(|| Regex::new(r"(?is)<style[^>]*>.*?</style>").expect("style regex"));
+    let noscript = NOSCRIPT
+        .get_or_init(|| Regex::new(r"(?is)<noscript[^>]*>.*?</noscript>").expect("noscript regex"));
     let tag = TAG.get_or_init(|| Regex::new(r"(?is)<[^>]+>").expect("tag regex"));
     let mut text = script.replace_all(html, " ").into_owned();
     text = style.replace_all(&text, " ").into_owned();
     text = noscript.replace_all(&text, " ").into_owned();
-    text = text.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n");
-    text = text.replace("</p>", "\n\n").replace("</div>", "\n").replace("</h1>", "\n\n");
+    text = text
+        .replace("<br>", "\n")
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n");
+    text = text
+        .replace("</p>", "\n\n")
+        .replace("</div>", "\n")
+        .replace("</h1>", "\n\n");
     text = text.replace("</h2>", "\n\n").replace("</li>", "\n");
     text = tag.replace_all(&text, " ").into_owned();
     text = decode_entities(&text);

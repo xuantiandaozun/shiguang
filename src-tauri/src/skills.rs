@@ -191,7 +191,8 @@ impl SkillStore {
         if items.is_empty() {
             return None;
         }
-        let mut out = String::from("Skills 是可复用的任务说明。当前已启用：\n\n<available_skills>\n");
+        let mut out =
+            String::from("Skills 是可复用的任务说明。当前已启用：\n\n<available_skills>\n");
         for (name, desc) in items {
             out.push_str(&format!(
                 "- `{}`: {}\n",
@@ -591,7 +592,10 @@ fn xml_escape(text: &str) -> String {
 /// 包一层模型可识别的技能正文标记；正文里若出现结束标签则转义，避免提前闭合。
 pub fn wrap_skill_content(name: &str, body: &str) -> String {
     let safe = body.replace("</skill_content>", "&lt;/skill_content>");
-    format!("<skill_content name=\"{}\">\n{safe}\n</skill_content>", xml_escape(name))
+    format!(
+        "<skill_content name=\"{}\">\n{safe}\n</skill_content>",
+        xml_escape(name)
+    )
 }
 
 struct ParsedSkill {
@@ -885,9 +889,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dh-skills-esc-{}", uuid::Uuid::new_v4()));
         let _ = fs::create_dir_all(&dir);
         let store = SkillStore::new(&dir);
-        store
-            .create("amp-skill", "a <b> & c", "# body")
-            .unwrap();
+        store.create("amp-skill", "a <b> & c", "# body").unwrap();
         let block = store.catalog_reminder().unwrap();
         assert!(block.contains("a &lt;b&gt; &amp; c"));
         assert!(!block.contains("a <b> & c"));

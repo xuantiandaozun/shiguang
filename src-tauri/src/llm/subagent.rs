@@ -120,7 +120,9 @@ impl SubagentHub {
     ) -> Result<SubagentJob> {
         let (mut rx, existing) = {
             let jobs = self.lock();
-            let entry = jobs.get(id).ok_or_else(|| anyhow!("子代理任务不存在: {id}"))?;
+            let entry = jobs
+                .get(id)
+                .ok_or_else(|| anyhow!("子代理任务不存在: {id}"))?;
             if entry.info.status != "running" {
                 return Ok(entry.info.clone());
             }
@@ -188,7 +190,10 @@ async fn finish_job(app: &AppHandle, id: &str, session_id: i64, report: Value) {
         };
         let state = app.state::<crate::AppState>();
         let _ = state.db.save_chat(session_id, "system", &line);
-        let _ = app.emit("subagent-chat", json!({ "session_id": session_id, "content": line }));
+        let _ = app.emit(
+            "subagent-chat",
+            json!({ "session_id": session_id, "content": line }),
+        );
     }
 }
 
@@ -232,11 +237,7 @@ pub async fn run(
     Ok(run_job(app, task, context, cancel).await)
 }
 
-pub async fn execute(
-    app: &AppHandle,
-    args: &Value,
-    cancel: &CancellationToken,
-) -> Result<Value> {
+pub async fn execute(app: &AppHandle, args: &Value, cancel: &CancellationToken) -> Result<Value> {
     if args.get("job_id").and_then(Value::as_str).is_some() {
         return await_job(app, args, cancel).await;
     }
@@ -268,12 +269,21 @@ pub async fn execute(
     };
     let id = {
         let state = app.state::<crate::AppState>();
-        state
-            .subagents
-            .start(app.clone(), session_id, task.to_string(), context, cancel.clone())
+        state.subagents.start(
+            app.clone(),
+            session_id,
+            task.to_string(),
+            context,
+            cancel.clone(),
+        )
     };
     if should_await {
-        return await_job(app, &json!({ "job_id": id, "timeout_secs": TIMEOUT_SECS }), cancel).await;
+        return await_job(
+            app,
+            &json!({ "job_id": id, "timeout_secs": TIMEOUT_SECS }),
+            cancel,
+        )
+        .await;
     }
     Ok(json!({
         "status": "started",
@@ -282,11 +292,7 @@ pub async fn execute(
     }))
 }
 
-pub async fn await_job(
-    app: &AppHandle,
-    args: &Value,
-    cancel: &CancellationToken,
-) -> Result<Value> {
+pub async fn await_job(app: &AppHandle, args: &Value, cancel: &CancellationToken) -> Result<Value> {
     let id = args
         .get("job_id")
         .and_then(Value::as_str)
@@ -343,8 +349,12 @@ pub fn parse_report(text: &str) -> Value {
 fn extract_json_object(text: &str) -> Option<Value> {
     let candidates = [
         text,
-        text.strip_prefix("```json").and_then(|s| s.strip_suffix("```")).unwrap_or(text),
-        text.strip_prefix("```").and_then(|s| s.strip_suffix("```")).unwrap_or(text),
+        text.strip_prefix("```json")
+            .and_then(|s| s.strip_suffix("```"))
+            .unwrap_or(text),
+        text.strip_prefix("```")
+            .and_then(|s| s.strip_suffix("```"))
+            .unwrap_or(text),
     ];
     for raw in candidates {
         let raw = raw.trim();
@@ -407,7 +417,10 @@ fn normalize_report(mut value: Value, fallback: &str) -> Value {
 }
 
 fn first_line(text: &str) -> &str {
-    text.lines().find(|l| !l.trim().is_empty()).unwrap_or(text).trim()
+    text.lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(text)
+        .trim()
 }
 
 fn clamp_text(content: &str) -> String {
@@ -448,15 +461,15 @@ async fn run_inner(
             state.db.current_session_id()?,
         )
     };
-    let cfg = client::LlmConfig {
-        base_url: settings.base_url.clone(),
-        api_key: settings.api_key.clone(),
-        model: if settings.subagent_model.trim().is_empty() {
-            settings.model.clone()
+    let cfg = client::LlmConfig::new(
+        &settings.base_url,
+        &settings.api_key,
+        if settings.subagent_model.trim().is_empty() {
+            settings.model.as_str()
         } else {
-            settings.subagent_model.trim().to_string()
+            settings.subagent_model.trim()
         },
-    };
+    );
 
     let mut user_msg = format!("子任务：{}", task.trim());
     if let Some(ctx) = context.map(str::trim).filter(|s| !s.is_empty()) {

@@ -92,7 +92,12 @@ impl TaskManager {
     /// 启动后台命令，输出实时写入日志文件后立即返回。
     /// 外部程序优先 argv 直启（CreateProcess，不经 shell）；
     /// cmd 命令经 cmd /c；PowerShell 脚本经 UTF-16LE Base64 EncodedCommand。
-    pub fn start_command(&self, app: &AppHandle, spec: CommandSpec<'_>) -> Result<TaskInfo> {
+    pub fn start_command(
+        &self,
+        app: &AppHandle,
+        spec: CommandSpec<'_>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<TaskInfo> {
         let command = spec.command.trim();
         let argv_mode = !spec.argv.is_empty();
         if !argv_mode && command.is_empty() {
@@ -230,6 +235,44 @@ impl TaskManager {
                 },
             );
         emit_changed(app, &info);
+
+        // 把进程生命周期绑定到发起它的聊天轮次。即使是“不等待”的后台命令，
+        // 用户点击停止也会强制结束整棵进程树，而不是只停代理循环。
+        if let Some(cancel) = cancel {
+            let cancel = cancel.clone();
+            let app_cancel = app.clone();
+            let tasks_cancel = Arc::clone(&self.tasks);
+            let id_cancel = id.clone();
+            tauri::async_runtime::spawn(async move {
+                cancel.cancelled().await;
+                let should_kill = {
+                    let Ok(mut guard) = tasks_cancel.lock() else {
+                        return;
+                    };
+                    let Some(entry) = guard.get_mut(&id_cancel) else {
+                        return;
+                    };
+                    if entry.info.status != "running" {
+                        false
+                    } else {
+                        entry.info.status = "cancelled".to_string();
+                        true
+                    }
+                };
+                if should_kill {
+                    use std::os::windows::process::CommandExt;
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/PID", &pid.to_string(), "/T", "/F"])
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .output();
+                    if let Ok(guard) = tasks_cancel.lock() {
+                        if let Some(entry) = guard.get(&id_cancel) {
+                            emit_changed(&app_cancel, &entry.info);
+                        }
+                    }
+                }
+            });
+        }
 
         // 监控协程：独占 child，等进程退出后回填状态。
         // 输出走日志文件而非管道，用 wait() 即可。
@@ -410,8 +453,9 @@ impl TaskManager {
         app: &AppHandle,
         spec: CommandSpec<'_>,
         timeout_secs: u64,
+        cancel: &CancellationToken,
     ) -> Result<TaskInfo> {
-        let info = self.start_command(app, spec)?;
+        let info = self.start_command(app, spec, Some(cancel))?;
         let id = info.id.clone();
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
         loop {
@@ -432,7 +476,14 @@ impl TaskManager {
                 let _ = app.emit("task-changed", &cur);
                 return Ok(cur);
             }
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    let _ = self.stop(app, &id);
+                    return Ok(self.get(&id).unwrap_or(info));
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {}
+            }
         }
     }
 
@@ -888,8 +939,8 @@ mod tests {
     use super::{
         decode_log, encode_powershell_command, looks_like_powershell,
         looks_like_unsplit_shell_line, normalize_success_exit_codes, powershell_file_bootstrap,
-        powershell_wrapper, resolve_program, resolve_shell, unwrap_powershell_command, utf8_command, validate_argv,
-        write_utf8_bom, ShellKind,
+        powershell_wrapper, resolve_program, resolve_shell, unwrap_powershell_command,
+        utf8_command, validate_argv, write_utf8_bom, ShellKind,
     };
     use base64::Engine as _;
 

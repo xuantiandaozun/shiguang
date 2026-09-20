@@ -104,7 +104,9 @@ impl AskUserHub {
 
     pub fn answer(&self, answers: Vec<AskAnswer>) -> Result<()> {
         let mut g = self.lock();
-        let pending = g.as_mut().ok_or_else(|| anyhow::anyhow!("当前没有待确认的问题"))?;
+        let pending = g
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("当前没有待确认的问题"))?;
         validate_answers(&pending.prompt, &answers)?;
         let tx = pending
             .tx
@@ -163,11 +165,7 @@ pub fn outcome_json(outcome: AskOutcome) -> Value {
     }
 }
 
-pub async fn execute(
-    app: &AppHandle,
-    args: &Value,
-    cancel: &CancellationToken,
-) -> Result<Value> {
+pub async fn execute(app: &AppHandle, args: &Value, cancel: &CancellationToken) -> Result<Value> {
     let prompt = parse_prompt(args)?;
     crate::windows::show_chat(app);
     let _ = app.emit("ask-user", &prompt);
