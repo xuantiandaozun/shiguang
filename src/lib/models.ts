@@ -1,4 +1,4 @@
-import type { LlmProfile } from "./ipc";
+import type { LlmProfile, SubagentRole } from "./ipc";
 import {
   CUSTOM_CATALOG_MODEL,
   MODEL_CATALOG,
@@ -57,14 +57,16 @@ export const LLM_PRESETS: LlmPreset[] = PROVIDER_PRESETS.map((p) => ({
   models: [] as never[],
 }));
 
-export type LlmProfileStatus = "ready" | "no-key" | "incomplete";
+export type LlmProfileStatus = "ready" | "no-key" | "incomplete" | "expired";
 
 export function llmProfileStatus(profile: {
   base_url: string;
   api_key: string;
   model: string;
   catalog_model?: string;
+  valid_until?: string;
 }): LlmProfileStatus {
+  if (profile.valid_until && new Date(profile.valid_until).getTime() <= Date.now()) return "expired";
   const catalogId = profile.catalog_model || inferCatalogModel(profile.model, profile.base_url);
   if (
     !profile.base_url.trim() ||
@@ -79,6 +81,7 @@ export function llmProfileStatus(profile: {
 
 export function llmProfileStatusLabel(status: LlmProfileStatus): string {
   switch (status) {
+    case "expired": return "已到期";
     case "ready":
       return "可切换";
     case "no-key":
@@ -89,17 +92,23 @@ export function llmProfileStatusLabel(status: LlmProfileStatus): string {
 }
 
 export function profileCatalogModel(profile: LlmProfile): string {
+  if (profile.models?.length) return CUSTOM_CATALOG_MODEL;
   if (profile.catalog_model?.trim()) return profile.catalog_model.trim();
   return inferCatalogModel(profile.model, profile.base_url);
 }
 
 export function profileCatalogLabel(profile: LlmProfile): string {
+  if (profile.models?.length) return profile.models.find((m) => m.model === profile.model)?.label || profile.model || "未选模型";
   const id = profileCatalogModel(profile);
   if (id === CUSTOM_CATALOG_MODEL) return profile.model || "自定义模型";
   return catalogModel(id)?.label ?? id;
 }
 
 export function syncProfileModel(profile: LlmProfile): LlmProfile {
+  if (profile.models?.length) {
+    const model = profile.models.find((m) => m.model === profile.model);
+    return { ...profile, catalog_model: CUSTOM_CATALOG_MODEL, supports_vision: model?.supports_vision ?? profile.supports_vision };
+  }
   const catalogId = profileCatalogModel(profile);
   const model =
     catalogId === CUSTOM_CATALOG_MODEL
@@ -109,6 +118,7 @@ export function syncProfileModel(profile: LlmProfile): LlmProfile {
 }
 
 export function migrateProfile(profile: LlmProfile): LlmProfile {
+  if (profile.models?.length) return syncProfileModel({ ...profile, valid_until: profile.valid_until ?? "" });
   const model = sanitizeApiModel(profile.base_url, profile.model);
   const provider = providerByBaseUrl(profile.base_url);
   let catalogId = profile.catalog_model?.trim() || "";
@@ -119,11 +129,20 @@ export function migrateProfile(profile: LlmProfile): LlmProfile {
   if (!catalogId || catalogId === CUSTOM_CATALOG_MODEL || (provider && !bound)) {
     catalogId = inferCatalogModel(model || profile.model, profile.base_url);
   }
-  return syncProfileModel({ ...profile, catalog_model: catalogId, model });
+  const synced = syncProfileModel({ ...profile, catalog_model: catalogId, model });
+  return { ...synced, catalog_model: CUSTOM_CATALOG_MODEL, valid_until: profile.valid_until ?? "", models: synced.model ? [{ model:synced.model, label:catalogModel(catalogId)?.label || synced.model, supports_vision:profile.supports_vision ?? catalogSupportsVision(catalogId, synced.model), context_window:catalogContextWindow(catalogId, synced.model) ?? 128_000 }] : [] };
 }
 
 export function migrateSettingsProfiles(profiles: LlmProfile[]): LlmProfile[] {
   return profiles.map(migrateProfile);
+}
+
+export function reconcileSubagentRoles(profiles: LlmProfile[], activeId: string, roles: SubagentRole[]): SubagentRole[] {
+  return roles.map((role) => {
+    const profileId = role.profile_id && profiles.some((p) => p.id === role.profile_id) ? role.profile_id : "";
+    const profile = profiles.find((p) => p.id === (profileId || activeId));
+    return { ...role, profile_id:profileId, model:profile?.models?.some((m) => m.model === role.model) ? role.model : "" };
+  });
 }
 
 export function presetByBaseUrl(baseUrl: string): ProviderPreset | undefined {
@@ -186,8 +205,10 @@ export function applyProviderPreset(
     catalog_model: nextCatalog,
     thinking_enabled: preset.thinking ?? profile.thinking_enabled,
     api_key: keepKey ? profile.api_key : "",
+    models: [],
+    model: "",
   };
-  return syncProfileModel(next);
+  return migrateProfile(syncProfileModel(next));
 }
 
 function apiModelExistsForProvider(catalogId: string, providerId: string): boolean {

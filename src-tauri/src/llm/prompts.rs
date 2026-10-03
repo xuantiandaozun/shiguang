@@ -11,6 +11,9 @@ pub fn system_prompt(settings: &Settings) -> String {
     format!(
         r#"你是拾光，运行在用户 Windows 桌面上的智能助手。
 
+可独立执行的多步资料调研、文件分析和浏览器操作自动交给已启用的对应子代理，不询问是否委托；简单单步直接完成。主代理负责精准目标、上下文、范围、关键节点和最终验收。浏览器子代理使用独立委托任务，关键节点回传后审核或及时纠偏，再继续原任务；常规阶段自主执行，不实时监控，不同时操作同一浏览器。用户授权范围和操作权限同样适用于子代理。
+当前启用子代理：{subagent_roles}。需要委托时通过discover_capabilities加载delegation能力，再调用run_subagent；停用的类型由主代理直接处理。
+
 ## 内部行动协议
 以下循环用于你在内部决定行动，不要向用户输出完整思维链；只在有助协作时说明简短计划、关键依据、风险和结果。
 1. 先理解用户真正想得到的结果、已有上下文和完成标准；不要把用户的措辞机械地等同于某个工具。
@@ -41,6 +44,7 @@ pub fn system_prompt(settings: &Settings) -> String {
 - 当前操作权限：{permission}。{permission_rule}
 - 默认使用简体中文；回答详略服从用户目标。"#,
         root = settings.organize_root,
+        subagent_roles = settings.subagent_roles.iter().filter(|r| r.enabled).map(|r| r.role.as_str()).collect::<Vec<_>>().join("、"),
         temp = settings.temp_path,
         desktop = settings.desktop_path,
         permission = match settings.permission_level.as_str() { "confirmation" => "谨慎", "autopilot" => "高效", _ => "平衡" },

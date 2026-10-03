@@ -144,7 +144,7 @@ export default function SkillsTab() {
         <div className="flex items-center gap-2">
           <div className="text-sm font-medium text-slate-100">已安装 Skills</div>
           <span className="text-xs text-slate-500">
-            {skills.length} 个 · 内部只读（改代码打包更新）· 外部可编辑 / 同步 / AI 沉淀
+            {skills.length} 个 · 内部只读 · 外部可保存资源并运行自己的程序
           </span>
           <button
             onClick={() => setCreating((v) => !v)}
@@ -175,6 +175,9 @@ export default function SkillsTab() {
               rows={8}
               className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500 placeholder:text-slate-600 font-mono"
             />
+            <div className="text-[11px] text-slate-500 leading-4">
+              创建后，AI 可在该技能目录中新增或编辑代码、模板和配置；程序可自行创建 SQLite 等持久数据。
+            </div>
             <button
               onClick={create}
               disabled={!form.name.trim() || !form.description.trim() || !form.body.trim()}

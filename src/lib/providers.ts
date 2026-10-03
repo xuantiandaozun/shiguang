@@ -18,6 +18,11 @@ export type ProviderPreset = {
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
+    id: "aliyun-coding", name: "阿里 Coding Plan", group: "国内",
+    baseUrl: "https://coding.dashscope.aliyuncs.com/v1", defaultCatalogModel: "__custom__",
+    hint: "Coding Plan 专用接口。请填写套餐支持的实际模型名，并维护本配置自己的模型列表和有效期。",
+  },
+  {
     id: "deepseek",
     name: "DeepSeek",
     group: "国内",

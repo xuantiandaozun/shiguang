@@ -1,4 +1,4 @@
-use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const CHAT_W: f64 = 400.0;
 const CHAT_H: f64 = 620.0;
@@ -55,6 +55,29 @@ pub fn open_main(app: &AppHandle) {
         let _ = main.unminimize();
         let _ = main.set_focus();
     }
+}
+
+pub fn show_delegation(app: &AppHandle, id: &str) -> tauri::Result<()> {
+    let label = format!("delegation-{id}");
+    if let Some(window) = app.get_webview_window(&label) {
+        window.show()?;
+        window.unminimize()?;
+        window.set_focus()?;
+        return Ok(());
+    }
+    let url = WebviewUrl::App(format!("/#/delegation?id={id}").into());
+    let window = WebviewWindowBuilder::new(app, label, url)
+        .title("拾光 · 委托任务")
+        .inner_size(430.0, 650.0)
+        .min_inner_size(360.0, 480.0)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .resizable(true)
+        .center()
+        .build()?;
+    window.set_focus()?;
+    Ok(())
 }
 
 /// 提醒弹窗：定位到屏幕右下角（贴着工作区边缘），置顶展示

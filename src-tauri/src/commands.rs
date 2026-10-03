@@ -24,6 +24,39 @@ pub struct LlmProfile {
     /// 自定义模型的识图能力覆盖；None 时继续按内置目录/模型名推断。
     #[serde(default)]
     pub supports_vision: Option<bool>,
+    #[serde(default)]
+    pub models: Vec<ProfileModel>,
+    #[serde(default)]
+    pub valid_until: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileModel {
+    pub model: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub supports_vision: bool,
+    #[serde(default = "default_context_window")]
+    pub context_window: usize,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentRole {
+    pub role: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub profile_id: String,
+    #[serde(default)]
+    pub model: String,
+}
+
+pub fn default_subagent_roles() -> Vec<SubagentRole> {
+    ["research", "files", "browser"].into_iter().map(|role| SubagentRole {
+        role: role.into(), enabled: true, profile_id: String::new(), model: String::new(),
+    }).collect()
 }
 
 fn default_reasoning_effort() -> String {
@@ -61,6 +94,8 @@ pub struct Settings {
     pub subagent_reasoning_effort: String,
     /// 子代理模型，留空则跟随主模型
     pub subagent_model: String,
+    #[serde(default = "default_subagent_roles")]
+    pub subagent_roles: Vec<SubagentRole>,
     /// 摘要压缩模型；留空时跟随主模型。
     #[serde(default)]
     pub compact_model: String,
@@ -174,6 +209,8 @@ pub fn load_settings(db: &Db) -> Settings {
             _ => "low".to_string(),
         },
         subagent_model: get("subagent_model", ""),
+        subagent_roles: db.get_setting("subagent_roles").ok().flatten()
+            .and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_else(default_subagent_roles),
         compact_model: get("compact_model", ""),
         context_window: get("context_window", "128000")
             .parse()
@@ -285,6 +322,68 @@ fn apply_active_llm_profile(settings: &mut Settings) {
     } else {
         crate::llm::models::supports_vision(&p.model)
     };
+    if let Some(model) = p.models.iter().find(|model| model.model == p.model) {
+        settings.model_supports_vision = model.supports_vision;
+        settings.context_window = model.context_window;
+    }
+}
+
+pub fn profile_expired(profile: &LlmProfile) -> anyhow::Result<bool> {
+    if profile.valid_until.trim().is_empty() { return Ok(false); }
+    let raw = profile.valid_until.trim();
+    let deadline = chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S"))
+        .map_err(|_| anyhow::anyhow!("「{}」的有效期格式无效", profile.name))?;
+    Ok(chrono::Local::now().naive_local() >= deadline)
+}
+
+pub fn ensure_profile_usable(settings: &Settings, profile_id: &str) -> anyhow::Result<()> {
+    if let Some(profile) = settings.llm_profiles.iter().find(|p| p.id == profile_id) {
+        if profile_expired(profile)? {
+            anyhow::bail!("「{}」已到期，请在设置中续期或切换配置", profile.name);
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_profiles(settings: &Settings) -> anyhow::Result<()> {
+    let mut ids = std::collections::HashSet::new();
+    for profile in &settings.llm_profiles {
+        if profile.id.trim().is_empty() || !ids.insert(&profile.id) { anyhow::bail!("配置标识不能为空或重复"); }
+        profile_expired(profile)?;
+        let mut names = std::collections::HashSet::new();
+        for model in &profile.models {
+            if model.model.trim().is_empty() || model.model != model.model.trim() || !names.insert(&model.model) { anyhow::bail!("「{}」的模型名称不能为空、带首尾空格或重复", profile.name); }
+            if !(16_000..=20_000_000).contains(&model.context_window) { anyhow::bail!("模型上下文窗口应在16k～20m之间"); }
+        }
+        if !profile.models.is_empty() && !profile.models.iter().any(|m| m.model == profile.model) { anyhow::bail!("「{}」当前模型不在已添加列表中", profile.name); }
+    }
+    let mut roles = std::collections::HashSet::new();
+    for role in &settings.subagent_roles {
+        if !matches!(role.role.as_str(), "research" | "files" | "browser") || !roles.insert(&role.role) { anyhow::bail!("子代理类型无效或重复"); }
+        let profile_id = if role.profile_id.is_empty() { &settings.active_llm_profile_id } else { &role.profile_id };
+        let profile = settings.llm_profiles.iter().find(|p| &p.id == profile_id).ok_or_else(|| anyhow::anyhow!("子代理引用的供应商配置不存在"))?;
+        if !role.model.is_empty() && !profile.models.iter().any(|m| m.model == role.model) { anyhow::bail!("子代理模型不在所选供应商的列表中"); }
+    }
+    Ok(())
+}
+
+pub fn settings_for_subagent(settings: &Settings, role: &str) -> anyhow::Result<Settings> {
+    let config = settings.subagent_roles.iter().find(|r| r.role == role).ok_or_else(|| anyhow::anyhow!("子代理类型不存在：{role}"))?;
+    if !config.enabled { anyhow::bail!("{role} 子代理已停用"); }
+    let mut result = settings.clone();
+    if !config.profile_id.is_empty() { result.active_llm_profile_id = config.profile_id.clone(); }
+    if !result.llm_profiles.iter().any(|p| p.id == result.active_llm_profile_id) { anyhow::bail!("子代理引用的供应商配置不存在"); }
+    ensure_profile_usable(&result, &result.active_llm_profile_id)?;
+    apply_active_llm_profile(&mut result);
+    if !config.model.is_empty() {
+        let profile = result.llm_profiles.iter().find(|p| p.id == result.active_llm_profile_id).ok_or_else(|| anyhow::anyhow!("子代理配置不存在"))?;
+        let model = profile.models.iter().find(|m| m.model == config.model).ok_or_else(|| anyhow::anyhow!("子代理模型不在供应商列表中"))?;
+        result.model = model.model.clone(); result.model_supports_vision = model.supports_vision; result.context_window = model.context_window;
+    }
+    result.thinking_enabled = settings.subagent_thinking_enabled;
+    result.reasoning_effort = settings.subagent_reasoning_effort.clone();
+    Ok(result)
 }
 
 /// 把旧的单套 base_url/api_key/model 迁成可切换档案；之后以档案为源，回写到生效字段。
@@ -317,6 +416,7 @@ fn hydrate_llm_profiles(db: &Db, settings: &mut Settings) {
             thinking_enabled: settings.thinking_enabled,
             reasoning_effort: settings.reasoning_effort.clone(),
             supports_vision: None,
+            models: Vec::new(), valid_until: String::new(),
         });
         settings.llm_profiles = profiles;
         settings.active_llm_profile_id = id;
@@ -327,6 +427,9 @@ fn hydrate_llm_profiles(db: &Db, settings: &mut Settings) {
     settings.llm_profiles = profiles;
     for p in &mut settings.llm_profiles {
         p.model = crate::llm::provider_headers::sanitize_model(&p.base_url, &p.model);
+        if p.models.is_empty() && !p.model.trim().is_empty() {
+            p.models.push(ProfileModel { model:p.model.clone(), label:p.model.clone(), supports_vision:p.supports_vision.unwrap_or_else(|| crate::llm::models::supports_vision(&p.model)), context_window:settings.context_window });
+        }
     }
     settings.active_llm_profile_id = if settings.llm_profiles.iter().any(|p| p.id == stored_active)
     {
@@ -663,6 +766,37 @@ pub fn load_chat_history(state: State<AppState>) -> Result<Vec<ChatMsg>, String>
 pub fn clear_chat_history(state: State<AppState>) -> Result<(), String> {
     let session_id = state.db.current_session_id().map_err(|e| e.to_string())?;
     state.db.clear_chat(session_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_delegations(app: AppHandle) -> Result<Vec<crate::db::DelegationTask>, String> {
+    crate::delegation::list(&app).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_delegation(app: AppHandle, id: String) -> Result<crate::delegation::DelegationView, String> {
+    crate::delegation::get(&app, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn show_delegation_window(app: AppHandle, id: String) -> Result<(), String> {
+    crate::delegation::get(&app, &id).map_err(|e| e.to_string())?;
+    crate::windows::show_delegation(&app, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_delegation(app: AppHandle, title: String, goal: String) -> Result<crate::db::DelegationTask, String> {
+    crate::delegation::create(&app, &title, &goal, "用户").map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn reply_delegation(app: AppHandle, id: String, content: String) -> Result<crate::db::DelegationTask, String> {
+    crate::delegation::reply(&app, &id, "user", &content).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn cancel_delegation(app: AppHandle, id: String) -> Result<crate::db::DelegationTask, String> {
+    crate::delegation::cancel(&app, &id).await.map_err(|e| e.to_string())
 }
 
 // ---------- windows ----------
@@ -1046,6 +1180,7 @@ pub fn save_settings(
             thinking_enabled: settings.thinking_enabled,
             reasoning_effort: settings.reasoning_effort.clone(),
             supports_vision: None,
+            models: Vec::new(), valid_until: String::new(),
         });
         settings.active_llm_profile_id = "legacy".into();
     }
@@ -1057,6 +1192,8 @@ pub fn save_settings(
         settings.active_llm_profile_id = settings.llm_profiles[0].id.clone();
     }
     apply_active_llm_profile(&mut settings);
+    validate_profiles(&settings).map_err(|e| e.to_string())?;
+    db.set_setting("subagent_roles", &serde_json::to_string(&settings.subagent_roles).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     persist_llm_profiles(db, &settings);
     for (k, v) in [
         ("base_url", settings.base_url.trim()),
@@ -1526,6 +1663,57 @@ pub fn get_llm_usage_stats(state: State<AppState>) -> Result<crate::db::LlmUsage
 #[cfg(test)]
 mod llm_profile_tests {
     use super::*;
+
+    #[test]
+    fn provider_models_and_subagent_credentials_stay_independent() {
+        let (db,path) = test_db();
+        db.set_setting("llm_profiles", r#"[{"id":"a","name":"阿里","base_url":"https://coding.dashscope.aliyuncs.com/v1","api_key":"test-a","model":"qwen-manual","models":[{"model":"qwen-manual","supports_vision":true,"context_window":256000},{"model":"glm-manual","context_window":128000}]},{"id":"b","name":"其他","base_url":"https://api.example.com/v1","api_key":"test-b","model":"other-model","models":[{"model":"other-model","context_window":64000}]}]"#).unwrap();
+        db.set_setting("active_llm_profile_id","b").unwrap();
+        let mut settings = load_settings(&db);
+        settings.subagent_roles.iter_mut().find(|r| r.role == "browser").unwrap().profile_id = "a".into();
+        settings.subagent_roles.iter_mut().find(|r| r.role == "browser").unwrap().model = "qwen-manual".into();
+        validate_profiles(&settings).unwrap();
+        let browser = settings_for_subagent(&settings,"browser").unwrap();
+        assert_eq!(settings.api_key,"test-b");
+        assert_eq!(browser.api_key,"test-a");
+        assert_eq!(browser.base_url,"https://coding.dashscope.aliyuncs.com/v1");
+        assert_eq!(browser.model,"qwen-manual");
+        assert!(browser.model_supports_vision);
+        assert_eq!(browser.context_window,256000);
+        settings.subagent_roles.iter_mut().find(|r| r.role == "browser").unwrap().model = "other-model".into();
+        assert!(validate_profiles(&settings).is_err());
+        assert!(settings_for_subagent(&settings,"browser").is_err());
+        cleanup(db,&path);
+    }
+
+    #[test]
+    fn expired_plan_blocks_until_renewed() {
+        let (db,path) = test_db();
+        let mut settings = load_settings(&db);
+        settings.llm_profiles[0].valid_until = "2000-01-01T00:00".into();
+        assert!(ensure_profile_usable(&settings,&settings.active_llm_profile_id).is_err());
+        assert!(settings_for_subagent(&settings,"browser").is_err());
+        settings.llm_profiles[0].valid_until = "2099-01-01T00:00".into();
+        assert!(ensure_profile_usable(&settings,&settings.active_llm_profile_id).is_ok());
+        settings.llm_profiles[0].valid_until = "not-a-date".into();
+        assert!(validate_profiles(&settings).is_err());
+        cleanup(db,&path);
+    }
+
+    #[test]
+    fn model_lists_and_expiry_survive_storage_roundtrip() {
+        let (db,path) = test_db();
+        let mut settings = load_settings(&db);
+        settings.llm_profiles[0].models = vec![ProfileModel { model:"exact-manual-name".into(),label:"我的模型".into(),supports_vision:false,context_window:128000 }];
+        settings.llm_profiles[0].model = "exact-manual-name".into();
+        settings.llm_profiles[0].valid_until = "2099-12-01T09:30".into();
+        persist_llm_profiles(&db,&settings);
+        let restored = load_settings(&db);
+        assert_eq!(restored.model,"exact-manual-name");
+        assert_eq!(restored.llm_profiles[0].models[0].label,"我的模型");
+        assert_eq!(restored.llm_profiles[0].valid_until,"2099-12-01T09:30");
+        cleanup(db,&path);
+    }
     use crate::db::Db;
 
     fn test_db() -> (Db, std::path::PathBuf) {

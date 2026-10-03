@@ -41,6 +41,7 @@ fn tools_for_category(category: &str) -> &'static [&'static str] {
             "browser_find",
             "browser_network_observe",
             "browser_request",
+            "browser_cookies",
             "browser_read",
             "browser_click",
             "browser_type",
@@ -76,17 +77,43 @@ fn tools_for_category(category: &str) -> &'static [&'static str] {
             "lookup_cache",
         ],
         "system" => &["get_system_info"],
-        "delegation" => &["run_subagent", "await_subagent"],
+        "delegation" => &["run_subagent", "await_subagent", "reply_subagent"],
         "skills" => &[
             "list_skills",
             "load_skill",
             "create_skill",
+            "skill_resource",
+            "run_skill_program",
             "delete_skill",
             "manage_skill",
         ],
         "workflows" => &["list_workflows", "create_workflow", "manage_workflow"],
         _ => &[],
     }
+}
+
+fn category_for_tool(name: &str) -> &'static str {
+    if core_tool_names().iter().any(|item| item == name) {
+        return "core";
+    }
+    for category in [
+        "files",
+        "browser",
+        "web",
+        "organize",
+        "todos",
+        "profile",
+        "commands",
+        "system",
+        "delegation",
+        "skills",
+        "workflows",
+    ] {
+        if tools_for_category(category).contains(&name) {
+            return category;
+        }
+    }
+    "other"
 }
 
 fn activate_categories(categories: &[String]) -> Vec<String> {
@@ -118,7 +145,7 @@ pub fn definitions() -> Value {
                                 "type": "string",
                                 "enum": ["files", "browser", "web", "organize", "todos", "profile", "commands", "system", "delegation", "skills", "workflows"]
                             },
-                            "description": "要检索的能力：files=本地文件/图片，browser=已打开的网页，web=公开网页搜索/抓取，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，system=硬件与进程，delegation=只读子任务，skills=管理技能，workflows=固定流程与定时执行"
+                            "description": "要检索的能力：files=本地文件/图片，browser=已打开的网页，web=公开网页搜索/抓取，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，system=硬件与进程，delegation=资料、文件和浏览器子代理，skills=管理技能，workflows=固定流程与定时执行"
                         }
                     },
                     "required": ["query", "categories"]
@@ -383,6 +410,23 @@ pub fn definitions() -> Value {
                     "headers": { "type": "object", "description": "可选的非认证请求头；仅允许 Content-Type、Accept、X-Requested-With" },
                     "max_chars": { "type": "integer", "description": "返回正文预览上限，默认 6000，最大 20000" }
                 }, "required": ["method", "url"] }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_cookies",
+                "description": "通过拾光浏览器扩展读取页面 JavaScript 无法访问的 Cookie（包括 HttpOnly）。仅在用户明确要求读取或导出其当前浏览器 Cookie 时使用；必须用 domains 或 urls 限定站点，优先再用 names 缩小范围。该能力只走当前 Chrome Profile 中已安装的扩展，不会回退到独立 CDP。output=return 会把 Cookie 返回给当前任务；post 只允许发送到 127.0.0.1/localhost；download 保存为本地文件。Cookie 属于敏感凭据，不要在回复中复述、写入日志或保存为浏览器配方。",
+                "parameters": { "type": "object", "properties": {
+                    "domains": { "type": "array", "items": { "type": "string" }, "description": "Cookie 域名列表，如 taobao.com；与 urls 至少提供一项" },
+                    "urls": { "type": "array", "items": { "type": "string" }, "description": "完整 URL 列表；与 domains 至少提供一项" },
+                    "names": { "type": "array", "items": { "type": "string" }, "description": "可选 Cookie 名称白名单，如 cookie2、sgcookie；不传则返回目标站点的全部 Cookie" },
+                    "output": { "type": "string", "enum": ["return", "post", "download"], "description": "默认 return" },
+                    "post_url": { "type": "string", "description": "output=post 时必填，只允许 http://127.0.0.1 或 http://localhost" },
+                    "format": { "type": "string", "enum": ["json", "netscape-lite"], "description": "默认 netscape-lite；return 始终返回结构化 Cookie" },
+                    "filename": { "type": "string", "description": "output=download 时的下载文件名" },
+                    "save_as": { "type": "boolean", "description": "下载时是否显示另存为，默认 true" }
+                }, "required": [] }
             }
         },
         {
@@ -739,10 +783,11 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "run_subagent",
-                "description": "把「需要多步阅读或分析」的子任务交给子代理。子代理在独立上下文中工作（只读文件/索引/公开网页等），你只能拿到结构化汇报（status=complete 或 blocked，含 findings/evidence/blockers）。适合会占掉大量对话上下文的汇总任务。子任务必须具体、自包含。不能操作浏览器、不能写文件、不能再委托。耗时任务设 run_in_background=true，主对话先继续，需要结论时 await_subagent；不要轮询。",
+                "description": "按任务自动委托，无须询问是否使用。research=资料调研，files=指定范围文件分析，browser=浏览器操作与实测。给准确目标、对象/环境、必要上下文、允许/排除范围、证据与产出绝对路径、少量关键节点。浏览器节点回传暂停后用reply_subagent审核/纠偏；阶段内部自主执行，不实时监控，不同时操作同一浏览器。简单单步直接完成。子代理不得再委托。",
                 "parameters": {
                     "type": "object",
                     "properties": {
+                        "role": {"type":"string","enum":["auto","research","files","browser"],"description":"默认auto；浏览器操作明确选browser"},
                         "task": { "type": "string", "description": "子任务描述：具体、自包含，写清要做什么、结论里要包含什么" },
                         "context": { "type": "string", "description": "可选：子代理需要的背景信息（关键文件路径、目标格式、用户偏好等）" },
                         "run_in_background": { "type": "boolean", "description": "true 时立即返回 job_id，子代理在后台跑。默认 false（同步等待汇报）" },
@@ -750,6 +795,14 @@ pub fn definitions() -> Value {
                     },
                     "required": ["task"]
                 }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "reply_subagent",
+                "description": "用原job_id回答浏览器子代理的问题、审核关键节点或纠偏。明确继续阶段和边界；不能代替用户回答waiting_user。暂停或错误可补充意见继续，勿另起任务。",
+                "parameters":{"type":"object","properties":{"job_id":{"type":"string"},"content":{"type":"string"}},"required":["job_id","content"]}
             }
         },
         {
@@ -1057,6 +1110,42 @@ pub fn definitions() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "skill_resource",
+                "description": "管理【外部】Skill 私有目录中的资源文件。路径始终相对于该技能目录，不能访问目录之外；SKILL.md 必须用 create_skill 修改。list 列出资源，read 读取 UTF-8 文本，write 新建或覆盖代码、模板、配置等文本文件。用户要求技能保存持久文件或修改自己的代码/资源时使用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["list", "read", "write"] },
+                        "name": { "type": "string", "description": "外部技能名" },
+                        "path": { "type": "string", "description": "read/write 使用的技能内相对路径，如 scripts/main.py" },
+                        "content": { "type": "string", "description": "write 写入的完整 UTF-8 文本，最大 1 MB" }
+                    },
+                    "required": ["action", "name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_skill_program",
+                "description": "执行【外部】Skill 私有目录中的程序，工作目录固定为该技能目录。程序可自行读写技能资源、创建 SQLite 等持久数据。必须先通过 skill_resource 写入或确认入口文件；需启用设置中的命令执行功能。入口路径不能越出技能目录。注意：这是普通本机进程，工作目录隔离不等于操作系统沙箱，程序主动使用绝对路径时仍继承当前用户权限。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "外部技能名" },
+                        "entry": { "type": "string", "description": "技能内入口文件，如 scripts/main.py" },
+                        "runtime": { "type": "string", "enum": ["python", "node", "powershell", "direct"], "description": "入口运行方式；direct 用于技能内 exe/cmd/bat" },
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "传给程序的参数，每项独立，不需要命令行转义" },
+                        "stdin": { "type": "string", "description": "可选标准输入" },
+                        "timeout_secs": { "type": "integer", "description": "超时秒数，默认 60，范围 1–300" }
+                    },
+                    "required": ["name", "entry", "runtime"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "delete_skill",
                 "description": "删除一条【外部】Skill（不可恢复）。内部技能禁止删除。仅用户明确要求时调用。",
                 "parameters": {
@@ -1137,6 +1226,141 @@ pub fn definitions() -> Value {
             }
         }
     ])
+}
+
+/// 首次启动时把代码中的基础定义写入运行时注册表。INSERT OR IGNORE 保证后续可直接
+/// 修改数据库里的描述、Schema、启停状态和执行映射，重启或升级不会把它们覆盖。
+pub fn seed_registry(db: &Db) -> Result<usize> {
+    let now = crate::db::now_str();
+    let entries = definitions()
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|definition| {
+            let name = definition.pointer("/function/name")?.as_str()?.to_string();
+            let is_cookie_bridge = name == "browser_cookies";
+            Some(crate::db::ToolRegistryEntry {
+                category: category_for_tool(&name).to_string(),
+                executor_kind: if is_cookie_bridge {
+                    "browser_action".to_string()
+                } else {
+                    "builtin".to_string()
+                },
+                executor_config: if is_cookie_bridge {
+                    json!({ "action": "cookies", "extension_only": true })
+                } else {
+                    json!({})
+                },
+                name,
+                definition,
+                enabled: true,
+                source: "builtin".to_string(),
+                revision: 1,
+                updated_at: now.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    db.seed_tool_registry(&entries)
+}
+
+pub fn registry_definitions(db: &Db, native_vision: bool) -> Value {
+    let Ok(entries) = db.enabled_tool_registry() else {
+        return chat_definitions(native_vision);
+    };
+    if entries.is_empty() {
+        return chat_definitions(native_vision);
+    }
+    Value::Array(
+        entries
+            .into_iter()
+            .filter(|entry| entry.definition.is_object())
+            .filter(|entry| !(native_vision && entry.name == "read_image"))
+            .map(|entry| {
+                let mut definition = entry.definition;
+                // Upgrade the built-in delegation contract without replacing user edits.
+                if entry.name == "run_subagent" && entry.executor_kind == "builtin" {
+                    let current = definitions_for(&["run_subagent"]);
+                    let current = &current.as_array().unwrap()[0];
+                    if let Some(properties) = definition.pointer_mut("/function/parameters/properties").and_then(Value::as_object_mut) {
+                        properties.entry("role".to_string()).or_insert_with(|| current["function"]["parameters"]["properties"]["role"].clone());
+                    }
+                    let legacy = "把「需要多步阅读或分析」的子任务交给子代理。子代理在独立上下文中工作（只读文件/索引/公开网页等），你只能拿到结构化汇报（status=complete 或 blocked，含 findings/evidence/blockers）。适合会占掉大量对话上下文的汇总任务。子任务必须具体、自包含。不能操作浏览器、不能写文件、不能再委托。耗时任务设 run_in_background=true，主对话先继续，需要结论时 await_subagent；不要轮询。";
+                    if definition["function"]["description"].as_str() == Some(legacy) {
+                        definition["function"]["description"] = current["function"]["description"].clone();
+                    }
+                }
+                definition
+            })
+            .collect(),
+    )
+}
+
+pub fn registry_definitions_for(db: &Db, names: &[String], native_vision: bool) -> Value {
+    let all = registry_definitions(db, native_vision);
+    Value::Array(
+        all.as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|tool| {
+                tool.pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| names.iter().any(|candidate| candidate == name))
+            })
+            .collect(),
+    )
+}
+
+pub fn registry_definitions_for_categories(
+    db: &Db,
+    categories: &[String],
+    native_vision: bool,
+) -> Value {
+    let Ok(entries) = db.enabled_tool_registry() else {
+        return chat_definitions(native_vision);
+    };
+    if entries.is_empty() || categories.is_empty() {
+        return registry_definitions(db, native_vision);
+    }
+    Value::Array(
+        entries
+            .into_iter()
+            .filter(|entry| {
+                entry.category == "core"
+                    || categories
+                        .iter()
+                        .any(|category| category == &entry.category)
+            })
+            .filter(|entry| entry.definition.is_object())
+            .filter(|entry| !(native_vision && entry.name == "read_image"))
+            .map(|entry| entry.definition)
+            .collect(),
+    )
+}
+
+pub fn registry_category_cards(db: &Db) -> Value {
+    let Ok(entries) = db.enabled_tool_registry() else {
+        return json!({});
+    };
+    let mut grouped = serde_json::Map::new();
+    for entry in entries.into_iter().filter(|entry| entry.category != "core") {
+        let label = entry
+            .definition
+            .pointer("/function/description")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .chars()
+            .take(90)
+            .collect::<String>();
+        let bucket = grouped
+            .entry(entry.category)
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(items) = bucket.as_array_mut() {
+            items.push(json!({ "name": entry.name, "summary": label }));
+        }
+    }
+    Value::Object(grouped)
 }
 
 /// 从全量工具定义中按名称挑出子集（子代理等受限场景使用）
@@ -1465,6 +1689,28 @@ pub async fn execute(
 ) -> Result<Value> {
     let state = app.state::<crate::AppState>();
     let db = &state.db;
+    if let Some(entry) = db.tool_registry_entry(name)? {
+        if entry.executor_kind == "browser_action" {
+            let action = entry
+                .executor_config
+                .get("action")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("动态浏览器工具 {name} 缺少 action 映射"))?;
+            let mut params = args.clone();
+            if entry
+                .executor_config
+                .get("extension_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+            {
+                params["channel"] = json!("extension");
+            }
+            return state.browser.call(action, params).await;
+        }
+        if entry.executor_kind != "builtin" {
+            bail!("工具 {name} 的执行器 {} 尚未受支持", entry.executor_kind);
+        }
+    }
     match name {
         "discover_capabilities" => {
             let query = args
@@ -2091,8 +2337,9 @@ pub async fn execute(
             let _ = app.emit("profile-changed", ());
             Ok(json!({ "ok": true, "deleted_id": id }))
         }
-        "run_subagent" => crate::llm::subagent::execute(app, args, cancel).await,
+        "run_subagent" => crate::llm::subagent::execute_in_session(app, args, cancel, session_id).await,
         "await_subagent" => crate::llm::subagent::await_job(app, args, cancel).await,
+        "reply_subagent" => crate::llm::subagent::reply_job(app, args).await,
         "web_search" | "web_fetch" => crate::web::execute(name, args, cancel).await,
         n @ ("run_command"
         | "run_command_background"
@@ -2241,6 +2488,120 @@ pub async fn execute(
                 .create(name, description, body)?;
             let _ = app.emit("skills-changed", ());
             Ok(json!({ "ok": true, "skill": info }))
+        }
+        "skill_resource" => {
+            let action = args
+                .get("action")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("缺少 action"))?;
+            let name = args
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("缺少 name"))?;
+            let store = &app.state::<crate::AppState>().skills;
+            match action {
+                "list" => {
+                    let resources = store.list_resources(name)?;
+                    Ok(json!({ "name": name, "count": resources.len(), "resources": resources }))
+                }
+                "read" => {
+                    let path = args
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| anyhow!("read 需要 path"))?;
+                    Ok(
+                        json!({ "name": name, "path": path, "content": store.read_resource(name, path)? }),
+                    )
+                }
+                "write" => {
+                    let path = args
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| anyhow!("write 需要 path"))?;
+                    let content = args
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| anyhow!("write 需要 content"))?;
+                    let result = store.write_resource(name, path, content)?;
+                    let _ = app.emit("skills-changed", ());
+                    Ok(json!({ "ok": true, "name": name, "resource": result }))
+                }
+                other => bail!("未知 action: {}（list/read/write）", other),
+            }
+        }
+        "run_skill_program" => {
+            if !crate::commands::load_settings(db).command_tools_enabled {
+                bail!(
+                    "命令执行功能未启用。请用户在主窗口「设置 → 后台任务与命令执行」中打开开关。"
+                );
+            }
+            let name = args
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("缺少 name"))?;
+            let entry = args
+                .get("entry")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("缺少 entry"))?;
+            let runtime = args
+                .get("runtime")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("缺少 runtime"))?;
+            let extra_args: Vec<String> = args
+                .get("args")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| {
+                            item.as_str()
+                                .map(str::to_string)
+                                .ok_or_else(|| anyhow!("args 必须是字符串数组"))
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let (root, program) = app
+                .state::<crate::AppState>()
+                .skills
+                .executable_resource(name, entry)?;
+            let ext = program
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let program_text = program.to_string_lossy().to_string();
+            let mut argv: Vec<String> = match runtime {
+                "python" if ext == "py" => vec!["python".into(), program_text],
+                "node" if ["js", "mjs", "cjs"].contains(&ext.as_str()) => {
+                    vec!["node".into(), program_text]
+                }
+                "powershell" if ext == "ps1" => vec![
+                    "powershell".into(),
+                    "-NoProfile".into(),
+                    "-File".into(),
+                    program_text,
+                ],
+                "direct" if ["exe", "cmd", "bat", "com"].contains(&ext.as_str()) => {
+                    vec![program_text]
+                }
+                "python" | "node" | "powershell" | "direct" => {
+                    bail!("runtime 与入口文件扩展名不匹配")
+                }
+                other => bail!("未知 runtime: {}", other),
+            };
+            argv.extend(extra_args);
+            let mut run_args = json!({
+                "argv": argv,
+                "workdir": root.to_string_lossy(),
+                "timeout_secs": args.get("timeout_secs").and_then(Value::as_u64).unwrap_or(60).clamp(1, 300),
+                "label": format!("Skill {} · {}", name, entry),
+            });
+            if let Some(stdin) = args.get("stdin").and_then(Value::as_str) {
+                run_args["stdin"] = json!(stdin);
+            }
+            command_tool(app, "run_command", &run_args, cancel).await
         }
         "delete_skill" => {
             let name = args
@@ -3033,6 +3394,62 @@ mod capability_tests {
             .and_then(Value::as_str)
             .unwrap()
             .contains("不依赖 ref"));
+    }
+
+    #[test]
+    fn browser_category_exposes_extension_cookie_tool() {
+        let active = activate_categories(&["browser".to_string()]);
+        assert!(active.iter().any(|name| name == "browser_cookies"));
+        let definitions = definitions_for(&["browser_cookies"]);
+        let tool = &definitions.as_array().unwrap()[0];
+        assert_eq!(
+            tool.pointer("/function/name").and_then(Value::as_str),
+            Some("browser_cookies")
+        );
+        assert!(tool
+            .pointer("/function/description")
+            .and_then(Value::as_str)
+            .unwrap()
+            .contains("HttpOnly"));
+    }
+
+    #[test]
+    fn registry_seed_is_editable_and_not_overwritten() {
+        let path = std::env::temp_dir().join(format!(
+            "shiguang-tool-registry-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = Db::new(&path).unwrap();
+        assert!(seed_registry(&db).unwrap() > 0);
+        let mut entry = db.tool_registry_entry("browser_cookies").unwrap().unwrap();
+        entry.definition["function"]["description"] = json!("运行时修改后的描述");
+        db.put_tool_registry_entry(&entry).unwrap();
+        let mut old_agent = db.tool_registry_entry("run_subagent").unwrap().unwrap();
+        old_agent.definition["function"]["parameters"]["properties"].as_object_mut().unwrap().remove("role");
+        old_agent.definition["function"]["description"] = json!("自定义委托描述");
+        db.put_tool_registry_entry(&old_agent).unwrap();
+        assert_eq!(seed_registry(&db).unwrap(), 0);
+        let tools = registry_definitions(&db, false);
+        let agent = tools.as_array().unwrap().iter().find(|tool| tool["function"]["name"] == "run_subagent").unwrap();
+        assert!(agent.pointer("/function/parameters/properties/role").is_some());
+        assert_eq!(agent["function"]["description"], "自定义委托描述");
+        assert!(db.tool_registry_entry("run_subagent").unwrap().unwrap().definition.pointer("/function/parameters/properties/role").is_none());
+        let cookie = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| {
+                tool.pointer("/function/name").and_then(Value::as_str) == Some("browser_cookies")
+            })
+            .unwrap();
+        assert_eq!(
+            cookie
+                .pointer("/function/description")
+                .and_then(Value::as_str),
+            Some("运行时修改后的描述")
+        );
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -4222,6 +4639,22 @@ async fn browser_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
         if expr.contains("$el") && args.get("ref").and_then(Value::as_i64).is_none() {
             bail!("表达式使用了 $el，请同时传入 browser_snapshot 的 ref");
         }
+    }
+    if action == "cookies" {
+        let has_domains = args
+            .get("domains")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty());
+        let has_urls = args
+            .get("urls")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty());
+        if !has_domains && !has_urls {
+            bail!("读取 Cookie 时 domains 或 urls 至少提供一项，不能无范围读取整个浏览器");
+        }
+        let mut params = args.clone();
+        params["channel"] = json!("extension");
+        return state.browser.call("cookies", params).await;
     }
     if action == "screenshot" {
         let v = state.browser.call("screenshot", args.clone()).await?;

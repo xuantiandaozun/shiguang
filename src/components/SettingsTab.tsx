@@ -1,3 +1,4 @@
+import { ProfileModelSettings, SubagentSettings } from "./ModelProfileSettings";
 import { useEffect, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -20,6 +21,7 @@ import {
   llmProfileStatus,
   llmProfileStatusLabel,
   migrateSettingsProfiles,
+  reconcileSubagentRoles,
   patchProfileCatalog,
   presetByBaseUrl,
   profileCatalogLabel,
@@ -243,7 +245,7 @@ export default function SettingsTab() {
         const profiles = migrateSettingsProfiles(s.llm_profiles ?? []);
         const active = profiles.find((p) => p.id === s.active_llm_profile_id);
         const automaticWindow = active
-          ? catalogContextWindow(profileCatalogModel(active), active.model)
+          ? active.models?.find((m) => m.model === active.model)?.context_window ?? catalogContextWindow(profileCatalogModel(active), active.model)
           : undefined;
         setSettings({
           ...s,
@@ -376,7 +378,7 @@ export default function SettingsTab() {
             <div className="text-xs text-slate-400 mb-1">主模型上下文窗口（Token）</div>
             {(() => {
               const current = settings.llm_profiles.find((p) => p.id === settings.active_llm_profile_id);
-              const automatic = current ? catalogContextWindow(profileCatalogModel(current), current.model) : undefined;
+              const automatic = current?.models?.find((m) => m.model === current.model)?.context_window;
               return <>
                 <ContextWindowInput value={automatic ?? settings.context_window} disabled={Boolean(automatic)} onChange={(context_window) => update({ context_window })} />
                 <div className="text-[11px] mt-1 text-slate-500">
@@ -437,54 +439,7 @@ export default function SettingsTab() {
         </label>
       </section>
 
-      <section className="space-y-2.5">
-        <div className="text-sm font-medium text-slate-100">
-          子代理
-          <span className="ml-2 text-xs font-normal text-slate-500">
-            主代理可把「读一堆材料、做多步分析」的子任务委托给子代理；它独立工作，只把最终结论带回对话
-          </span>
-        </div>
-        <label className="flex items-center gap-2.5 text-sm text-slate-300 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={settings.subagent_thinking_enabled}
-            onChange={(e) => update({ subagent_thinking_enabled: e.target.checked })}
-            className="w-4 h-4 accent-sky-500"
-          />
-          子代理启用思考模式
-          <span className="text-xs text-slate-500">默认关闭：子任务通常较简单，关掉更快更省；仅 DeepSeek 接口生效</span>
-        </label>
-        {settings.subagent_thinking_enabled && (
-          <label className="block">
-            <div className="text-xs text-slate-400 mb-1">子代理思考强度</div>
-            <select
-              value={settings.subagent_reasoning_effort}
-              onChange={(e) => update({ subagent_reasoning_effort: e.target.value })}
-              className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500"
-            >
-              <option value="low">low — 最快，子代理推荐</option>
-              <option value="high">high — 兼顾速度与质量</option>
-              <option value="max">max — 最深思考</option>
-            </select>
-          </label>
-        )}
-        <label className="block">
-          <div className="text-xs text-slate-400 mb-1">子代理模型（留空则跟随主模型）</div>
-          <CatalogModelSelect
-            catalogId={settings.subagent_catalog_model || ""}
-            baseUrl={settings.base_url}
-            apiModel={settings.subagent_model}
-            onChange={(catalogId, apiModel) =>
-              update({
-                subagent_catalog_model: catalogId,
-                subagent_model: apiModel,
-              })
-            }
-            allowEmpty
-            emptyLabel="跟随主模型"
-          />
-        </label>
-      </section>
+      <SubagentSettings settings={settings} update={update} />
 
       <section className="space-y-2.5">
         <div className="text-sm font-medium text-slate-100">AI 操作权限</div>
@@ -794,11 +749,10 @@ function LlmProfilesSection({
   const replaceProfiles = (next: LlmProfile[], extra: Partial<Settings> = {}) => {
     const activeId = extra.active_llm_profile_id ?? settings.active_llm_profile_id;
     const current = next.find((p) => p.id === activeId);
-    const automaticWindow = current
-      ? catalogContextWindow(profileCatalogModel(current), current.model)
-      : undefined;
+    const automaticWindow = current?.models?.find((m) => m.model === current.model)?.context_window;
     update({
       llm_profiles: next,
+      subagent_roles: reconcileSubagentRoles(next, activeId, settings.subagent_roles ?? []),
       ...extra,
       ...(current
         ? {
@@ -830,13 +784,13 @@ function LlmProfilesSection({
       pendingKeyFocus.current = !existing.api_key.trim();
       return;
     }
-    const profile = syncProfileModel({
+    const profile = migrateSettingsProfiles([syncProfileModel({
       ...emptyProfile(uniqueProfileName(preset.name, profiles)),
       base_url: preset.baseUrl,
       catalog_model: preset.defaultCatalogModel,
       thinking_enabled: Boolean(preset.thinking),
       reasoning_effort: "high",
-    });
+    })])[0];
     const next = [...profiles, profile];
     replaceProfiles(next, profiles.length === 0 ? { active_llm_profile_id: profile.id } : {});
     setExpandedId(profile.id);
@@ -862,6 +816,7 @@ function LlmProfilesSection({
     const p = profiles.find((x) => x.id === id);
     if (!p) return;
     const status = llmProfileStatus(p);
+    if (status === "expired") { setLocalError("此套餐已到期，请续期或更改到期处理"); setExpandedId(id); return; }
     if (status === "no-key") {
       setLocalError("先填写 API Key，再切换使用");
       setExpandedId(id);
@@ -881,6 +836,7 @@ function LlmProfilesSection({
         ...settings,
         llm_profiles: profiles.map((x) => (x.id === id ? synced : x)),
         active_llm_profile_id: id,
+        subagent_roles: reconcileSubagentRoles(profiles, id, settings.subagent_roles ?? []),
         base_url: synced.base_url,
         api_key: synced.api_key,
         model: synced.model,
@@ -888,7 +844,7 @@ function LlmProfilesSection({
         reasoning_effort: synced.reasoning_effort,
         model_supports_vision: profileSupportsVision(synced),
         context_window:
-          catalogContextWindow(profileCatalogModel(synced), synced.model) ?? settings.context_window,
+          synced.models?.find((m) => m.model === synced.model)?.context_window ?? settings.context_window,
       };
       await onActivate(next);
     } finally {
@@ -1006,6 +962,7 @@ function LlmProfilesSection({
                   </div>
                   <div className="text-[11px] text-slate-500 mt-0.5 truncate">
                     {profileCatalogLabel(p)}
+                    {p.valid_until ? ` · 有效至 ${p.valid_until.replace("T", " ")}` : ""}
                     {preset ? ` · ${preset.name}` : ""}
                   </div>
                 </button>
@@ -1092,35 +1049,7 @@ function LlmProfilesSection({
                       className={INPUT_CLASS}
                     />
                   </label>
-                  <label className="block">
-                    <div className="text-xs text-slate-400 mb-1">模型（统一目录）</div>
-                    <CatalogModelSelect
-                      catalogId={profileCatalogModel(p)}
-                      baseUrl={p.base_url}
-                      apiModel={p.model}
-                      onChange={(catalogId, apiModel) =>
-                        patchProfile(p.id, {
-                          catalog_model: catalogId,
-                          model: apiModel,
-                          ...(catalogId === CUSTOM_CATALOG_MODEL ? {} : { supports_vision: null }),
-                        })
-                      }
-                    />
-                    {catalogSupportsVision(profileCatalogModel(p), p.model) && (
-                      <div className="text-[11px] text-emerald-400/90 mt-1">
-                        此模型可直接看图；只要文字仍可用 ocr_image 省 token
-                      </div>
-                    )}
-                  </label>
-                  {profileCatalogModel(p) === CUSTOM_CATALOG_MODEL && (
-                    <label className="flex items-start gap-2.5 text-sm text-slate-300 cursor-pointer">
-                      <input type="checkbox"
-                        checked={p.supports_vision ?? catalogSupportsVision(CUSTOM_CATALOG_MODEL, p.model)}
-                        onChange={(e) => patchProfile(p.id, { supports_vision: e.target.checked })}
-                        className="w-4 h-4 mt-0.5 accent-sky-500" />
-                      <span>支持图像输入<span className="block text-xs text-slate-500 mt-0.5">开启后，聊天中的图片和网页截图会直接发送给此模型</span></span>
-                    </label>
-                  )}
+                  <ProfileModelSettings profile={p} onChange={(patch) => patchProfile(p.id, patch)} />
                   <label className="flex items-center gap-2.5 text-sm text-slate-300 cursor-pointer">
                     <input
                       type="checkbox"

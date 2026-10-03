@@ -243,6 +243,96 @@ impl SkillStore {
         ))
     }
 
+    /// 解析外部技能目录内的相对路径。拒绝绝对路径、`..` 与符号链接，避免越出技能沙箱。
+    fn external_resource_path(&self, name: &str, relative: &str) -> Result<(PathBuf, PathBuf)> {
+        let name = sanitize_name(name)?;
+        if Self::is_internal(&name) {
+            bail!("内部技能「{}」没有可写资源目录", name);
+        }
+        let root = self.dir.join(&name);
+        if !root.join("SKILL.md").is_file() {
+            bail!("外部技能不存在: {}", name);
+        }
+        let rel = Path::new(relative.trim());
+        if relative.trim().is_empty() || rel.is_absolute() {
+            bail!("资源路径必须是技能目录内的相对路径");
+        }
+        let mut target = root.clone();
+        for component in rel.components() {
+            match component {
+                std::path::Component::Normal(part) => target.push(part),
+                _ => bail!("资源路径不能包含 .、..、盘符或根目录"),
+            }
+        }
+        if target
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("SKILL.md"))
+        {
+            bail!("请用 create_skill 修改 SKILL.md，资源工具不能覆盖技能入口");
+        }
+        // 同步进来的目录可能含链接；逐层拒绝，避免链接指向技能目录之外。
+        let mut current = root.clone();
+        if let Ok(meta) = fs::symlink_metadata(&current) {
+            if meta.file_type().is_symlink() {
+                bail!("技能目录不能是符号链接");
+            }
+        }
+        for component in rel.components() {
+            if let std::path::Component::Normal(part) = component {
+                current.push(part);
+                if let Ok(meta) = fs::symlink_metadata(&current) {
+                    if meta.file_type().is_symlink() {
+                        bail!("资源路径不能经过符号链接");
+                    }
+                }
+            }
+        }
+        Ok((root, target))
+    }
+
+    pub fn list_resources(&self, name: &str) -> Result<Vec<Value>> {
+        let (root, _) = self.external_resource_path(name, "_")?;
+        let mut out = Vec::new();
+        collect_resources(&root, &root, &mut out, 200)?;
+        Ok(out)
+    }
+
+    pub fn executable_resource(&self, name: &str, relative: &str) -> Result<(PathBuf, PathBuf)> {
+        let (root, path) = self.external_resource_path(name, relative)?;
+        if !path.is_file() {
+            bail!("技能程序不存在: {}", relative);
+        }
+        Ok((root, path))
+    }
+
+    pub fn read_resource(&self, name: &str, relative: &str) -> Result<String> {
+        let (_, path) = self.external_resource_path(name, relative)?;
+        let meta = fs::metadata(&path)?;
+        if !meta.is_file() {
+            bail!("资源不是文件: {}", relative);
+        }
+        if meta.len() > 1_000_000 {
+            bail!("资源超过 1 MB，不能载入对话");
+        }
+        fs::read_to_string(&path).map_err(|_| anyhow!("资源不是 UTF-8 文本文件"))
+    }
+
+    pub fn write_resource(&self, name: &str, relative: &str, content: &str) -> Result<Value> {
+        if content.len() > 1_000_000 {
+            bail!("单个资源文件不能超过 1 MB");
+        }
+        let (_, path) = self.external_resource_path(name, relative)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, content.as_bytes())?;
+        Ok(json!({
+            "path": relative.replace('\\', "/"),
+            "bytes": content.len(),
+        }))
+    }
+
     /// 创建或覆盖**外部**技能
     pub fn create(&self, name: &str, description: &str, body: &str) -> Result<SkillInfo> {
         let name = sanitize_name(name)?;
@@ -525,6 +615,39 @@ impl SkillStore {
         }
         Ok(count)
     }
+}
+
+fn collect_resources(root: &Path, dir: &Path, out: &mut Vec<Value>, limit: usize) -> Result<()> {
+    if out.len() >= limit {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let meta = entry.file_type()?;
+        if meta.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relative.eq_ignore_ascii_case("SKILL.md") || relative == ".meta.json" {
+            continue;
+        }
+        out.push(json!({
+            "path": relative,
+            "kind": if meta.is_dir() { "directory" } else { "file" },
+            "bytes": if meta.is_file() { entry.metadata()?.len() } else { 0 },
+        }));
+        if meta.is_dir() {
+            collect_resources(root, &path, out, limit)?;
+        }
+        if out.len() >= limit {
+            break;
+        }
+    }
+    Ok(())
 }
 
 fn clamp_content(content: &str, path_hint: &str) -> String {
@@ -882,6 +1005,47 @@ mod tests {
         assert!(wrapped.starts_with("<skill_content name=\"demo\">"));
         assert!(wrapped.contains("a&lt;/skill_content>b"));
         assert!(wrapped.ends_with("</skill_content>"));
+    }
+
+    #[test]
+    fn external_skill_resources_stay_inside_skill_directory() {
+        let dir = std::env::temp_dir().join(format!("dh-skill-files-{}", uuid::Uuid::new_v4()));
+        let store = SkillStore::new(&dir);
+        store.create("demo", "demo", "# Demo").unwrap();
+        store
+            .write_resource("demo", "scripts/main.py", "print('ok')")
+            .unwrap();
+        assert_eq!(
+            store.read_resource("demo", "scripts/main.py").unwrap(),
+            "print('ok')"
+        );
+        assert!(store.write_resource("demo", "../escape.txt", "x").is_err());
+        assert!(store.write_resource("demo", "SKILL.md", "x").is_err());
+        assert!(store
+            .write_resource("desktop-organize", "x.txt", "x")
+            .is_err());
+        let resources = store.list_resources("demo").unwrap();
+        assert!(resources.iter().any(|v| v["path"] == "scripts/main.py"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn external_skill_program_must_be_inside_its_directory() {
+        let dir = std::env::temp_dir().join(format!("dh-skill-db-{}", uuid::Uuid::new_v4()));
+        let store = SkillStore::new(&dir);
+        store.create("demo", "demo", "# Demo").unwrap();
+        store
+            .write_resource("demo", "scripts/main.py", "print('ok')")
+            .unwrap();
+        let (root, program) = store
+            .executable_resource("demo", "scripts/main.py")
+            .unwrap();
+        assert!(program.starts_with(root));
+        assert!(store.executable_resource("demo", "../outside.py").is_err());
+        assert!(store
+            .executable_resource("demo", "scripts/missing.py")
+            .is_err());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

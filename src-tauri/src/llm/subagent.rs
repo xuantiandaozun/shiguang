@@ -32,6 +32,36 @@ const ALLOWED_TOOLS: &[&str] = &[
     "web_fetch",
 ];
 
+fn resolve_role<'a>(requested: &'a str, task: &str) -> Result<&'a str> {
+    match requested {
+        "research" | "files" | "browser" => Ok(requested),
+        "auto" => {
+            let task = task.to_lowercase();
+            if ["浏览器", "登录", "表单", "browser", "后台操作", "网页验收"].iter().any(|word| task.contains(word)) { Ok("browser") }
+            else if ["文件", "目录", "文档", "file", "folder", "源码"].iter().any(|word| task.contains(word)) { Ok("files") }
+            else { Ok("research") }
+        }
+        _ => Err(anyhow!("未知子代理类型")),
+    }
+}
+
+fn tools_for_role(role: &str) -> Vec<&'static str> {
+    ALLOWED_TOOLS.iter().copied().filter(|name| match role {
+        "files" => !matches!(*name, "web_search" | "web_fetch"),
+        "research" => !matches!(*name, "scan_desktop" | "search_files" | "get_system_info" | "list_todos"),
+        _ => false,
+    }).collect()
+}
+
+pub async fn reply_job(app: &AppHandle, args: &Value) -> Result<Value> {
+    let id = args.get("job_id").and_then(Value::as_str).and_then(|id| id.strip_prefix("browser:"))
+        .ok_or_else(|| anyhow!("仅浏览器子代理支持关键节点回复，请使用原job_id"))?;
+    if !app.state::<crate::AppState>().db.delegation_agent(id)?.is_some_and(|(role,_)| role == "browser") { return Err(anyhow!("浏览器子任务不存在")); }
+    let content = args.get("content").and_then(Value::as_str).unwrap_or("");
+    let task = crate::delegation::reply(app,id,"external",content).await?;
+    Ok(json!({"job_id":format!("browser:{id}"),"status":task.status,"note":"已沿用原上下文继续，请await_subagent等待下个节点或结果。"}))
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SubagentJob {
     pub id: String,
@@ -83,6 +113,7 @@ impl SubagentHub {
         task: String,
         context: Option<String>,
         parent_cancel: CancellationToken,
+        role: String,
     ) -> String {
         let id = format!("sa-{}", self.seq.fetch_add(1, Ordering::Relaxed));
         let cancel = parent_cancel.child_token();
@@ -105,7 +136,7 @@ impl SubagentHub {
         );
         let hub_id = id.clone();
         tauri::async_runtime::spawn(async move {
-            let report = run_job(&app, &task, context.as_deref(), &cancel).await;
+            let report = run_job(&app, &task, context.as_deref(), &cancel, &role).await;
             finish_job(&app, &hub_id, session_id, report).await;
             let _ = done_tx.send(true);
         });
@@ -202,10 +233,11 @@ async fn run_job(
     task: &str,
     context: Option<&str>,
     cancel: &CancellationToken,
+    role: &str,
 ) -> Value {
     match tokio::time::timeout(
         std::time::Duration::from_secs(TIMEOUT_SECS),
-        run_inner(app, task, context, cancel),
+        run_inner(app, task, context, cancel, role),
     )
     .await
     {
@@ -234,10 +266,15 @@ pub async fn run(
     context: Option<&str>,
     cancel: &CancellationToken,
 ) -> Result<Value> {
-    Ok(run_job(app, task, context, cancel).await)
+    Ok(run_job(app, task, context, cancel, "research").await)
 }
 
 pub async fn execute(app: &AppHandle, args: &Value, cancel: &CancellationToken) -> Result<Value> {
+    let session = app.state::<crate::AppState>().db.current_session_id()?;
+    execute_in_session(app, args, cancel, session).await
+}
+
+pub async fn execute_in_session(app: &AppHandle, args: &Value, cancel: &CancellationToken, session_id: i64) -> Result<Value> {
     if args.get("job_id").and_then(Value::as_str).is_some() {
         return await_job(app, args, cancel).await;
     }
@@ -251,22 +288,27 @@ pub async fn execute(app: &AppHandle, args: &Value, cancel: &CancellationToken) 
         .get("context")
         .and_then(Value::as_str)
         .map(|s| s.to_string());
+    let role = resolve_role(args.get("role").and_then(Value::as_str).unwrap_or("auto"), task)?;
+    crate::commands::settings_for_subagent(&load_settings(&app.state::<crate::AppState>().db), role)?;
     let background = args
         .get("run_in_background")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let should_await = args.get("await").and_then(Value::as_bool).unwrap_or(false);
+    if role == "browser" {
+        let goal = format!("浏览器子任务：{task}\n\n主代理上下文与范围：{}\n\n主代理负责关键节点审核；指定对象、环境或上下文不足先ask_peer，不搜源码或全盘找文件。到达约定关键节点用report_checkpoint暂停回传，简单任务直接返回结果。", context.as_deref().unwrap_or("未补充"));
+        let delegated = crate::delegation::create_browser_subagent(app, &goal, session_id, cancel)?;
+        let job_id = format!("browser:{}", delegated.id);
+        if !background || should_await { return await_job(app, &json!({"job_id":job_id,"timeout_secs":TIMEOUT_SECS}), cancel).await; }
+        return Ok(json!({"status":"started","job_id":job_id,"note":"浏览器子代理独立执行；用await_subagent等待关键节点或结果，reply_subagent审核或纠偏，不实时监控。不要同时操作同一浏览器。"}));
+    }
     if !background {
-        let report = run(app, task, context.as_deref(), cancel).await?;
+        let report = run_job(app, task, context.as_deref(), cancel, role).await;
         return Ok(json!({
             "report": report,
             "note": "以上是子代理的结构化结论；中间过程未占用本对话。status=blocked 表示缺材料或权限，不要当成已完成。",
         }));
     }
-    let session_id = {
-        let state = app.state::<crate::AppState>();
-        state.db.current_session_id()?
-    };
     let id = {
         let state = app.state::<crate::AppState>();
         state.subagents.start(
@@ -275,6 +317,7 @@ pub async fn execute(app: &AppHandle, args: &Value, cancel: &CancellationToken) 
             task.to_string(),
             context,
             cancel.clone(),
+            role.to_string(),
         )
     };
     if should_await {
@@ -303,6 +346,17 @@ pub async fn await_job(app: &AppHandle, args: &Value, cancel: &CancellationToken
         .get("timeout_secs")
         .and_then(Value::as_u64)
         .unwrap_or(TIMEOUT_SECS as u64);
+    if let Some(id) = id.strip_prefix("browser:") {
+        let started = tokio::time::Instant::now();
+        loop {
+            if cancel.is_cancelled() { let _ = crate::delegation::cancel(app,id).await; return Err(anyhow!("已中断")); }
+            let view = crate::delegation::get(app,id)?;
+            if view.task.status != "running" || started.elapsed().as_secs() >= timeout.clamp(1,300) {
+                return Ok(json!({"job_id":format!("browser:{id}"),"status":view.task.status,"question":view.task.question,"checkpoint":view.checkpoint,"result":view.task.result,"note":"waiting_peer用reply_subagent补充上下文或审核/纠偏；waiting_user由用户在独立窗口回答；blocked/error修复原因后用原job_id回复继续；complete仍需核对验收证据。"}));
+            }
+            tokio::select! { _ = cancel.cancelled() => {}, _ = tokio::time::sleep(std::time::Duration::from_millis(750)) => {} }
+        }
+    }
     let job = {
         let state = app.state::<crate::AppState>();
         state.subagents.wait(id, timeout, cancel).await?
@@ -442,6 +496,7 @@ async fn run_inner(
     task: &str,
     context: Option<&str>,
     cancel: &CancellationToken,
+    role: &str,
 ) -> Result<String> {
     if cancel.is_cancelled() {
         return Ok(json!({
@@ -461,14 +516,11 @@ async fn run_inner(
             state.db.current_session_id()?,
         )
     };
+    let settings = crate::commands::settings_for_subagent(&settings, role)?;
     let cfg = client::LlmConfig::new(
         &settings.base_url,
         &settings.api_key,
-        if settings.subagent_model.trim().is_empty() {
-            settings.model.as_str()
-        } else {
-            settings.subagent_model.trim()
-        },
+        &settings.model,
     );
 
     let mut user_msg = format!("子任务：{}", task.trim());
@@ -485,6 +537,7 @@ async fn run_inner(
     let spill_dir = crate::tempfs::tool_spill_dir(app).ok();
     let mut repeat_guard = crate::repeat_guard::RepeatGuard::new();
     for _round in 0..MAX_ROUNDS {
+        crate::commands::ensure_profile_usable(&settings, &settings.active_llm_profile_id)?;
         if cancel.is_cancelled() {
             return Ok(json!({
                 "status": "cancelled",
@@ -496,7 +549,9 @@ async fn run_inner(
             .to_string());
         }
         crate::retention::trim_old_tool_messages(&mut messages, spill_dir.as_deref());
-        let body = request_body(&cfg, &settings, &messages);
+        let mut body = request_body(&cfg, &settings, &messages);
+        let allowed: Vec<_> = tools_for_role(role).into_iter().filter(|name| *name != "read_image" || !settings.model_supports_vision).collect();
+        body["tools"] = tools::definitions_for(&allowed);
         let resp = client::stream_chat(&http, &cfg, &body, cancel, |_| {}, |_| {}).await?;
         let usage_model = body
             .get("model")
@@ -539,8 +594,9 @@ async fn run_inner(
         }
         messages.push(assistant_msg);
 
+        let mut round_reminders = Vec::new();
         for call in &resp.tool_calls {
-            let result = if ALLOWED_TOOLS.contains(&call.name.as_str()) {
+            let result = if tools_for_role(role).contains(&call.name.as_str()) {
                 let parsed: Value =
                     serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
                 if call.name == "search_files"
@@ -560,7 +616,7 @@ async fn run_inner(
                         }).to_string(),
                     }));
                     if let Some(reminder) = repeat_guard.observe(&call.name, &call.arguments) {
-                        messages.push(crate::repeat_guard::reminder_message(&reminder));
+                        round_reminders.push(reminder);
                     }
                     continue;
                 }
@@ -584,8 +640,11 @@ async fn run_inner(
                 "content": content,
             }));
             if let Some(reminder) = repeat_guard.observe(&call.name, &call.arguments) {
-                messages.push(crate::repeat_guard::reminder_message(&reminder));
+                round_reminders.push(reminder);
             }
+        }
+        for reminder in round_reminders {
+            messages.push(crate::repeat_guard::reminder_message(&reminder));
         }
     }
     Ok(json!({
@@ -656,6 +715,19 @@ fn system_prompt() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn role_selection_and_tool_scopes_are_distinct() {
+        assert_eq!(resolve_role("auto","登录浏览器验收表单").unwrap(),"browser");
+        assert_eq!(resolve_role("auto","阅读指定目录的文件").unwrap(),"files");
+        assert_eq!(resolve_role("auto","调研公开资料").unwrap(),"research");
+        assert!(resolve_role("invalid","task").is_err());
+        assert!(tools_for_role("files").contains(&"search_files"));
+        assert!(!tools_for_role("files").contains(&"web_search"));
+        assert!(tools_for_role("research").contains(&"web_search"));
+        assert!(!tools_for_role("research").contains(&"search_files"));
+        for role in ["files","research"] { assert!(!tools_for_role(role).contains(&"run_subagent")); }
+    }
 
     #[test]
     fn parse_plain_text_as_complete() {

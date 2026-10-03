@@ -133,6 +133,49 @@ pub async fn context_retention_strategy(
     ).await
 }
 
+/// 为单轮主任务选择主要工具类别。只有调用方认为高置信度时才真正裁剪；
+/// multi_or_uncertain 明确表示多领域任务或证据不足，应保留完整目录。
+pub async fn route_tool_category(
+    http: &reqwest::Client,
+    settings: &Settings,
+    user_goal: &str,
+    category_cards: Value,
+) -> Result<DecisionAnswer> {
+    let mut criteria = serde_json::Map::new();
+    if let Some(groups) = category_cards.as_object() {
+        for (category, tools) in groups {
+            let names = tools
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+                .take(20)
+                .collect::<Vec<_>>()
+                .join(", ");
+            criteria.insert(
+                category.clone(),
+                Value::String(format!("The task can be completed primarily with this category. Available tools: {names}")),
+            );
+        }
+    }
+    criteria.insert(
+        "no_tools".into(),
+        Value::String("The user only needs conversation, explanation, or a response based on information already present; no external action or lookup is needed.".into()),
+    );
+    criteria.insert(
+        "multi_or_uncertain".into(),
+        Value::String("The task spans multiple categories, may need follow-up capabilities, or there is not enough evidence to safely hide other tools.".into()),
+    );
+    choose(
+        http,
+        settings,
+        json!({ "user_goal": user_goal, "tool_categories": category_cards }),
+        "Choose the primary tool category for this user turn. Choose no_tools for ordinary conversation that needs no external capability. Choose multi_or_uncertain whenever more than one category may be needed or hiding tools could block completion.",
+        Value::Object(criteria),
+    )
+    .await
+}
+
 const SENSITIVE_LABELS: &[&str] = &[
     "提交",
     "发布",

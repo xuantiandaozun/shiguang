@@ -1,0 +1,6 @@
+{
+  "identifier": "delegation-window",
+  "description": "Allow each delegation conversation to close or minimize its own window",
+  "windows": ["delegation-*"],
+  "permissions": ["core:window:allow-close", "core:window:allow-minimize"]
+}

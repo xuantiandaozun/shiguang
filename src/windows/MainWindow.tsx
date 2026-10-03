@@ -3,6 +3,7 @@ import TodosTab from "../components/TodosTab";
 import RulesTab from "../components/RulesTab";
 import HistoryTab from "../components/HistoryTab";
 import TasksTab from "../components/TasksTab";
+import DelegationsTab from "../components/DelegationsTab";
 import SkillsTab from "../components/SkillsTab";
 import WorkflowsTab from "../components/WorkflowsTab";
 import BrowserRecipesTab from "../components/BrowserRecipesTab";
@@ -12,13 +13,14 @@ import appIcon from "../assets/app-icon.png";
 import { ipc, onEvent } from "../lib/ipc";
 import type { LlmUsageTotals } from "../lib/ipc";
 
-type Tab = "todos" | "rules" | "history" | "tasks" | "workflows" | "browser-recipes" | "skills" | "usage" | "settings";
+type Tab = "todos" | "rules" | "history" | "tasks" | "delegations" | "workflows" | "browser-recipes" | "skills" | "usage" | "settings";
 
 const TABS: Array<{ key: Tab; label: string }> = [
   { key: "todos", label: "待办事项" },
   { key: "rules", label: "整理规则" },
   { key: "history", label: "操作记录" },
   { key: "tasks", label: "后台任务" },
+  { key: "delegations", label: "委托任务" },
   { key: "workflows", label: "工作流" },
   { key: "browser-recipes", label: "浏览器经验" },
   { key: "skills", label: "Skills" },
@@ -94,6 +96,7 @@ export default function MainWindow() {
         {tab === "rules" && <RulesTab />}
         {tab === "history" && <HistoryTab />}
         {tab === "tasks" && <TasksTab />}
+        {tab === "delegations" && <DelegationsTab />}
         {tab === "workflows" && <WorkflowsTab />}
         {tab === "browser-recipes" && <BrowserRecipesTab />}
         {tab === "skills" && <SkillsTab />}

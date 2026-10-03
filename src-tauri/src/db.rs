@@ -334,8 +334,156 @@ pub struct ProfileEntry {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolRegistryEntry {
+    pub name: String,
+    pub category: String,
+    pub definition: serde_json::Value,
+    pub executor_kind: String,
+    pub executor_config: serde_json::Value,
+    pub enabled: bool,
+    pub source: String,
+    pub revision: i64,
+    pub updated_at: String,
+}
+
 pub struct Db {
     conn: Mutex<Connection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegationTask {
+    pub id: String,
+    pub title: String,
+    pub origin: String,
+    pub status: String,
+    pub question: Option<String>,
+    pub result: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegationMessage {
+    pub id: i64,
+    pub task_id: String,
+    pub role: String,
+    pub content: String,
+    pub created_at: String,
+}
+
+#[cfg(test)]
+mod delegation_store_tests {
+    use super::*;
+
+    #[test]
+    fn delegated_history_is_independent_and_recovers_running_tasks() {
+        let path = std::env::temp_dir().join(format!("shiguang-delegation-{}.db", uuid::Uuid::new_v4()));
+        let db = Db::new(&path).unwrap();
+        let main = db.current_session_id().unwrap();
+        db.save_chat(main, "user", "主聊天内容").unwrap();
+        let one = db.create_delegation("任务一", "Codex", "查找资料").unwrap();
+        let two = db.create_delegation("任务二", "Cursor", "分析方案").unwrap();
+        db.append_delegation_message(&one.id, "shiguang", "需要项目版本").unwrap();
+        db.set_delegation_state(&one.id, "waiting_peer", Some("需要项目版本"), None).unwrap();
+        assert_eq!(db.delegation_messages(&one.id).unwrap().len(), 2);
+        assert_eq!(db.delegation_messages(&two.id).unwrap().len(), 1);
+        assert_eq!(db.load_chat(main, 10).unwrap().len(), 1);
+        db.recover_delegations().unwrap();
+        assert_eq!(db.get_delegation(&one.id).unwrap().unwrap().status, "waiting_peer");
+        assert_eq!(db.get_delegation(&two.id).unwrap().unwrap().status, "blocked");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+}
+
+impl Db {
+    pub fn set_delegation_agent(&self, id: &str, role: &str, session_id: i64) -> Result<()> {
+        self.conn.lock().unwrap().execute("INSERT INTO delegation_agents(task_id,role,session_id) VALUES(?1,?2,?3)", params![id,role,session_id])?;
+        Ok(())
+    }
+
+    pub fn delegation_agent(&self, id: &str) -> Result<Option<(String, i64)>> {
+        self.conn.lock().unwrap().query_row("SELECT role,session_id FROM delegation_agents WHERE task_id=?1", params![id], |row| Ok((row.get(0)?,row.get(1)?))).optional().map_err(Into::into)
+    }
+
+    pub fn create_delegation(&self, title: &str, origin: &str, initial: &str) -> Result<DelegationTask> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = now_str();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO delegation_tasks(id,title,origin,status,created_at,updated_at) VALUES(?1,?2,?3,'running',?4,?4)",
+            params![id, title, origin, now],
+        )?;
+        conn.execute(
+            "INSERT INTO delegation_messages(task_id,role,content,created_at) VALUES(?1,?2,?3,?4)",
+            params![id, if origin == "用户" { "user" } else { "external" }, initial, now],
+        )?;
+        drop(conn);
+        self.get_delegation(&id)?.ok_or_else(|| anyhow!("委托任务创建失败"))
+    }
+
+    pub fn get_delegation(&self, id: &str) -> Result<Option<DelegationTask>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id,title,origin,status,question,result,created_at,updated_at FROM delegation_tasks WHERE id=?1",
+            params![id],
+            |r| Ok(DelegationTask { id:r.get(0)?, title:r.get(1)?, origin:r.get(2)?, status:r.get(3)?, question:r.get(4)?, result:r.get(5)?, created_at:r.get(6)?, updated_at:r.get(7)? }),
+        ).optional().map_err(Into::into)
+    }
+
+    pub fn list_delegations(&self) -> Result<Vec<DelegationTask>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id,title,origin,status,question,result,created_at,updated_at FROM delegation_tasks ORDER BY updated_at DESC LIMIT 200")?;
+        let rows = stmt.query_map([], |r| Ok(DelegationTask { id:r.get(0)?, title:r.get(1)?, origin:r.get(2)?, status:r.get(3)?, question:r.get(4)?, result:r.get(5)?, created_at:r.get(6)?, updated_at:r.get(7)? }))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    pub fn delegation_messages(&self, id: &str) -> Result<Vec<DelegationMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id,task_id,role,content,created_at FROM delegation_messages WHERE task_id=?1 ORDER BY id")?;
+        let rows = stmt.query_map(params![id], |r| Ok(DelegationMessage { id:r.get(0)?, task_id:r.get(1)?, role:r.get(2)?, content:r.get(3)?, created_at:r.get(4)? }))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    pub fn append_delegation_message(&self, id: &str, role: &str, content: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_str();
+        conn.execute("INSERT INTO delegation_messages(task_id,role,content,created_at) VALUES(?1,?2,?3,?4)", params![id, role, content, now])?;
+        conn.execute("UPDATE delegation_tasks SET updated_at=?2 WHERE id=?1", params![id, now])?;
+        Ok(())
+    }
+
+    pub fn delegation_model_messages(&self, id: &str) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn.lock().unwrap();
+        let raw: String = conn.query_row("SELECT model_messages_json FROM delegation_tasks WHERE id=?1", params![id], |r| r.get(0))?;
+        Ok(serde_json::from_str(&raw)?)
+    }
+
+    pub fn save_delegation_model_messages(&self, id: &str, messages: &[serde_json::Value]) -> Result<()> {
+        let raw = serde_json::to_string(messages)?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE delegation_tasks SET model_messages_json=?2,updated_at=?3 WHERE id=?1", params![id, raw, now_str()])?;
+        Ok(())
+    }
+
+    pub fn set_delegation_state(&self, id: &str, status: &str, question: Option<&str>, result: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE delegation_tasks SET status=?2,question=?3,result=?4,updated_at=?5 WHERE id=?1", params![id, status, question, result, now_str()])?;
+        Ok(())
+    }
+
+    pub fn recover_delegations(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_str();
+        conn.execute(
+            "UPDATE delegation_tasks SET status='blocked',result='拾光上次退出时任务仍在运行；补充意见后可继续',updated_at=?1 WHERE status='running'",
+            params![now],
+        )?;
+        Ok(())
+    }
 }
 
 impl Db {
@@ -400,6 +548,21 @@ impl Db {
               key TEXT PRIMARY KEY,
               value TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS tool_registry(
+              name TEXT PRIMARY KEY,
+              category TEXT NOT NULL DEFAULT 'other',
+              definition_json TEXT NOT NULL,
+              executor_kind TEXT NOT NULL DEFAULT 'builtin'
+                CHECK(executor_kind IN ('builtin', 'browser_action', 'alias')),
+              executor_config_json TEXT NOT NULL DEFAULT '{}',
+              enabled INTEGER NOT NULL DEFAULT 1,
+              source TEXT NOT NULL DEFAULT 'builtin',
+              revision INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tool_registry_enabled_category
+              ON tool_registry(enabled, category, name);
             CREATE TABLE IF NOT EXISTS chat_messages(
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               role TEXT NOT NULL,
@@ -411,6 +574,30 @@ impl Db {
               title TEXT NOT NULL DEFAULT '新会话',
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS delegation_tasks(
+              id TEXT PRIMARY KEY,
+              title TEXT NOT NULL,
+              origin TEXT NOT NULL,
+              status TEXT NOT NULL,
+              question TEXT,
+              result TEXT,
+              model_messages_json TEXT NOT NULL DEFAULT '[]',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS delegation_messages(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id TEXT NOT NULL REFERENCES delegation_tasks(id) ON DELETE CASCADE,
+              role TEXT NOT NULL,
+              content TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_delegation_messages_task ON delegation_messages(task_id, id);
+            CREATE TABLE IF NOT EXISTS delegation_agents(
+              task_id TEXT PRIMARY KEY REFERENCES delegation_tasks(id) ON DELETE CASCADE,
+              role TEXT NOT NULL,
+              session_id INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS session_compacts(
               session_id INTEGER PRIMARY KEY,
@@ -637,6 +824,117 @@ impl Db {
             "INSERT INTO settings(key, value) VALUES(?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![key, value],
+        )?;
+        Ok(())
+    }
+
+    // ---------- dynamic tool registry ----------
+
+    /// 只补齐缺失的内建种子。已有记录由运行时数据管理，不在升级或重启时覆盖。
+    pub fn seed_tool_registry(&self, entries: &[ToolRegistryEntry]) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut inserted = 0usize;
+        for entry in entries {
+            inserted += tx.execute(
+                "INSERT OR IGNORE INTO tool_registry(
+                   name, category, definition_json, executor_kind, executor_config_json,
+                   enabled, source, revision, created_at, updated_at
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                params![
+                    entry.name,
+                    entry.category,
+                    serde_json::to_string(&entry.definition)?,
+                    entry.executor_kind,
+                    serde_json::to_string(&entry.executor_config)?,
+                    entry.enabled as i32,
+                    entry.source,
+                    entry.revision,
+                    entry.updated_at,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    pub fn enabled_tool_registry(&self) -> Result<Vec<ToolRegistryEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT name, category, definition_json, executor_kind, executor_config_json,
+                    enabled, source, revision, updated_at
+             FROM tool_registry WHERE enabled=1 ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let definition_json: String = row.get(2)?;
+            let executor_config_json: String = row.get(4)?;
+            Ok(ToolRegistryEntry {
+                name: row.get(0)?,
+                category: row.get(1)?,
+                definition: serde_json::from_str(&definition_json)
+                    .unwrap_or(serde_json::Value::Null),
+                executor_kind: row.get(3)?,
+                executor_config: serde_json::from_str(&executor_config_json)
+                    .unwrap_or_else(|_| serde_json::json!({})),
+                enabled: row.get::<_, i32>(5)? != 0,
+                source: row.get(6)?,
+                revision: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })?;
+        Ok(rows.filter_map(|row| row.ok()).collect())
+    }
+
+    pub fn tool_registry_entry(&self, name: &str) -> Result<Option<ToolRegistryEntry>> {
+        Ok(self
+            .enabled_tool_registry()?
+            .into_iter()
+            .find(|entry| entry.name == name))
+    }
+
+    /// 管理端/迁移代码使用的完整覆盖写入。执行器类型受固定白名单约束，不能通过
+    /// 注册表注入任意脚本或命令。
+    pub fn put_tool_registry_entry(&self, entry: &ToolRegistryEntry) -> Result<()> {
+        if !matches!(
+            entry.executor_kind.as_str(),
+            "builtin" | "browser_action" | "alias"
+        ) {
+            return Err(anyhow!("不支持的工具执行器: {}", entry.executor_kind));
+        }
+        let declared_name = entry
+            .definition
+            .pointer("/function/name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if declared_name != entry.name {
+            return Err(anyhow!("工具定义名称与注册键不一致"));
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO tool_registry(
+               name, category, definition_json, executor_kind, executor_config_json,
+               enabled, source, revision, created_at, updated_at
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+             ON CONFLICT(name) DO UPDATE SET
+               category=excluded.category,
+               definition_json=excluded.definition_json,
+               executor_kind=excluded.executor_kind,
+               executor_config_json=excluded.executor_config_json,
+               enabled=excluded.enabled,
+               source=excluded.source,
+               revision=tool_registry.revision+1,
+               updated_at=excluded.updated_at",
+            params![
+                entry.name,
+                entry.category,
+                serde_json::to_string(&entry.definition)?,
+                entry.executor_kind,
+                serde_json::to_string(&entry.executor_config)?,
+                entry.enabled as i32,
+                entry.source,
+                entry.revision,
+                now_str(),
+            ],
         )?;
         Ok(())
     }

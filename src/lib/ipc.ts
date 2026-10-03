@@ -70,6 +70,22 @@ export interface LlmProfile {
   reasoning_effort: string;
   /** 自定义模型是否支持直接接收图像；未设置时按模型目录/名称自动判断 */
   supports_vision?: boolean | null;
+  models?: ProfileModel[];
+  valid_until?: string;
+}
+
+export interface ProfileModel {
+  model: string;
+  label: string;
+  supports_vision: boolean;
+  context_window: number;
+}
+
+export interface SubagentRole {
+  role: "research" | "files" | "browser";
+  enabled: boolean;
+  profile_id: string;
+  model: string;
 }
 
 export interface Settings {
@@ -92,6 +108,7 @@ export interface Settings {
   subagent_thinking_enabled: boolean;
   subagent_reasoning_effort: string;
   subagent_model: string;
+  subagent_roles: SubagentRole[];
   compact_model: string;
   context_window: number;
   /** 当前生效主模型的最终识图能力（由档案配置派生） */
@@ -150,6 +167,30 @@ export interface SessionInfo {
 export interface SessionView {
   session_id: number;
   messages: ChatMsg[];
+}
+
+export interface DelegationTask {
+  id: string;
+  title: string;
+  origin: string;
+  status: "running" | "waiting_peer" | "waiting_user" | "complete" | "blocked" | "error" | "cancelled";
+  question: string | null;
+  result: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DelegationMessage {
+  id: number;
+  task_id: string;
+  role: "external" | "user" | "shiguang" | "tool" | "system";
+  content: string;
+  created_at: string;
+}
+
+export interface DelegationView {
+  task: DelegationTask;
+  messages: DelegationMessage[];
 }
 
 export interface BgTask {
@@ -349,6 +390,12 @@ export const ipc = {
   recallMessage: (id: number) => invoke<void>("recall_message", { id }),
   loadChat: () => invoke<ChatMsg[]>("load_chat_history"),
   clearChat: () => invoke<void>("clear_chat_history"),
+  listDelegations: () => invoke<DelegationTask[]>("list_delegations"),
+  getDelegation: (id: string) => invoke<DelegationView>("get_delegation", { id }),
+  showDelegationWindow: (id: string) => invoke<void>("show_delegation_window", { id }),
+  createDelegation: (title: string, goal: string) => invoke<DelegationTask>("create_delegation", { title, goal }),
+  replyDelegation: (id: string, content: string) => invoke<DelegationTask>("reply_delegation", { id, content }),
+  cancelDelegation: (id: string) => invoke<DelegationTask>("cancel_delegation", { id }),
   toggleChat: () => invoke<void>("toggle_chat"),
   openMain: () => invoke<void>("open_main_window"),
   hideChat: () => invoke<void>("hide_chat"),

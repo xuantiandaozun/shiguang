@@ -9,10 +9,12 @@ pub mod clipboard;
 pub mod commands;
 pub mod compact;
 pub mod db;
+pub mod delegation;
 pub mod file_index;
 pub mod llm;
 pub mod lookup_cache;
 pub mod machine;
+pub mod mcp_bridge;
 pub mod ntfs_helper;
 pub mod ntfs_usn;
 pub mod ocr;
@@ -60,6 +62,7 @@ pub struct AppState {
     pub session_todos: session_todo::SessionTodoHub,
     /// 后台子代理任务
     pub subagents: llm::subagent::SubagentHub,
+    pub delegations: delegation::DelegationHub,
 }
 
 pub fn notify_user(app: &tauri::AppHandle, title: &str, body: &str) {
@@ -123,6 +126,10 @@ pub fn run() {
             std::fs::create_dir_all(&app_dir)?;
             let _ = std::fs::create_dir_all(tempfs::temp_dir_in(&app_dir));
             let db = db::Db::new(&app_dir.join("deskhelper.db"))?;
+            db.recover_delegations()?;
+            if let Err(e) = llm::tools::seed_registry(&db) {
+                log::warn!("初始化动态工具注册表失败，将使用代码内置定义: {e}");
+            }
             let paused = db
                 .get_setting("auto_organize_paused")
                 .ok()
@@ -143,7 +150,9 @@ pub fn run() {
                 ask_user: ask_user::AskUserHub::new(),
                 session_todos: session_todo::SessionTodoHub::new(),
                 subagents: llm::subagent::SubagentHub::new(),
+                delegations: delegation::DelegationHub::default(),
             });
+            mcp_bridge::spawn(app.handle().clone(), &app_dir);
             // 每次进程启动开空白会话（已有空会话则复用），与聊天窗欢迎态一致。
             {
                 let state = app.state::<AppState>();
@@ -183,6 +192,12 @@ pub fn run() {
             commands::recall_message,
             commands::load_chat_history,
             commands::clear_chat_history,
+            commands::list_delegations,
+            commands::get_delegation,
+            commands::show_delegation_window,
+            commands::create_delegation,
+            commands::reply_delegation,
+            commands::cancel_delegation,
             commands::toggle_chat,
             commands::open_main_window,
             commands::hide_chat,

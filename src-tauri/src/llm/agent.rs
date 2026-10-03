@@ -44,6 +44,12 @@ pub async fn run_chat(
         load_settings(&state.db)
     };
     settings.temp_path = crate::tempfs::temp_path_display(&app);
+    if let Err(error) = crate::commands::ensure_profile_usable(&settings, &settings.active_llm_profile_id) {
+        let message = error.to_string();
+        let _ = app.state::<crate::AppState>().db.save_chat(session_id,"assistant",&message);
+        let _ = app.emit("llm-error",json!({"message":message}));
+        return Ok(());
+    }
 
     if settings.api_key.trim().is_empty() {
         let msg = "尚未配置大模型 API Key。请打开主窗口 →「设置」页填写 Base URL / API Key / 模型后再试。";
@@ -150,8 +156,44 @@ pub async fn run_chat(
     let http = reqwest::Client::new();
     let mut text_call_retries = 0usize;
     let mut repeat_guard = crate::repeat_guard::RepeatGuard::new();
+    let mut routed_categories: Vec<String> = if crate::system_one::configured(&settings) {
+        let cards = {
+            let state = app.state::<crate::AppState>();
+            tools::registry_category_cards(&state.db)
+        };
+        match crate::system_one::route_tool_category(&http, &settings, &user_goal, cards).await {
+            Ok(route)
+                if route.confidence >= settings.system_one_min_confidence
+                    && route.choice != "multi_or_uncertain" =>
+            {
+                crate::llm::persist_usage(
+                    &app,
+                    "system_one_tool_router",
+                    &settings.system_one_model,
+                    &route.usage,
+                );
+                vec![route.choice]
+            }
+            Ok(route) => {
+                crate::llm::persist_usage(
+                    &app,
+                    "system_one_tool_router",
+                    &settings.system_one_model,
+                    &route.usage,
+                );
+                Vec::new()
+            }
+            Err(e) => {
+                log::warn!("System One 工具路由失败，回退完整工具目录: {e}");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
 
     for round in 0..MAX_TOOL_ROUNDS {
+        crate::commands::ensure_profile_usable(&settings, &settings.active_llm_profile_id)?;
         if cancel.is_cancelled() {
             finalize_cancelled(&app, session_id, request_message_id, "", &tool_log).await?;
             return Ok(());
@@ -175,7 +217,11 @@ pub async fn run_chat(
                 .unwrap_or(0);
             crate::compact::persist_cover(&app, session_id, cover_until, &messages);
         }
-        let body = request_body(&cfg, &settings, &messages, true);
+        let tool_definitions = {
+            let state = app.state::<crate::AppState>();
+            tools::registry_definitions_for_categories(&state.db, &routed_categories, native_vision)
+        };
+        let body = request_body_with_tools(&cfg, &settings, &messages, tool_definitions, true);
 
         let resp = stream_filtered(&http, &cfg, &body, &cancel, &app).await?;
 
@@ -253,6 +299,7 @@ pub async fn run_chat(
         }
         messages.push(assistant_msg);
 
+        let mut round_reminders = Vec::new();
         for (call_index, call) in resp.tool_calls.iter().enumerate() {
             if cancel.is_cancelled() {
                 finalize_cancelled(
@@ -286,6 +333,19 @@ pub async fn run_chat(
             );
             let parsed_args: Value =
                 serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
+            if call.name == "discover_capabilities" {
+                for category in parsed_args
+                    .get("categories")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
+                    if !routed_categories.iter().any(|item| item == category) {
+                        routed_categories.push(category.to_string());
+                    }
+                }
+            }
             // Jev/System One 不是主模型的替代品。主模型在复杂页面上负责补充候选和
             // 参数，Jev 始终作为快速复核层参与；只有服务未配置/不可用时保持旧链路。
             let system_one_review = if call.name.starts_with("browser_")
@@ -407,8 +467,13 @@ pub async fn run_chat(
                 "content": content,
             }));
             if let Some(reminder) = repeat_guard.observe(&call.name, &call.arguments) {
-                messages.push(crate::repeat_guard::reminder_message(&reminder));
+                round_reminders.push(reminder);
             }
+        }
+        // 一条 assistant.tool_calls 后必须先给出全部对应的 tool 消息。
+        // 系统提醒若插在同组工具结果之间，兼容接口会拒绝下一轮请求。
+        for reminder in round_reminders {
+            messages.push(crate::repeat_guard::reminder_message(&reminder));
         }
     }
 
@@ -451,6 +516,23 @@ fn request_body(
     allow_tools: bool,
 ) -> Value {
     let native_vision = settings.model_supports_vision;
+    request_body_with_tools(
+        cfg,
+        settings,
+        messages,
+        tools::chat_definitions(native_vision),
+        allow_tools,
+    )
+}
+
+fn request_body_with_tools(
+    cfg: &client::LlmConfig,
+    settings: &crate::commands::Settings,
+    messages: &[Value],
+    tool_definitions: Value,
+    allow_tools: bool,
+) -> Value {
+    let native_vision = settings.model_supports_vision;
     let api_messages = if native_vision {
         prepare_messages_for_api(messages)
     } else {
@@ -462,7 +544,7 @@ fn request_body(
         "stream": true,
         "stream_options": { "include_usage": true },
         "temperature": 0.3,
-        "tools": tools::chat_definitions(native_vision),
+        "tools": tool_definitions,
         "tool_choice": if allow_tools { json!("auto") } else { json!("none") },
     });
     if cfg.base_url.contains("deepseek") {
@@ -1134,6 +1216,7 @@ mod tests {
             subagent_thinking_enabled: false,
             subagent_reasoning_effort: "low".into(),
             subagent_model: String::new(),
+            subagent_roles: crate::commands::default_subagent_roles(),
             compact_model: String::new(),
             context_window: 128_000,
             model_supports_vision: false,
@@ -1197,6 +1280,7 @@ mod tests {
             subagent_thinking_enabled: false,
             subagent_reasoning_effort: "low".into(),
             subagent_model: String::new(),
+            subagent_roles: crate::commands::default_subagent_roles(),
             compact_model: String::new(),
             context_window: 128_000,
             model_supports_vision: crate::llm::models::supports_vision(model),

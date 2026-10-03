@@ -186,6 +186,88 @@ async function activeTab() {
   return tab;
 }
 
+function normalizeCookieDomain(domain) {
+  return String(domain || "").trim().toLowerCase().replace(/^\.+/, "");
+}
+
+function cookieMatchesDomain(cookieDomain, wantedDomain) {
+  const actual = normalizeCookieDomain(cookieDomain);
+  const wanted = normalizeCookieDomain(wantedDomain);
+  return !!wanted && (actual === wanted || actual.endsWith(`.${wanted}`));
+}
+
+function serializeCookies(cookies, format) {
+  if (format === "json") return JSON.stringify(cookies, null, 2);
+  return cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("\n");
+}
+
+function assertLoopbackUrl(rawUrl) {
+  let url;
+  try { url = new URL(String(rawUrl || "")); } catch { throw new Error("POST 地址无效"); }
+  if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) {
+    throw new Error("Cookie 只允许 POST 到本机 HTTP 回环地址");
+  }
+  return url.href;
+}
+
+// 读取页面 JS 无法访问的 Cookie（包括 HttpOnly）。默认不读取全部 Cookie：
+// 调用方必须至少给 domains 或 urls；names 可进一步限制 Cookie 名称。
+async function exportCookies(p) {
+  const domains = Array.isArray(p.domains) ? p.domains.map(normalizeCookieDomain).filter(Boolean) : [];
+  const urls = Array.isArray(p.urls) ? p.urls.map((v) => String(v || "").trim()).filter(Boolean) : [];
+  const names = new Set(Array.isArray(p.names) ? p.names.map((v) => String(v)) : []);
+  if (!domains.length && !urls.length) throw new Error("domains 或 urls 至少提供一项");
+
+  const batches = await Promise.all([
+    ...domains.map((domain) => chrome.cookies.getAll({ domain })),
+    ...urls.map((url) => chrome.cookies.getAll({ url })),
+  ]);
+  const unique = new Map();
+  for (const cookie of batches.flat()) {
+    if (domains.length && !domains.some((domain) => cookieMatchesDomain(cookie.domain, domain))) continue;
+    if (names.size && !names.has(cookie.name)) continue;
+    const key = `${cookie.storeId}\n${cookie.domain}\n${cookie.path}\n${cookie.name}`;
+    unique.set(key, cookie);
+  }
+  const cookies = Array.from(unique.values()).map((cookie) => ({
+    name: cookie.name,
+    value: cookie.value,
+    domain: cookie.domain,
+    path: cookie.path,
+    secure: cookie.secure,
+    httpOnly: cookie.httpOnly,
+    sameSite: cookie.sameSite,
+    expirationDate: cookie.expirationDate,
+    storeId: cookie.storeId,
+  }));
+
+  const output = p.output || "return";
+  const format = p.format === "json" ? "json" : "netscape-lite";
+  const text = serializeCookies(cookies, format);
+  if (output === "return") return { count: cookies.length, cookies };
+  if (output === "post") {
+    const url = assertLoopbackUrl(p.post_url);
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": format === "json" ? "application/json" : "text/plain;charset=UTF-8" },
+      body: text,
+    });
+    if (!response.ok) throw new Error(`本地服务返回 HTTP ${response.status}`);
+    return { count: cookies.length, names: cookies.map((cookie) => cookie.name), posted_to: url };
+  }
+  if (output === "download") {
+    const mime = format === "json" ? "application/json" : "text/plain";
+    const dataUrl = `data:${mime};charset=utf-8,${encodeURIComponent(text)}`;
+    const downloadId = await chrome.downloads.download({
+      url: dataUrl,
+      filename: String(p.filename || `deskhelper-cookies.${format === "json" ? "json" : "txt"}`),
+      saveAs: p.save_as !== false,
+    });
+    return { count: cookies.length, names: cookies.map((cookie) => cookie.name), download_id: downloadId };
+  }
+  throw new Error(`不支持的 Cookie 输出方式: ${output}`);
+}
+
 function waitLoad(tabId, ms) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -347,6 +429,8 @@ async function evalInPage(tabId, expression, ref, suppliedArgs) {
 
 async function handle(action, p) {
   switch (action) {
+    case "cookies":
+      return exportCookies(p);
     case "navigate": {
       if (!p.url) throw new Error("缺少 url");
       let tab;
