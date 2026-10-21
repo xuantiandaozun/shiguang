@@ -861,6 +861,7 @@ export default function ChatPanel() {
 
 /** 工具调用提示的友好文案（原始工具名 → 用户可读的进行式描述） */
 const TOOL_LABELS: Record<string, string> = {
+  list_servers: "查看服务器", get_server: "读取连接", create_server: "新增服务器", update_server: "修改服务器", delete_server: "删除连接", test_server_connection: "测试连接", ssh_exec: "执行远程命令", sftp_list: "浏览远程目录", sftp_stat: "查看远程文件", sftp_upload: "上传文件", sftp_download: "下载文件", list_remote_tasks: "查看远程任务", get_remote_task: "读取远程结果", wait_remote_task: "等待远程任务", cancel_remote_task: "取消远程任务",
   discover_capabilities: "发现所需能力",
   get_tool_call_history: "查询工具调用历史",
   recall_session: "查回对话原文",

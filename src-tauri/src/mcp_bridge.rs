@@ -61,6 +61,10 @@ async fn handle(mut socket: TcpStream, app: AppHandle, token: &str) -> anyhow::R
 }
 
 async fn dispatch(app: &AppHandle, r: &Value) -> anyhow::Result<Value> {
+    if r.get("action").and_then(Value::as_str) == Some("server_tool") {
+        let name = r.get("name").and_then(Value::as_str).unwrap_or("");
+        return crate::servers::dispatch(app, name, &r.get("arguments").cloned().unwrap_or_else(|| json!({}))).await;
+    }
     let id = r.get("id").and_then(Value::as_str).unwrap_or("");
     let value = match r.get("action").and_then(Value::as_str).unwrap_or("") {
         "create" => json!(crate::delegation::create(app,

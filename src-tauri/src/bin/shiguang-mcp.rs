@@ -1,4 +1,6 @@
 //! Stdio MCP entry point for Codex and Cursor. The desktop app owns all task execution.
+#[path = "../server_tools.rs"]
+mod server_tools;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -29,7 +31,7 @@ async fn handle(req: &Value) -> Result<Value> {
             "protocolVersion":"2025-11-25",
             "capabilities":{"tools":{}},
             "serverInfo":{"name":"shiguang-delegation","version":env!("CARGO_PKG_VERSION")},
-            "instructions":"新目标才使用 delegate_to_shiguang。goal 必须明确对象、环境、验收标准、输出绝对路径和范围；项目上下文由委托方提供，不让拾光自行搜源码或全盘找文件。复杂任务约定少量关键节点，用 report_checkpoint 回传并暂停等待委托方审核。后续保留原 id，用 wait_shiguang_delegation 挂起等待节点或结果，不逐次get历史或实时监控。waiting_peer 时检查 checkpoint/question 的结果、证据及下一步，符合目标则用 reply 明确继续范围，跑偏则立即用原id纠偏。blocked/error 先读 result，补充信息后 resume 原任务，勿新建或无限重试。丢失 id 先 list/get 核实。waiting_user 等用户，委托方不可代答。blocked/error/cancelled 不可报告为完成；complete 也须核对验收标准。"
+            "instructions":"服务器操作直接使用 list_servers/ssh_exec/sftp_* 等工具，不需要委托模型；长操作返回 task_id，用 wait_remote_task 等待；已有密码不会自动返回。首次信任主机指纹需在拾光服务器页确认。取消或断线后远程命令可能继续，先核实状态再操作。新目标才使用 delegate_to_shiguang。goal 必须明确对象、环境、验收标准、输出绝对路径和范围；项目上下文由委托方提供，不让拾光自行搜源码或全盘找文件。复杂任务约定少量关键节点，用 report_checkpoint 回传并暂停等待委托方审核。后续保留原 id，用 wait_shiguang_delegation 挂起等待节点或结果，不逐次get历史或实时监控。waiting_peer 时检查 checkpoint/question 的结果、证据及下一步，符合目标则用 reply 明确继续范围，跑偏则立即用原id纠偏。blocked/error 先读 result，补充信息后 resume 原任务，勿新建或无限重试。丢失 id 先 list/get 核实。waiting_user 等用户，委托方不可代答。blocked/error/cancelled 不可报告为完成；complete 也须核对验收标准。"
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools":tool_list()})),
@@ -51,6 +53,12 @@ async fn handle(req: &Value) -> Result<Value> {
 }
 
 fn tool_list() -> Vec<Value> {
+    let mut tools = delegation_tools();
+    tools.extend(server_tools::definitions());
+    tools
+}
+
+fn delegation_tools() -> Vec<Value> {
     vec![
         json!({"name":"delegate_to_shiguang","description":"为新目标创建精准委托。goal 写清对象/环境、必要上下文、允许与排除范围、完成标准、产出绝对路径及关键节点。缺项先由委托方补齐，不让拾光主动搜源码/全盘找文件。约定节点要求 report_checkpoint 回传证据并暂停审核。已有任务用原 id reply/resume 继续。","inputSchema":{"type":"object","properties":{"title":{"type":"string"},"goal":{"type":"string"},"origin":{"type":"string"}},"required":["goal"]}}),
         json!({"name":"wait_shiguang_delegation","description":"挂起等待关键节点、问题或结果，返回任务状态及 checkpoint，不重复返回完整历史。waiting_peer 时审核结果/证据/下一步，用 reply 批准限定阶段或及时纠偏；常规阶段自主执行，不逐次监控。running 超时继续等待，勿新建。","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":60}},"required":["id"]}}),
@@ -63,6 +71,9 @@ fn tool_list() -> Vec<Value> {
 }
 
 async fn call(name: &str, args: Value) -> Result<Value> {
+    if server_tools::definitions().iter().any(|t| t["name"].as_str() == Some(name)) {
+        return bridge(json!({"action":"server_tool","name":name,"arguments":args})).await;
+    }
     let get = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("").to_string();
     match name {
         "delegate_to_shiguang" => bridge(json!({"action":"create","title":get("title"),"goal":get("goal"),"origin":get("origin")})).await,
@@ -100,6 +111,15 @@ fn with_continuation(mut data: Value) -> Value {
         return data;
     }
     let task = data.get("task").unwrap_or(&data);
+    if task.get("server_id").is_some() && task.get("kind").is_some() {
+        if task.get("status").and_then(Value::as_str) == Some("running") {
+            if let Some(id) = task.get("id").and_then(Value::as_str) {
+                let next = json!({"tool":"wait_remote_task","arguments":{"task_id":id},"reuse_existing":true,"hint":"等待原服务器任务，勿重复执行命令或传输。"});
+                data["continuation"] = next;
+            }
+        }
+        return data;
+    }
     let Some(id) = task.get("id").and_then(Value::as_str) else { return data; };
     let status = task.get("status").and_then(Value::as_str).unwrap_or("");
     let (tool, hint) = match status {
@@ -117,6 +137,16 @@ fn with_continuation(mut data: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_tasks_wait_with_remote_task_id() {
+        let output = with_continuation(json!({"task_id":"remote-one","task":{"id":"remote-one","server_id":"server-one","kind":"ssh_exec","status":"running"}}));
+        assert_eq!(output["continuation"]["tool"], "wait_remote_task");
+        assert_eq!(output["continuation"]["arguments"]["task_id"], "remote-one");
+        for status in ["failed", "cancelled", "unknown", "done"] {
+            assert!(with_continuation(json!({"id":"remote-one","server_id":"server-one","kind":"sftp_upload","status":status})).get("continuation").is_none());
+        }
+    }
 
     #[test]
     fn waiting_returns_checkpoint_without_repeated_history() {

@@ -373,6 +373,9 @@ export interface LlmUsageRequest {
 }
 
 export const ipc = {
+  revealServerSecret: (serverId: string) => invoke<string>("reveal_server_secret", { serverId }),
+  serverAction: <T = unknown>(name: string, args: Record<string, unknown> = {}) => invoke<T>("server_action", { name, args }),
+  trustServerHost: (serverId: string, fingerprint: string) => invoke<ServerConnection>("trust_server_host", { serverId, fingerprint }),
   sendChat: (text: string, attachments?: string[]) =>
     invoke<number>("send_chat_message", { text, attachments: attachments ?? null }),
   importClipboardAttachments: (includeImage = true) =>
@@ -493,3 +496,11 @@ export const ipc = {
 export function onEvent<T>(name: string, cb: (payload: T) => void): Promise<() => void> {
   return listen<T>(name, (e) => cb(e.payload));
 }
+
+export interface ServerConnection {
+  id: string; name: string; host: string; port: number; username: string; group: string; note: string; auth: "password" | "key" | "agent"; private_key: string; fingerprint: string | null;
+}
+export interface RemoteTask {
+  id: string; server_id: string; server_name: string; kind: string; status: string; bytes: number; exit_code: number | null; error: string | null; started_at: string; finished_at: string | null; log_path: string;
+}
+export interface RemoteTaskView { task: RemoteTask; output: string; output_offset: number; next_offset: number; has_more: boolean; }

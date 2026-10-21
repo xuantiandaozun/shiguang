@@ -37,6 +37,7 @@ LLM 走 OpenAI 兼容接口（默认 DeepSeek），Function Calling + SSE 流式
    - 启用技能目录作为独立 system 消息插在系统提示之后、历史之前（启用集不变则前缀缓存稳定）；命中则 `load_skill`。对话里已有 `<skill_content>` 则不要再 load。完整完成后用 `create_skill` 沉淀经验（取代旧 save_workflow）。
 9. **系统提示词**：只写产品约束；参数/细则放 tools 与 Skills。整理细则在内部 skill `desktop-organize`。
 10. **设置三处同步**：`commands.rs` ↔ `ipc.ts` ↔ `SettingsTab.tsx`。事件命名 `xxx-changed`。
+11. **服务器 SSH/SFTP**：`servers.rs::ServerHub` 统一提供连接管理、SSH 命令、目录浏览和文件/目录传输；独立 `servers.db` 保存连接、主机指纹、任务摘要及用户要求的明文密码（`server_secrets`），界面通过独立 IPC 查看密码，普通 AI/MCP 查询不返回。`server_tools.rs` 为内置 AI 与 stdio MCP 共用 schema；`mcp_bridge` 的 `server_tool` 直接调用执行层，不经委托模型。首次/变化主机指纹仅桌面可确认；任务立即返回 task_id，用 wait_remote_task 等待，重启后运行中任务变为 unknown，取消不保证远程进程停止。主窗口 `ServersTab.tsx`；文档 `docs/SERVERS_MCP.md`。本机联调脚本 `scripts/ssh-test-fixture.py`。
 
 ## DeepSeek 兼容要点
 - thinking / reasoning_effort 只对含 deepseek 的 base_url 附加。

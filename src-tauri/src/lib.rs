@@ -23,6 +23,8 @@ pub mod reader;
 pub mod repeat_guard;
 pub mod retention;
 pub mod session_todo;
+pub mod server_tools;
+pub mod servers;
 pub mod skills;
 pub mod system_one;
 pub mod tasks;
@@ -38,6 +40,7 @@ use tauri::Manager;
 
 pub struct AppState {
     pub db: db::Db,
+    pub servers: servers::ServerHub,
     /// 托盘「暂停自动整理」开关；true 时 watcher 不做任何自动移动
     pub auto_paused: AtomicBool,
     /// 防止聊天并发发送
@@ -137,6 +140,7 @@ pub fn run() {
                 .map(|v| v == "true")
                 .unwrap_or(false);
             app.manage(AppState {
+                servers: servers::ServerHub::new(&app_dir)?,
                 db,
                 auto_paused: AtomicBool::new(paused),
                 chat_busy: AtomicBool::new(false),
@@ -180,6 +184,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            servers::server_action,
+            servers::reveal_server_secret,
+            servers::trust_server_host,
             commands::send_chat_message,
             commands::import_clipboard_attachments,
             commands::save_pasted_file,

@@ -1,3 +1,4 @@
+import ServersTab from "../components/ServersTab";
 import { useEffect, useState } from "react";
 import TodosTab from "../components/TodosTab";
 import RulesTab from "../components/RulesTab";
@@ -13,13 +14,14 @@ import appIcon from "../assets/app-icon.png";
 import { ipc, onEvent } from "../lib/ipc";
 import type { LlmUsageTotals } from "../lib/ipc";
 
-type Tab = "todos" | "rules" | "history" | "tasks" | "delegations" | "workflows" | "browser-recipes" | "skills" | "usage" | "settings";
+type Tab = "servers" | "todos" | "rules" | "history" | "tasks" | "delegations" | "workflows" | "browser-recipes" | "skills" | "usage" | "settings";
 
 const TABS: Array<{ key: Tab; label: string }> = [
   { key: "todos", label: "待办事项" },
   { key: "rules", label: "整理规则" },
   { key: "history", label: "操作记录" },
   { key: "tasks", label: "后台任务" },
+  { key: "servers", label: "服务器" },
   { key: "delegations", label: "委托任务" },
   { key: "workflows", label: "工作流" },
   { key: "browser-recipes", label: "浏览器经验" },
@@ -96,6 +98,7 @@ export default function MainWindow() {
         {tab === "rules" && <RulesTab />}
         {tab === "history" && <HistoryTab />}
         {tab === "tasks" && <TasksTab />}
+        {tab === "servers" && <ServersTab />}
         {tab === "delegations" && <DelegationsTab />}
         {tab === "workflows" && <WorkflowsTab />}
         {tab === "browser-recipes" && <BrowserRecipesTab />}

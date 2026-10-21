@@ -76,6 +76,7 @@ fn tools_for_category(category: &str) -> &'static [&'static str] {
             "stop_task",
             "lookup_cache",
         ],
+        "servers" => &["list_servers", "get_server", "create_server", "update_server", "delete_server", "test_server_connection", "ssh_exec", "sftp_list", "sftp_stat", "sftp_upload", "sftp_download", "list_remote_tasks", "get_remote_task", "wait_remote_task", "cancel_remote_task"],
         "system" => &["get_system_info"],
         "delegation" => &["run_subagent", "await_subagent", "reply_subagent"],
         "skills" => &[
@@ -104,6 +105,7 @@ fn category_for_tool(name: &str) -> &'static str {
         "todos",
         "profile",
         "commands",
+        "servers",
         "system",
         "delegation",
         "skills",
@@ -129,6 +131,12 @@ fn activate_categories(categories: &[String]) -> Vec<String> {
 }
 
 pub fn definitions() -> Value {
+    let mut definitions = builtin_definitions();
+    definitions.as_array_mut().unwrap().extend(crate::server_tools::definitions().into_iter().map(|t| json!({"type":"function","function":{"name":t["name"],"description":t["description"],"parameters":t["inputSchema"]}})));
+    definitions
+}
+
+fn builtin_definitions() -> Value {
     json!([
         {
             "type": "function",
@@ -143,7 +151,7 @@ pub fn definitions() -> Value {
                             "type": "array",
                             "items": {
                                 "type": "string",
-                                "enum": ["files", "browser", "web", "organize", "todos", "profile", "commands", "system", "delegation", "skills", "workflows"]
+                                "enum": ["files", "browser", "web", "organize", "todos", "profile", "commands", "servers", "system", "delegation", "skills", "workflows"]
                             },
                             "description": "要检索的能力：files=本地文件/图片，browser=已打开的网页，web=公开网页搜索/抓取，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，system=硬件与进程，delegation=资料、文件和浏览器子代理，skills=管理技能，workflows=固定流程与定时执行"
                         }
@@ -1278,6 +1286,11 @@ pub fn registry_definitions(db: &Db, native_vision: bool) -> Value {
             .filter(|entry| !(native_vision && entry.name == "read_image"))
             .map(|entry| {
                 let mut definition = entry.definition;
+                if entry.name == "discover_capabilities" && entry.executor_kind == "builtin" {
+                    if let Some(categories) = definition.pointer_mut("/function/parameters/properties/categories/items/enum").and_then(Value::as_array_mut) {
+                        if !categories.iter().any(|v| v.as_str() == Some("servers")) { categories.push(json!("servers")); }
+                    }
+                }
                 // Upgrade the built-in delegation contract without replacing user edits.
                 if entry.name == "run_subagent" && entry.executor_kind == "builtin" {
                     let current = definitions_for(&["run_subagent"]);
@@ -1710,6 +1723,9 @@ pub async fn execute(
         if entry.executor_kind != "builtin" {
             bail!("工具 {name} 的执行器 {} 尚未受支持", entry.executor_kind);
         }
+    }
+    if crate::server_tools::definitions().iter().any(|t| t["name"].as_str() == Some(name)) {
+        return crate::servers::dispatch(app, name, args).await;
     }
     match name {
         "discover_capabilities" => {
