@@ -26,7 +26,7 @@ LLM 走 OpenAI 兼容接口（默认 DeepSeek），Function Calling + SSE 流式
 
 ## 关键架构
 1. **主代理循环** `agent.rs::run_chat`：上限 50 轮；超长工具结果保留头尾并落入 `temp/tool-spills/`，对话过长时再压缩较早的工具结果（`retention.rs`）。对话仍然过长时调用模型把较早历史收成 `<compacted-summary>` 检查点（`compact.rs`，不改聊天界面记录）。同一工具+相同参数连续 3/5/8 次时追加劝告、不拦截（`repeat_guard.rs`；`list_todos` 等记账工具对计数透明）。需要确认时 `ask_user` 在聊天里弹出选项卡片并阻塞等待（`ask_user.rs`）。多步任务用 `todo_write` 整表替换当前进度，聊天窗显示进度条（`session_todo.rs`，不入库；下一轮用户消息清空；与提醒待办分表）。事件：`llm-token` / `llm-reasoning` / `llm-message-done` / `llm-error` / `llm-cancelled` / `tool-status` / `ask-user` / `ask-user-settled` / `session-todos` / `subagent-finished` / `subagent-chat`。
-2. **工具系统** `tools.rs`：新增工具四步 = definitions → execute → prompts（仅非显而易见约束）→ ChatPanel `TOOL_LABELS`。
+2. **工具系统** `tools.rs`：新增工具四步 = definitions → execute → prompts（仅非显而易见约束）→ ChatPanel `TOOL_LABELS`。运行时注册表全量和 System One 分类筛选都须经过 `registry_definitions` 的兼容升级，不能在分类分支直接返回持久化旧 schema；核心发现入口保留，可通过 `discover_capabilities` 补齐跨领域类别（如 files + servers），不得把路由裁剪误判为无工具。
 3. **子代理** `subagent.rs`：只读白名单 + 15 轮 + 5 分钟；`Box::pin` 打破异步递归。可 `run_in_background`；结束返回 `{status: complete|blocked, summary, findings, evidence, blockers}`。`await_subagent` 挂起主对话直到结束。中断聊天会取消进行中的子代理。
 4. **后台任务** `tasks.rs`：`run_command` / `run_command_background` / `await_task` / `check_task` / `list_tasks` / `stop_task`；长任务用 await 挂起对话、结束后自动继续，不要靠 check_task 轮询。开关 `command_tools_enabled`；命令日志按 UTF-8/GBK 自适应解码。stdout JSON 由 `cli_json.rs` 解析。
 5. **外部参考缓存** `lookup_cache`：按稳定 key 保存 CLI/API 提炼后的对照表（id↔名称、字段/选项），默认 7 天；目录注入对话末尾。不自动缓存原始命令输出。

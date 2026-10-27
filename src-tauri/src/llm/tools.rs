@@ -9,8 +9,8 @@ use tauri::{AppHandle, Emitter, Manager};
 
 pub const DISCOVER_TOOL: &str = "discover_capabilities";
 
-/// 工具清单每轮都发全量定义（稳定前缀以命中上下文缓存）。
-/// discover_capabilities 负责检索 Skill、给出建议组合和批量文件索引策略，不再负责「激活才能调用」。
+/// 完整工具目录是基线；System One 路由可精简类别，但必须保留发现入口。
+/// discover_capabilities 检索 Skills、建议组合与索引策略，并补齐被路由省略的类别。
 pub fn core_tool_names() -> Vec<String> {
     vec![
         DISCOVER_TOOL.to_string(),
@@ -142,7 +142,7 @@ fn builtin_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "discover_capabilities",
-                "description": "围绕当前目标检索可能相关的 Skills，并给出建议使用的工具组合与批量文件索引策略。全部工具已经可用，不必等待激活。先根据目标判断 Skills 目录是否已有对应能力；命中则 load_skill。路径不确定、需要换实现方式、或批量文件任务需要索引策略时调用。一次选齐所有明显相关的能力类别。",
+                "description": "围绕当前目标检索 Skills、工具组合与批量文件索引策略。本轮工具列表可能按类别精简；没有看到所需工具时，通过本工具选择相关类别，下一轮自动补齐，不要据此断言没有该能力。文件导入服务器清单等跨领域任务一次选择 files、servers 及确实需要的其它类别。命中 Skill 时 load_skill。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -153,7 +153,7 @@ fn builtin_definitions() -> Value {
                                 "type": "string",
                                 "enum": ["files", "browser", "web", "organize", "todos", "profile", "commands", "servers", "system", "delegation", "skills", "workflows"]
                             },
-                            "description": "要检索的能力：files=本地文件/图片，browser=已打开的网页，web=公开网页搜索/抓取，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，system=硬件与进程，delegation=资料、文件和浏览器子代理，skills=管理技能，workflows=固定流程与定时执行"
+                            "description": "要检索的能力：files=本地文件/图片，browser=已打开的网页，web=公开网页搜索/抓取，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，servers=拾光已保存的SSH连接、服务器新增修改删除、远程命令和SFTP传输，system=硬件与进程，delegation=资料、文件和浏览器子代理，skills=管理技能，workflows=固定流程与定时执行"
                         }
                     },
                     "required": ["query", "categories"]
@@ -1290,6 +1290,17 @@ pub fn registry_definitions(db: &Db, native_vision: bool) -> Value {
                     if let Some(categories) = definition.pointer_mut("/function/parameters/properties/categories/items/enum").and_then(Value::as_array_mut) {
                         if !categories.iter().any(|v| v.as_str() == Some("servers")) { categories.push(json!("servers")); }
                     }
+                    if let Some(description) = definition.pointer_mut("/function/parameters/properties/categories/description") {
+                        if let Some(text) = description.as_str() {
+                            if !text.contains("servers=") { *description = json!(format!("{text}；servers=拾光SSH连接新增/修改/删除、远程命令与SFTP传输")); }
+                        }
+                    }
+                    if let Some(description) = definition.pointer_mut("/function/description") {
+                        if let Some(text) = description.as_str() {
+                            let text = text.replace("全部工具已经可用，不必等待激活。", "本轮工具列表可能按类别精简；缺少工具时发现相关类别，下一轮自动补齐。");
+                            *description = json!(text);
+                        }
+                    }
                 }
                 // Upgrade the built-in delegation contract without replacing user edits.
                 if entry.name == "run_subagent" && entry.executor_kind == "builtin" {
@@ -1336,20 +1347,17 @@ pub fn registry_definitions_for_categories(
     if entries.is_empty() || categories.is_empty() {
         return registry_definitions(db, native_vision);
     }
-    Value::Array(
-        entries
-            .into_iter()
-            .filter(|entry| {
-                entry.category == "core"
-                    || categories
-                        .iter()
-                        .any(|category| category == &entry.category)
-            })
-            .filter(|entry| entry.definition.is_object())
-            .filter(|entry| entry.name != "read_image" || crate::commands::load_settings(db).read_image_enabled)
-            .map(|entry| entry.definition)
-            .collect(),
-    )
+    let core = core_tool_names();
+    let selected: HashSet<String> = entries.into_iter()
+        .filter(|entry| entry.category == "core" || core.contains(&entry.name) || categories.contains(&entry.category))
+        .map(|entry| entry.name)
+        .collect();
+    // Apply the same compatibility upgrades as the full inventory before filtering.
+    // Returning raw persisted schemas here hid new categories from routed sessions.
+    let upgraded = registry_definitions(db, native_vision);
+    Value::Array(upgraded.as_array().into_iter().flatten()
+        .filter(|tool| tool.pointer("/function/name").and_then(Value::as_str).is_some_and(|name| selected.contains(name)))
+        .cloned().collect())
 }
 
 pub fn registry_category_cards(db: &Db) -> Value {
@@ -3461,6 +3469,55 @@ mod capability_tests {
         );
         drop(db);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn routed_registry_upgrades_legacy_discovery_and_can_reveal_servers() {
+        let path = std::env::temp_dir().join(format!("shiguang-routed-tools-{}.db", uuid::Uuid::new_v4()));
+        let db = Db::new(&path).unwrap();
+        seed_registry(&db).unwrap();
+        let mut discovery = db.tool_registry_entry(DISCOVER_TOOL).unwrap().unwrap();
+        discovery.definition["function"]["parameters"]["properties"]["categories"]["items"]["enum"].as_array_mut().unwrap().retain(|v| v != "servers");
+        discovery.definition["function"]["description"] = json!("自定义前缀。全部工具已经可用，不必等待激活。");
+        discovery.definition["function"]["parameters"]["properties"]["categories"]["description"] = json!("自定义类别说明");
+        db.put_tool_registry_entry(&discovery).unwrap();
+
+        let routed = registry_definitions_for_categories(&db, &["files".into(), "commands".into()], false);
+        assert!(!routed.as_array().unwrap().iter().any(|t| t["function"]["name"] == "create_server"));
+        let upgraded = routed.as_array().unwrap().iter().find(|t| t["function"]["name"] == DISCOVER_TOOL).unwrap();
+        assert!(upgraded.pointer("/function/parameters/properties/categories/items/enum").unwrap().as_array().unwrap().contains(&json!("servers")));
+        assert!(upgraded["function"]["description"].as_str().unwrap().contains("自定义前缀"));
+        assert!(!upgraded["function"]["description"].as_str().unwrap().contains("全部工具已经可用"));
+        assert!(upgraded.pointer("/function/parameters/properties/categories/description").unwrap().as_str().unwrap().contains("servers="));
+        // Compatibility is applied to the API inventory, not to user-maintained rows.
+        assert!(!db.tool_registry_entry(DISCOVER_TOOL).unwrap().unwrap().definition.pointer("/function/parameters/properties/categories/items/enum").unwrap().as_array().unwrap().contains(&json!("servers")));
+        let expanded = registry_definitions_for_categories(&db, &["files".into(), "commands".into(), "servers".into()], false);
+        for name in ["list_servers", "create_server", "update_server", "delete_server", "read_file", "run_command"] {
+            assert!(expanded.as_array().unwrap().iter().any(|t| t["function"]["name"] == name), "missing {name}");
+        }
+        let mut disabled = db.tool_registry_entry("delete_server").unwrap().unwrap();
+        disabled.enabled = false;
+        db.put_tool_registry_entry(&disabled).unwrap();
+        let filtered = registry_definitions_for_categories(&db, &["servers".into()], false);
+        assert!(!filtered.as_array().unwrap().iter().any(|t| t["function"]["name"] == "delete_server"));
+        assert!(filtered.as_array().unwrap().iter().any(|t| t["function"]["name"] == "create_server"));
+        drop(db); let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn routed_registry_preserves_other_runtime_schema_upgrades() {
+        let path = std::env::temp_dir().join(format!("shiguang-routed-delegation-{}.db", uuid::Uuid::new_v4()));
+        let db = Db::new(&path).unwrap();
+        seed_registry(&db).unwrap();
+        let mut old_agent = db.tool_registry_entry("run_subagent").unwrap().unwrap();
+        old_agent.definition["function"]["parameters"]["properties"].as_object_mut().unwrap().remove("role");
+        old_agent.definition["function"]["description"] = json!("自定义委托描述");
+        db.put_tool_registry_entry(&old_agent).unwrap();
+        let routed = registry_definitions_for_categories(&db, &["delegation".into()], false);
+        let tool = routed.as_array().unwrap().iter().find(|t| t["function"]["name"] == "run_subagent").unwrap();
+        assert!(tool.pointer("/function/parameters/properties/role").is_some());
+        assert_eq!(tool["function"]["description"], "自定义委托描述");
+        drop(db); let _ = std::fs::remove_file(path);
     }
 
     #[test]

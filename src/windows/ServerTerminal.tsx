@@ -5,6 +5,7 @@ import ServerFiles from "../components/ServerFiles";
 import ServerTerminalChat from "../components/ServerTerminalChat";
 import { useTerminalFiles } from "../lib/useTerminalFiles";
 import { useTerminalAgent } from "../lib/useTerminalAgent";
+import { createTerminalInputQueue, terminalTabSequence } from "../lib/terminalInput";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -16,6 +17,8 @@ export default function ServerTerminal() {
   const fitAddon = useRef<FitAddon>();
   const [status, setStatus] = useState("connecting");
   const [error, setError] = useState("");
+  const [completionHint, setCompletionHint] = useState("");
+  const lastTab = useRef(0);
   const [aiMode, setAiMode] = useState(false);
   const aiModeRef = useRef(false);
   const [switching, setSwitching] = useState(false);
@@ -31,7 +34,11 @@ export default function ServerTerminal() {
   const output = useRef("");
   const files = useTerminalFiles(serverId, status === "connected");
   const agent = useTerminalAgent({ serverId, status, output, files, localFiles });
-  const call = <T,>(action: string, extra = {}) => ipc.serverTerminal<T>(action, serverId, extra);
+  const inputQueue = useRef<ReturnType<typeof createTerminalInputQueue>>();
+  if (!inputQueue.current) inputQueue.current = createTerminalInputQueue(data => ipc.serverTerminal("write", serverId, { data }));
+  const call = <T,>(action: string, extra: Record<string, unknown> = {}) => action === "write"
+    ? inputQueue.current!(String(extra.data ?? "")) as Promise<T>
+    : ipc.serverTerminal<T>(action, serverId, extra);
   useEffect(() => {
     try { localStorage.setItem(`terminal-files-visible:${serverId}`, String(showFiles)); } catch { /* Preference storage is optional. */ }
   }, [showFiles, serverId]);
@@ -88,6 +95,15 @@ export default function ServerTerminal() {
     const term = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: 'Consolas, "Courier New", monospace', scrollback: 10000, theme: { background: "#0b1120", foreground: "#e2e8f0" } });
     const fit = new FitAddon(); term.loadAddon(fit); term.open(container.current!); terminal.current = term; fitAddon.current = fit;
     const report = (e: unknown) => { if (!dead) setError(String(e)); };
+    term.attachCustomKeyEventHandler(event => {
+      const data = terminalTabSequence(event);
+      if (data === undefined) return true;
+      // Exactly one write, with the same bytes in a Shell or a full-screen TUI.
+      event.preventDefault(); event.stopPropagation();
+      lastTab.current = Date.now(); setCompletionHint("");
+      if (!aiModeRef.current && !switchingRef.current) void call("write", { data }).catch(report);
+      return false;
+    });
     const resize = () => {
       if (aiModeRef.current || !container.current?.clientWidth || !container.current?.clientHeight) return;
       fit.fit(); void call("resize", { cols: term.cols, rows: term.rows }).catch(() => {});
@@ -95,7 +111,16 @@ export default function ServerTerminal() {
     resize();
     const observer = new ResizeObserver(resize); observer.observe(container.current!);
     const decoder = new TextDecoder();
-    const input = term.onData(data => { if (!aiModeRef.current && !switchingRef.current) void call("write", { data }).catch(report); });
+    const bell = term.onBell(() => {
+      if (!aiModeRef.current && term.buffer.active.type === "normal" && Date.now() - lastTab.current < 1500) {
+        setCompletionHint("服务器没有给出唯一匹配，可再按 Tab 查看候选；也可能没有匹配项。");
+      }
+    });
+    const input = term.onData(data => {
+      if (data === "\t") lastTab.current = Date.now();
+      else { lastTab.current = 0; setCompletionHint(""); }
+      if (!aiModeRef.current && !switchingRef.current) void call("write", { data }).catch(report);
+    });
     void connect(); term.focus();
     const timer = window.setInterval(async () => {
       if (polling) return; polling = true;
@@ -112,7 +137,7 @@ export default function ServerTerminal() {
         }
       } catch (e) { report(e); } finally { polling = false; }
     }, 80);
-    return () => { dead = true; clearInterval(timer); observer.disconnect(); input.dispose(); term.dispose(); terminal.current = undefined; fitAddon.current = undefined; };
+    return () => { dead = true; clearInterval(timer); observer.disconnect(); input.dispose(); bell.dispose(); term.dispose(); terminal.current = undefined; fitAddon.current = undefined; };
   }, [serverId]);
   useEffect(() => {
     if (aiMode) return;
@@ -130,6 +155,7 @@ export default function ServerTerminal() {
         <button disabled={windowBusy} className="disabled:opacity-40" aria-label={maximized ? "还原窗口" : "最大化窗口"} onClick={() => void toggleMaximize()}>{maximized ? "还原" : "最大化"}</button>
         <button className={showFiles ? "text-sky-300" : ""} aria-expanded={showFiles} aria-controls="remote-file-panel" onClick={() => setShowFiles(!showFiles)}>{showFiles ? "隐藏文件列表" : "显示文件列表"}</button>
         <button disabled={switching} className={`${aiMode ? "text-sky-300" : ""} disabled:opacity-40`} onClick={() => void switchMode()}>{switching ? "切换中…" : aiMode ? "退出 AI 模式" : "AI 模式"}</button>
+        {!aiMode && <button disabled={status !== "connected" || switching} className="disabled:opacity-40" title="向当前终端发送 Tab，按服务器 Shell 的当前目录和规则补全" onMouseDown={e => e.preventDefault()} onClick={() => { terminal.current?.focus(); lastTab.current = Date.now(); setCompletionHint(""); void call("write", { data: "\t" }).catch(e => setError(String(e))); }}>Tab 补全</button>}
         {aiMode ? <button disabled={agent.busy || !!agent.pending} className="disabled:opacity-40" onClick={agent.clear}>清空对话</button> : <button onClick={() => terminal.current?.clear()}>清屏</button>}
         {status === "disconnected" ? <button className="text-sky-300" disabled={switching} onClick={connect}>重新连接</button> : <button disabled={switching} onClick={() => { void agent.stop(false).then(() => call("disconnect")).catch(e => setError(String(e))); }}>断开连接</button>}
       </div>
@@ -148,6 +174,7 @@ export default function ServerTerminal() {
           onKeyDown={e => { if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); setFilesWidth(w => Math.max(280, Math.min(620, w + (e.key === "ArrowLeft" ? 20 : -20)))); } }} />}
         <div id="remote-file-panel" className={showFiles ? "min-w-[280px] max-w-[50%] shrink-0" : "hidden"} style={{ width: filesWidth }}><ServerFiles files={files} connected={status === "connected"} onLocalFiles={paths => { localFiles.current = [...new Set([...localFiles.current, ...paths])].slice(-50); }} /></div>
     </div>
-    <footer className="border-t border-slate-800 px-4 py-1 text-xs text-slate-500">{aiMode ? "AI 通过当前 SSH 会话执行操作；操作目标、执行结果及提供的本机路径会发送给已配置的模型。" : "Ctrl+C 中断命令 · Ctrl+V 粘贴 · 关闭窗口将断开终端；上传任务可能继续，请先取消不需要的传输"}</footer>
+    {!aiMode && completionHint && <p role="status" className="border-t border-slate-800 px-4 py-1.5 text-xs text-amber-300">{completionHint}</p>}
+    <footer className="border-t border-slate-800 px-4 py-1 text-xs text-slate-500">{aiMode ? "AI 通过当前 SSH 会话执行操作；操作目标、执行结果及提供的本机路径会发送给已配置的模型。" : "Tab 补全命令/文件 · Ctrl+C 中断命令 · Ctrl+V 粘贴 · 关闭窗口将断开终端；上传任务可能继续，请先取消不需要的传输"}</footer>
   </div>;
 }
