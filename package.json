@@ -1,7 +1,7 @@
 {
   "name": "shiguang",
   "private": true,
-  "version": "0.1.5",
+  "version": "0.1.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,7 +13,8 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build --no-bundle",
-    "tauri:bundle": "tauri build"
+    "tauri:bundle": "tauri build",
+    "release:local": "tauri build --config src-tauri/tauri.local-bundle.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import Icon from "../components/Icon";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ipc, onEvent } from "../lib/ipc";
@@ -17,7 +18,7 @@ import { useChatStore } from "../stores/chat";
 import type { UiMessage } from "../stores/chat";
 import Markdown from "../components/Markdown";
 import ChatSlashMenu from "../components/ChatSlashMenu";
-import appIcon from "../assets/app-icon.png";
+import appIcon from "../assets/brand-mark.svg";
 import {
   buildSlashCommands,
   filterSlashCommands,
@@ -161,7 +162,7 @@ export default function ChatPanel() {
   const [showSessions, setShowSessions] = useState(false);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
-  const [workflows, setWorkflows] = useState<AutomationWorkflow[]>([]);
+  const workflows: AutomationWorkflow[] = [];
   const [slashIndex, setSlashIndex] = useState(0);
   const currentSessionIdRef = useRef<number | null>(null);
   currentSessionIdRef.current = currentSessionId;
@@ -177,52 +178,7 @@ export default function ChatPanel() {
     setSlashIndex(0);
   }, [slashQuery, workflows.length]);
 
-  const reloadWorkflows = useCallback(() => {
-    ipc.listAutomationWorkflows().then(setWorkflows).catch(() => {});
-  }, []);
 
-  useEffect(() => {
-    let disposed = false;
-    let timer: number | undefined;
-    const hydrate = (attempt = 0) => {
-      ipc
-        .listAutomationWorkflows()
-        .then((list) => {
-          if (!disposed) setWorkflows(list);
-        })
-        .catch(() => {
-          if (disposed || attempt >= 20) return;
-          timer = window.setTimeout(() => hydrate(attempt + 1), 100);
-        });
-    };
-    hydrate();
-    const cleanups: Array<() => void> = [];
-    onEvent("automation-workflows-changed", () => {
-      if (!disposed) reloadWorkflows();
-    }).then((u) => {
-      if (disposed) u();
-      else cleanups.push(u);
-    });
-    getCurrentWindow()
-      .onFocusChanged((e) => {
-        if (!disposed && e.payload) reloadWorkflows();
-      })
-      .then((u) => {
-        if (disposed) u();
-        else cleanups.push(u);
-      })
-      .catch(() => {});
-    return () => {
-      disposed = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-      cleanups.forEach((u) => u());
-    };
-  }, [reloadWorkflows]);
-
-  useEffect(() => {
-    if (!slashOpen) return;
-    reloadWorkflows();
-  }, [slashOpen, reloadWorkflows]);
 
   // 输入框随内容自动增高（上限 max-h-28），未超高时不出现滚动条
   useEffect(() => {
@@ -638,24 +594,25 @@ export default function ChatPanel() {
             className="w-7 h-7 rounded text-slate-300 hover:text-white hover:bg-slate-700 transition text-base leading-none"
             title="新会话"
           >
-            +
+            <Icon name="plus" />
           </button>
           <button
             onClick={() => {
               setShowSessions((v) => !v);
               refreshSessions();
             }}
+            title="历史会话"
             className={`px-2 py-1 text-xs rounded transition ${
               showSessions ? "bg-sky-500/20 text-sky-300" : "text-slate-300 hover:text-white hover:bg-slate-700"
             }`}
           >
-            历史
+            <Icon name="history" /><span className="sr-only">历史会话</span>
           </button>
           <button
-            onClick={() => ipc.openMain().catch(() => {})}
+            title="主面板" onClick={() => ipc.openMain().catch(() => {})}
             className="px-2 py-1 text-xs rounded text-slate-300 hover:text-white hover:bg-slate-700 transition"
           >
-            主面板
+            <Icon name="settings" /><span className="sr-only">主面板</span>
           </button>
           <button
             onClick={() => ipc.hideChat().catch(() => {})}
@@ -1281,12 +1238,7 @@ function AskUserCard({
 }
 
 function SessionProgressBar({ items }: { items: SessionTodo[] }) {
-  const [open, setOpen] = useState(() => items.some((i) => i.status === "in_progress"));
-  const hasActive = items.some((i) => i.status === "in_progress");
-
-  useEffect(() => {
-    if (hasActive) setOpen(true);
-  }, [hasActive]);
+  const [open, setOpen] = useState(false);
 
   if (items.length === 0) return null;
 
@@ -1300,21 +1252,19 @@ function SessionProgressBar({ items }: { items: SessionTodo[] }) {
       : "下一步还没开始";
 
   return (
-    <div className="shrink-0 border-b border-slate-700/60 bg-slate-800/70 px-3 py-2">
+    <div className="session-progress shrink-0 border-b border-slate-700/60 bg-slate-800/70 px-3 py-1.5">
       <button type="button" onClick={() => setOpen((v) => !v)} className="w-full text-left">
         <div className="flex items-center gap-2">
-          <div className="flex-1 h-1 rounded-full bg-slate-700 overflow-hidden">
+          <div className="w-14 h-[3px] rounded-full bg-slate-700 overflow-hidden shrink-0">
             <div
               className="h-full bg-gradient-to-r from-sky-500 to-indigo-500 transition-all"
               style={{ width: `${pct}%` }}
             />
           </div>
+          <span className="flex-1 text-[11px] text-slate-300 truncate">{headline}</span>
           <span className="text-[11px] text-slate-400 tabular-nums shrink-0">
             {done}/{items.length}
           </span>
-        </div>
-        <div className="mt-1 flex items-center justify-between gap-2">
-          <span className="text-[11px] text-slate-300 truncate">{headline}</span>
           <span className="text-slate-500 text-[10px] shrink-0">{open ? "▴" : "▾"}</span>
         </div>
       </button>

@@ -179,7 +179,8 @@ pub fn run() {
             }
             tray::create_tray(app.handle())?;
             todo::scheduler::spawn(app.handle().clone());
-            organizer::watcher::spawn(app.handle().clone());
+            // Desktop organization is user-invoked through the editable external Skill.
+            // Do not execute legacy database rules in the background.
             log::info!("拾光已启动，数据目录: {:?}", app_dir);
             Ok(())
         })

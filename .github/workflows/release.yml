@@ -2,52 +2,127 @@ name: 发布 Windows 安装包
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "app-v*"
+    inputs:
+      mode:
+        description: 发布方式（默认只签名本地上传的安装包，不编译 Rust）
+        type: choice
+        options: [sign-local, build]
+        default: sign-local
+      tag:
+        description: 本地上传的草稿 Release 标签，例如 app-v0.1.6
+        type: string
+        required: false
+      sha256:
+        description: 本地安装包的 SHA256（sign-local 必填）
+        type: string
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  sign-local:
+    if: inputs.mode == 'sign-local'
     runs-on: windows-latest
-    permissions:
-      contents: write
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+      - name: 校验草稿并下载本地安装包
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          EXPECTED_SHA256: ${{ inputs.sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_TAG -notmatch '^app-v\d+\.\d+\.\d+$') { throw '无效版本标签' }
+          if ($env:EXPECTED_SHA256 -notmatch '^[a-fA-F0-9]{64}$') { throw '必须提供安装包 SHA256' }
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -ne "app-v$version") { throw '标签与源码版本不一致' }
+          $tagCommit = gh api "repos/$env:GITHUB_REPOSITORY/commits/$env:RELEASE_TAG" --jq .sha
+          if ($LASTEXITCODE -ne 0 -or $tagCommit -ne $env:GITHUB_SHA) { throw '标签与工作流源码提交不一致' }
+          $release = gh release view $env:RELEASE_TAG --json isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $release.isDraft) { throw '仅允许发布草稿 Release' }
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          gh release download $env:RELEASE_TAG --pattern '*x64-setup.exe' --dir release-assets
+          if ($LASTEXITCODE -ne 0) { throw '下载安装包失败' }
+          $files = @(Get-ChildItem release-assets -Filter '*.exe')
+          if ($files.Count -ne 1) { throw '必须且只能提供一个安装包' }
+          if ((Get-FileHash $files[0].FullName -Algorithm SHA256).Hash -ne $env:EXPECTED_SHA256) { throw 'SHA256 校验失败，拒绝签名' }
+          "INSTALLER=$($files[0].FullName)" >> $env:GITHUB_ENV
+          "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+      - name: 安装签名工具（不执行项目构建）
+        run: npm ci --ignore-scripts
+      - name: 签名安装包
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          npx tauri signer sign "$env:INSTALLER"
+          if ($LASTEXITCODE -ne 0) { throw '签名失败' }
+      - name: 生成更新信息并发布
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = [IO.Path]::GetFileName($env:INSTALLER)
+          $signature = (Get-Content "$env:INSTALLER.sig" -Raw).Trim()
+          if (-not $signature) { throw '缺少签名' }
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/$([Uri]::EscapeDataString($name))"
+          $entry = @{ signature = $signature; url = $url }
+          $manifest = @{
+            version = $env:RELEASE_VERSION
+            notes = '界面焕新、悬浮球修复、技能精简与服务器体验优化。'
+            pub_date = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+            platforms = @{ 'windows-x86_64' = $entry; 'windows-x86_64-nsis' = $entry }
+          }
+          $manifest | ConvertTo-Json -Depth 6 | Set-Content release-assets/latest.json -Encoding utf8NoBOM
+          gh release upload $env:RELEASE_TAG "$env:INSTALLER.sig" release-assets/latest.json --clobber
+          if ($LASTEXITCODE -ne 0) { throw '上传更新信息失败' }
+          gh release edit $env:RELEASE_TAG --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw '发布失败' }
 
+  build:
+    if: inputs.mode == 'build'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: "./src-tauri -> target"
-
-      - name: 安装依赖
-        run: npm ci
-
-      - name: 检查前端类型
-        run: npx tsc --noEmit
-
-      - name: 终端上下文与文件刷新回归测试
+          workspaces: ./src-tauri -> target
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - name: 终端回归测试
         run: |
           node scripts/test-terminal-agent-context.mjs
           node scripts/test-terminal-files.mjs
-
-      - name: 构建并发布
+          node scripts/test-terminal-input.mjs
+      - name: 备用云端构建并发布
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CARGO_INCREMENTAL: "0"
+          CARGO_INCREMENTAL: '0'
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: app-v__VERSION__
-          releaseName: "拾光 v__VERSION__"
-          releaseBody: "请在下方下载 Windows 安装包；已安装的拾光也可以在设置中手动检查更新。"
+          releaseName: 拾光 v__VERSION__
+          releaseBody: 请在下方下载 Windows 安装包，也可以在设置中检查更新。
           releaseDraft: false
           prerelease: false
           uploadUpdaterJson: true

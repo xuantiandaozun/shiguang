@@ -34,7 +34,8 @@ fn position_chat_near_ball(app: &AppHandle) {
     };
     let scale = ball.scale_factor().unwrap_or(1.0);
     let bp: LogicalPosition<f64> = pos.to_logical(scale);
-    let mut x = bp.x + BALL - CHAT_W;
+    let ball_width = ball.outer_size().map(|s| s.to_logical::<f64>(scale).width).unwrap_or(BALL);
+    let mut x = bp.x + ball_width / 2.0 + BALL / 2.0 - CHAT_W;
     let mut y = bp.y - CHAT_H - 14.0;
     if let Ok(Some(mon)) = ball.current_monitor() {
         let ms: LogicalSize<f64> = mon.size().to_logical(scale);

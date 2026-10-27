@@ -1,0 +1,54 @@
+/* Row feedback uses explicit colors so hover remains visible in both themes. */
+body[data-window="terminal"] .remote-file-row { transition: background-color 120ms; }
+body[data-window="terminal"] .remote-file-row:hover { background-color: #e8a23a18; }
+body[data-window="terminal"] .remote-file-row.is-selected { background-color: #e8a23a28; }
+body[data-window="terminal"] .remote-file-row.is-selected > td:first-child { box-shadow: inset 3px 0 #e8a23a; }
+body[data-window="terminal"] .remote-file-row:focus-within { background-color: #e8a23a20; }
+.server-list-row { transition: background-color 120ms; }
+.server-list-row:hover, .server-list-row:focus-within { background-color: #fff6ee; }
+.server-list-row:hover > td:first-child, .server-list-row:focus-within > td:first-child { box-shadow: inset 3px 0 #e8a23a; }
+.server-list-row > td:first-child { padding-left: 8px; }
+/* Shared light surfaces. Terminal keeps its dedicated dark, high-contrast palette. */
+body:is([data-window="main"], [data-window="chat"], [data-window="reminder"], [data-window="delegation"]) {
+  --page: #ffffff;
+  --surface: #ffffff;
+  --ink: #1f2329;
+  --muted: #646a73;
+  --accent: #e8a23a;
+  color: var(--ink);
+  background: var(--page);
+  color-scheme: light;
+}
+body:not([data-window="terminal"]):not([data-window="floatball"]) :is([class*="bg-slate-950"], [class*="bg-slate-900"]) { background-color: #fff; }
+body:not([data-window="terminal"]):not([data-window="floatball"]) :is([class*="bg-slate-800"], [class*="bg-slate-700"]) { background-color: #ffffff; }
+body:not([data-window="terminal"]):not([data-window="floatball"]) :is([class*="text-slate-100"], [class*="text-slate-200"], [class*="text-slate-300"]) { color: #1f2329; }
+body:not([data-window="terminal"]):not([data-window="floatball"]) :is([class*="text-slate-400"], [class*="text-slate-500"]) { color: #646a73; }
+body:not([data-window="terminal"]):not([data-window="floatball"]) [class*="border-slate-"] { border-color: #e2e5e9; }
+body:not([data-window="terminal"]):not([data-window="floatball"]) [class*="text-sky-"] { color: #a36313; }
+body:not([data-window="terminal"]):not([data-window="floatball"]) [class*="border-sky-"] { border-color: #e8a23a; }
+body:not([data-window="terminal"]):not([data-window="floatball"]) [class*="bg-sky-500/"] { background-color: #fff3df; }
+body:not([data-window="terminal"]):not([data-window="floatball"]) [class*="from-sky-"] { background-image: none; background-color: #bc5228; color: #ffffff; }
+body[data-window="chat"] .items-end > [class*="from-sky-"] { background-color: #b57520; color: #fff8ef; }
+body[data-window="main"] header { background: #fff; }
+body[data-window="main"] main { background: #ffffff; }
+body[data-window="main"] nav { background: #ffffff; }
+body[data-window="main"] .settings-layout { background: #ffffff; }
+body[data-window="main"] .settings-layout :is(input, textarea, select) { background-color: #ffffff; border-color: #e8dfd8; }
+body[data-window="main"] .settings-layout [class*="bg-slate-"]:not(button):not(input):not(select):not(textarea) { background-color: #fffaf5; }
+body:not([data-window="terminal"]) :is(input, textarea, select) { accent-color: #c98428; }
+body:not([data-window="terminal"]) :is(button, input, textarea, select):focus-visible { outline: 2px solid #c98428; outline-offset: 2px; }
+.organize-links { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.organize-links button { padding: 7px 12px; border-radius: 8px; border: 1px solid #e4d2b5; background: #fff8ec; color: #875318; font-size: 12px; }
+.settings-group { padding: 16px; background: white; border: 1px solid #e2e5e9; border-radius: 12px; }
+.settings-group > summary { cursor: pointer; font-size: 14px; font-weight: 600; color: #1f2329; }
+.settings-group[open] > summary { margin-bottom: 16px; }
+.settings-layout > * { order: 5; }
+.settings-layout > :first-child { order: 0; padding: 16px; background: white; border: 1px solid #e2e5e9; border-radius: 12px; }
+.settings-layout > .settings-permissions { order: 1; }
+.settings-layout > .settings-vision { order: 2; padding: 16px; background: white; border: 1px solid #e2e5e9; border-radius: 12px; }
+.settings-layout > .settings-system { order: 3; }
+.settings-layout > .settings-save { order: 10; position: sticky; bottom: -16px; padding: 12px 0; background: #ffffff; z-index: 5; flex-wrap: wrap; }
+.terminal-toolbar button { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 8px; }
+.terminal-toolbar button:hover:not(:disabled) { background: #ffffff10; color: #f0c57a; }
+.terminal-toolbar button:focus-visible { outline: 2px solid #e8a23a; }
+.terminal-toolbar button[aria-pressed="true"], .terminal-toolbar button[aria-expanded="true"] { background: #e8a23a20; color: #f0c57a; }

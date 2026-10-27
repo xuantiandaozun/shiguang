@@ -2,6 +2,8 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useTerminalAgent } from "../lib/useTerminalAgent";
+import Icon from "./Icon";
+import terminalArt from "../assets/generated/terminal-empty-20261027.png";
 
 type Agent = ReturnType<typeof useTerminalAgent>;
 export default function ServerTerminalChat({ agent, connected }: { agent: Agent; connected: boolean }) {
@@ -17,6 +19,7 @@ export default function ServerTerminalChat({ agent, connected }: { agent: Agent;
   return <section aria-label="服务器 AI 对话" className="flex flex-1 min-h-0 flex-col bg-[#0b1120]">
     <div role="log" aria-label="对话记录" aria-live="polite" className="min-h-0 flex-1 overflow-auto px-5 py-5 space-y-5">
       {!agent.messages.length && <div className="mx-auto max-w-xl py-12">
+        <img src={terminalArt} alt="" className="mb-5 h-28 w-48 rounded-xl object-cover" />
         <h2 className="text-lg font-medium">想检查或处理什么？</h2>
         <p className="mt-2 text-sm text-slate-400">直接描述目标，AI 会操作当前服务器并整理结果。</p>
         <button className="mt-5 rounded border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:border-sky-600 hover:text-sky-300 disabled:opacity-40" disabled={!connected} onClick={() => { agent.send("检查这台服务器当前的运行情况，概括需要关注的问题。"); }}>检查服务器运行情况</button>
@@ -40,7 +43,7 @@ export default function ServerTerminalChat({ agent, connected }: { agent: Agent;
     <form onSubmit={submit} className="shrink-0 border-t border-slate-700 px-4 py-3">
       <div className="flex items-end gap-2 rounded-lg border border-slate-600 bg-slate-900 p-2 focus-within:border-sky-500">
         <textarea ref={input} aria-label="告诉 AI 要完成的事" rows={2} className="min-w-0 flex-1 resize-none bg-transparent px-1 py-1 text-sm outline-none placeholder:text-slate-500 disabled:opacity-50" placeholder={agent.pending ? "请先确认或取消上方操作" : "例如：检查某个服务是否正常，最近有没有报错"} value={draft} disabled={agent.busy || !!agent.pending} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); } }} />
-        {agent.busy ? <button type="button" className="rounded border border-slate-600 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800" onClick={() => void agent.stop()}>停止</button> : <button className="rounded bg-sky-600 px-4 py-2 text-sm hover:bg-sky-500 disabled:opacity-40" disabled={!connected || !draft.trim() || !!agent.pending}>发送</button>}
+        {agent.busy ? <button type="button" className="rounded border border-slate-600 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800" onClick={() => void agent.stop()}><Icon name="stop" className="mr-1.5" />停止</button> : <button className="rounded bg-sky-600 px-4 py-2 text-sm hover:bg-sky-500 disabled:opacity-40" disabled={!connected || !draft.trim() || !!agent.pending}><Icon name="send" className="mr-1.5" />发送</button>}
       </div>
       <p className="mt-2 text-xs text-slate-500">普通操作自动执行，敏感操作才确认 · Enter 发送，Shift+Enter 换行</p>
     </form>

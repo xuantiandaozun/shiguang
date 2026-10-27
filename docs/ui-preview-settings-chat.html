@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>拾光 · 信息架构 / 设置层级 / 图标效果稿</title>
+  <style>
+    :root {
+      --bg: #f3f4f6;
+      --border: rgba(15, 23, 42, 0.1);
+      --border-soft: rgba(15, 23, 42, 0.07);
+      --text: #1f2329;
+      --text-secondary: #646a73;
+      --text-muted: #8f959e;
+      --accent: #e8a23a;
+      --accent-soft: rgba(232, 162, 58, 0.12);
+      --accent-border: rgba(200, 130, 30, 0.45);
+      --accent-text: #b8741a;
+      --accent-ink: #fff8ef;
+      --success: #1f9d6a;
+      --danger: #d14343;
+      --term-bg: #11151c;
+      --term-panel: #171b24;
+      --term-border: rgba(255,255,255,0.08);
+      --term-text: #d7dde8;
+      --term-muted: #8b93a7;
+      --radius: 10px;
+      --shadow: 0 12px 36px rgba(15, 23, 42, 0.08);
+      --font: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; font-family: var(--font); color: var(--text);
+      background: radial-gradient(ellipse 70% 45% at 12% 0%, rgba(232,162,58,.12), transparent 52%),
+                  linear-gradient(180deg, #fafafa 0%, var(--bg) 40%);
+      padding: 28px 24px 48px;
+    }
+    .page-head {
+      max-width: 1220px; margin: 0 auto 22px; display: flex; flex-wrap: wrap;
+      align-items: flex-end; justify-content: space-between; gap: 16px;
+    }
+    .page-head h1 { margin: 0 0 6px; font-size: 20px; font-weight: 600; }
+    .page-head p { margin: 0; font-size: 13px; color: var(--text-secondary); line-height: 1.55; max-width: 760px; }
+    .tabs {
+      display: inline-flex; gap: 4px; padding: 4px; background: #fff; border: 1px solid var(--border);
+      border-radius: 999px; box-shadow: 0 2px 8px rgba(15,23,42,.04);
+    }
+    .tabs button {
+      border: 0; background: transparent; color: var(--text-secondary); font: inherit; font-size: 13px;
+      padding: 7px 14px; border-radius: 999px; cursor: pointer;
+    }
+    .tabs button.active { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
+    .stage { max-width: 1220px; margin: 0 auto; display: none; gap: 20px; }
+    .stage.active { display: grid; }
+    .stage.ia-stage, .stage.settings-stage, .stage.review-stage { grid-template-columns: 1fr; }
+    .stage.chat-stage { grid-template-columns: 1fr 360px; }
+    .stage.term-stage { grid-template-columns: 1.4fr 360px; }
+    @media (max-width: 980px) {
+      .stage.chat-stage, .stage.term-stage { grid-template-columns: 1fr; }
+    }
+    .panel {
+      background: #fff; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; box-shadow: var(--shadow);
+    }
+    .panel-label {
+      padding: 10px 14px; font-size: 12px; color: var(--text-muted); border-bottom: 1px solid var(--border-soft);
+      background: #fafafa; display: flex; justify-content: space-between; gap: 12px;
+    }
+    .panel-label strong { color: var(--text-secondary); }
+    .notes {
+      background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px; box-shadow: var(--shadow);
+    }
+    .notes h2 { margin: 0 0 10px; font-size: 14px; }
+    .notes ul { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary); line-height: 1.7; }
+    .notes li strong { color: #2b2f36; }
+
+    /* icons */
+    .ico {
+      width: 16px; height: 16px; display: inline-block; vertical-align: -2px;
+      stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .ico-btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      border: 1px solid transparent; background: transparent; color: inherit;
+      font: inherit; font-size: 12px; padding: 6px 8px; border-radius: 7px; cursor: default;
+    }
+    .ico-btn.icon-only { width: 32px; height: 32px; padding: 0; }
+    .ico-btn:hover { background: rgba(0,0,0,.04); }
+    .ico-btn.active { background: var(--accent-soft); color: var(--accent-text); }
+
+    /* main shell */
+    .main-shell { min-height: 640px; background: #f7f8fa; display: flex; flex-direction: column; }
+    .main-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 20px 12px; background: #fff; border-bottom: 1px solid var(--border-soft);
+    }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .brand-mark {
+      width: 28px; height: 28px; border-radius: 999px;
+      background: linear-gradient(145deg, #f0b45a, #c98428);
+    }
+    .brand-title { font-size: 14px; font-weight: 600; }
+    .brand-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+    .nav { display: flex; gap: 4px; padding: 12px 20px 0; background: #fff; overflow-x: auto; }
+    .nav button {
+      border: 0; background: transparent; color: var(--text-muted); font: inherit; font-size: 13px;
+      padding: 8px 14px; border-radius: 10px 10px 0 0; display: inline-flex; align-items: center; gap: 6px;
+    }
+    .nav button.active {
+      background: #f7f8fa; color: var(--accent-text); font-weight: 600;
+      box-shadow: inset 0 -2px 0 var(--accent);
+    }
+    .main-body { flex: 1; margin: 0 20px 20px; padding: 18px; background: #f7f8fa; border-radius: 0 10px 10px 10px; }
+
+    .skill-card, .section {
+      background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+      margin-bottom: 12px; box-shadow: 0 1px 2px rgba(15,23,42,.03);
+    }
+    .skill-card h3, .section h3 { margin: 0 0 6px; font-size: 13px; }
+    .skill-card p, .section p { margin: 0; font-size: 12px; color: var(--text-secondary); line-height: 1.55; }
+    .skill-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .pill {
+      font-size: 11px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border);
+      color: var(--text-secondary); background: #fafafa;
+    }
+    .pill.on { color: var(--accent-text); border-color: var(--accent-border); background: var(--accent-soft); }
+    .sub-links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .sub-links a {
+      font-size: 12px; color: var(--accent-text); text-decoration: none;
+      border: 1px solid var(--accent-border); background: var(--accent-soft);
+      padding: 6px 10px; border-radius: 7px; display: inline-flex; align-items: center; gap: 6px;
+    }
+
+    /* settings priority */
+    .prio { display: flex; flex-direction: column; gap: 12px; max-width: 760px; }
+    .prio-block { border: 1px solid var(--border); border-radius: 10px; background: #fff; overflow: hidden; }
+    .prio-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 12px 14px; background: #fafafa; border-bottom: 1px solid var(--border-soft);
+    }
+    .prio-head .l { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+    .prio-tag {
+      font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid;
+    }
+    .prio-tag.p0 { color: #b45309; background: #fff7ed; border-color: #fdba74; }
+    .prio-tag.p1 { color: #1d4ed8; background: #eff6ff; border-color: #93c5fd; }
+    .prio-tag.p2 { color: #64748b; background: #f8fafc; border-color: #cbd5e1; }
+    .prio-body { padding: 12px 14px; font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
+    .prio-body.collapsed { display: none; }
+    .prio-block.open .prio-body { display: block; }
+    .field { margin-bottom: 10px; }
+    .field label { display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 5px; }
+    .field input, .field select {
+      width: 100%; border: 1px solid rgba(15,23,42,.12); border-radius: 6px; padding: 8px 10px; font: inherit; font-size: 13px;
+    }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .choice { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: #fafafa; margin-bottom: 8px; }
+    .choice.active { border-color: var(--accent-border); background: var(--accent-soft); }
+    .choice .t { font-size: 13px; color: var(--text); }
+    .choice .d { font-size: 11px; color: var(--text-muted); margin-top: 3px; }
+    .btn-primary {
+      border: 0; background: var(--accent); color: #1a1208; font: inherit; font-size: 13px;
+      font-weight: 600; padding: 8px 16px; border-radius: 6px;
+    }
+
+    /* chat compact */
+    .chat-shell {
+      width: 380px; height: 560px; margin: 18px auto; display: flex; flex-direction: column;
+      background: #fff; border: 1px solid var(--border); border-radius: 16px; overflow: hidden;
+      box-shadow: 0 16px 40px rgba(15,23,42,.1);
+    }
+    .chat-top {
+      height: 44px; display: flex; align-items: center; justify-content: space-between;
+      padding: 0 10px; background: #fafafa; border-bottom: 1px solid var(--border-soft);
+    }
+    .progress {
+      padding: 5px 12px; border-bottom: 1px solid var(--border-soft); background: #fcfcfd;
+      display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-secondary);
+    }
+    .progress-track { width: 56px; height: 3px; background: #e8eaed; border-radius: 999px; overflow: hidden; }
+    .progress-fill { width: 62%; height: 100%; background: var(--accent); }
+    .messages { flex: 1; background: #f7f8fa; padding: 14px 12px; display: flex; flex-direction: column; gap: 10px; }
+    .bubble { max-width: 86%; font-size: 13px; line-height: 1.55; padding: 9px 12px; border-radius: 14px; }
+    .bubble.user {
+      align-self: flex-end; background: var(--accent); color: var(--accent-ink); font-weight: 500;
+      border-top-right-radius: 4px;
+    }
+    .bubble.assistant {
+      align-self: flex-start; background: #fff; border: 1px solid var(--border); border-top-left-radius: 4px;
+    }
+    .composer {
+      border-top: 1px solid var(--border-soft); padding: 10px; display: flex; gap: 8px; align-items: flex-end;
+    }
+    .composer textarea {
+      flex: 1; border: 1px solid var(--border); border-radius: 8px; min-height: 36px; resize: none;
+      padding: 8px 10px; font: inherit; font-size: 13px;
+    }
+    .send {
+      border: 0; background: var(--accent); color: #1a1208; font-weight: 600; font: inherit; font-size: 13px;
+      padding: 8px 12px; border-radius: 8px; display: inline-flex; align-items: center; gap: 6px;
+    }
+
+    /* terminal */
+    .term-wrap { padding: 16px; background: #e8ebf0; }
+    .term-shell {
+      height: 620px; display: flex; flex-direction: column; background: var(--term-bg); color: var(--term-text);
+      border-radius: 12px; overflow: hidden; border: 1px solid #0b0d12;
+      box-shadow: 0 18px 40px rgba(15,23,42,.25);
+    }
+    .term-bar {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 10px 12px; background: var(--term-panel); border-bottom: 1px solid var(--term-border);
+    }
+    .term-bar .left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .term-bar .host { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .term-bar .status {
+      font-size: 11px; color: #34d399; display: inline-flex; align-items: center; gap: 4px;
+    }
+    .term-actions { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; justify-content: flex-end; }
+    .term-actions .ico-btn { color: var(--term-muted); }
+    .term-actions .ico-btn:hover { background: rgba(255,255,255,.06); color: #e8eef8; }
+    .term-actions .ico-btn.active { background: rgba(232,162,58,.16); color: #f0c57a; }
+    .term-actions .ico-btn.danger:hover { color: #fca5a5; }
+    .term-body { flex: 1; display: grid; grid-template-columns: 1fr 280px; min-height: 0; }
+    .term-main { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--term-border); }
+    .term-screen {
+      flex: 1; padding: 12px 14px; font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px;
+      line-height: 1.55; color: #c6d0e0; overflow: auto; white-space: pre-wrap;
+    }
+    .term-ai {
+      flex: 1; display: flex; flex-direction: column; background: #0e131b; padding: 16px; gap: 12px;
+    }
+    .term-empty {
+      margin: auto; text-align: center; max-width: 280px; color: var(--term-muted); font-size: 12px; line-height: 1.6;
+    }
+    .term-empty .art {
+      width: 120px; height: 88px; margin: 0 auto 12px; border-radius: 12px;
+      background:
+        linear-gradient(160deg, rgba(232,162,58,.18), transparent 55%),
+        linear-gradient(20deg, #1a2230, #121821);
+      border: 1px dashed rgba(232,162,58,.35);
+      display: grid; place-items: center; color: #f0c57a; font-size: 11px;
+    }
+    .term-files {
+      display: flex; flex-direction: column; background: #121722; min-width: 0;
+    }
+    .term-files-toolbar {
+      display: flex; gap: 2px; padding: 8px; border-bottom: 1px solid var(--term-border); flex-wrap: wrap;
+    }
+    .term-files-toolbar .ico-btn { color: var(--term-muted); }
+    .term-files-toolbar .ico-btn:hover { background: rgba(255,255,255,.06); color: #e8eef8; }
+    .term-path {
+      padding: 6px 10px; font-size: 11px; color: var(--term-muted); border-bottom: 1px solid var(--term-border);
+      font-family: Consolas, monospace;
+    }
+    .term-file-list { flex: 1; overflow: auto; padding: 6px 0; font-size: 12px; }
+    .term-file-list div {
+      padding: 6px 10px; display: flex; justify-content: space-between; gap: 8px; color: #c9d2e2;
+    }
+    .term-file-list div:hover { background: rgba(255,255,255,.04); }
+    .term-composer {
+      border-top: 1px solid var(--term-border); padding: 10px; display: flex; gap: 8px; align-items: flex-end;
+      background: #0f141d;
+    }
+    .term-composer textarea {
+      flex: 1; min-height: 40px; resize: none; border-radius: 8px; border: 1px solid rgba(255,255,255,.12);
+      background: #171c27; color: #e8eef8; font: inherit; font-size: 13px; padding: 8px 10px;
+    }
+    .term-send {
+      border: 0; background: var(--accent); color: #1a1208; font-weight: 600; border-radius: 8px;
+      padding: 8px 12px; display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 13px;
+    }
+    .term-foot {
+      padding: 6px 12px; font-size: 11px; color: var(--term-muted); border-top: 1px solid var(--term-border);
+      background: #0d1118;
+    }
+
+    /* review */
+    .review { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 18px; box-shadow: var(--shadow); }
+    .review h2 { margin: 0 0 12px; font-size: 15px; }
+    .review-block {
+      border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; background: #fafafa;
+    }
+    .review-block h3 { margin: 0 0 8px; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+    .tag {
+      font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid;
+    }
+    .tag.plan { color: #b45309; background: #fff7ed; border-color: #fdba74; }
+    .tag.fix { color: #047857; background: #ecfdf5; border-color: #6ee7b7; }
+    .tag.wait { color: #1d4ed8; background: #eff6ff; border-color: #93c5fd; }
+    .review-block p, .review-block li { font-size: 12px; color: var(--text-secondary); line-height: 1.65; }
+    .review-block ul { margin: 0; padding-left: 18px; }
+    .matrix { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; background: #fff; }
+    .matrix th, .matrix td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+    .matrix th { background: #f3f4f6; color: var(--text-secondary); }
+    .icon-map { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin-top: 10px; }
+    .icon-map .cell {
+      border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: #fff; text-align: center;
+      font-size: 11px; color: var(--text-secondary);
+    }
+    .icon-map .cell .ico { width: 20px; height: 20px; margin-bottom: 6px; color: #334155; }
+  </style>
+</head>
+<body>
+  <!-- reusable inline icons -->
+  <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+    <symbol id="i-todo" viewBox="0 0 24 24"><path class="ico" d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></symbol>
+    <symbol id="i-skill" viewBox="0 0 24 24"><path d="M12 3l2.2 4.5L19 9l-3.5 3.4L16.4 18 12 15.8 7.6 18l.9-5.6L5 9l4.8-1.5L12 3z"/></symbol>
+    <symbol id="i-usage" viewBox="0 0 24 24"><path d="M4 19V5M4 19h16"/><path d="M8 16V10M12 16V7M16 16v-5"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/></symbol>
+    <symbol id="i-files" viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6z"/></symbol>
+    <symbol id="i-ai" viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="4"/></symbol>
+    <symbol id="i-clear" viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M8 7l1 12h6l1-12"/></symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 7v4M15 7v4M7 11h10v2a5 5 0 0 1-10 0v-2zM12 18v3"/></symbol>
+    <symbol id="i-max" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1.5"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V6M8 9l4-4 4 4M5 18h14"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 5v5h-5"/></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V6M7 10l5-5 5 5"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M4 12l15-7-4 16-4-6-7-3z"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2-5.3"/><path d="M4 5v4h4M12 8v5l3 2"/></symbol>
+    <symbol id="i-rules" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12"/><path d="M4 6h.01M4 12h.01M4 18h.01"/></symbol>
+  </svg>
+
+  <div class="page-head">
+    <div>
+      <h1>拾光效果稿 · 架构收敛 / 设置优先级 / 图标</h1>
+      <p>
+        桌面整理（含规则、操作记录）降为 Skill 能力；顶栏变短；设置按使用频率分层；
+        聊天与<strong>服务器命令窗</strong>工具栏改为图标为主。AI 插画位先占位——当前环境无可用生图密钥，确认素材清单并提供密钥后再生成。
+        <strong>仍不改业务源码。</strong>
+      </p>
+    </div>
+    <div class="tabs" role="tablist">
+      <button class="active" data-tab="ia" type="button">信息架构</button>
+      <button data-tab="settings" type="button">设置层级</button>
+      <button data-tab="chat" type="button">主聊天</button>
+      <button data-tab="term" type="button">命令窗口</button>
+      <button data-tab="review" type="button">方案梳理</button>
+    </div>
+  </div>
+
+  <!-- IA -->
+  <section id="ia" class="stage ia-stage active">
+    <div class="panel">
+      <div class="panel-label">
+        <span><strong>修改后顶栏</strong> · 待办 / 服务器 / Skills / 用量 / 设置</span>
+        <span>整理规则·操作记录收入 Skills → 桌面整理</span>
+      </div>
+      <div class="main-shell">
+        <header class="main-header">
+          <div class="brand">
+            <div class="brand-mark"></div>
+            <div>
+              <div class="brand-title">拾光 · AI 桌面助手</div>
+              <div class="brand-sub">关闭窗口不退出，最小化到托盘</div>
+            </div>
+          </div>
+        </header>
+        <nav class="nav">
+          <button class="active" type="button">
+            <svg class="ico"><use href="#i-todo"/></svg>待办
+          </button>
+          <button type="button">
+            <svg class="ico"><use href="#i-server"/></svg>服务器
+          </button>
+          <button type="button">
+            <svg class="ico"><use href="#i-skill"/></svg>Skills
+          </button>
+          <button type="button">
+            <svg class="ico"><use href="#i-usage"/></svg>用量
+          </button>
+          <button type="button">
+            <svg class="ico"><use href="#i-settings"/></svg>设置
+          </button>
+        </nav>
+        <div class="main-body">
+          <div class="skill-card" style="border-color: var(--accent-border); background: linear-gradient(180deg, rgba(232,162,58,.08), #fff);">
+            <h3>内置 Skill · 桌面整理 <span class="pill on">已启用</span></h3>
+            <p>
+              原「整理规则 / 操作记录」不再占顶栏。对 AI 说「整理桌面」时加载本 Skill；
+              规则审核、撤销记录作为该 Skill 的管理页入口。
+            </p>
+            <div class="skill-meta">
+              <span class="pill">internal · 只读原则</span>
+              <span class="pill">propose_organization</span>
+              <span class="pill">仅移动 / 回收站</span>
+            </div>
+            <div class="sub-links">
+              <a href="#"><svg class="ico"><use href="#i-rules"/></svg>管理整理规则</a>
+              <a href="#"><svg class="ico"><use href="#i-history"/></svg>操作记录与撤销</a>
+            </div>
+          </div>
+          <div class="skill-card">
+            <h3>外部 Skill · windows-cli 等</h3>
+            <p>可同步 Claude / Codex / Cursor；工作流与浏览器经验建议后续并入此处，不再单独占顶栏。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- settings priority -->
+  <section id="settings" class="stage settings-stage">
+    <div class="panel">
+      <div class="panel-label">
+        <span><strong>设置优先级</strong> · P0 常用展开 / P1 权限 / P2 高级默认收起</span>
+        <span>智能加速、个人信息、命令工具进高级</span>
+      </div>
+      <div class="main-body" style="margin:16px; border-radius:10px;">
+        <div class="prio">
+          <div class="prio-block open">
+            <div class="prio-head">
+              <div class="l"><span class="prio-tag p0">P0</span> 聊天模型</div>
+              <span style="font-size:11px;color:var(--text-muted)">每天都可能用</span>
+            </div>
+            <div class="prio-body">
+              <div class="grid-2">
+                <div class="field"><label>当前配置</label><select><option>日常对话 · DeepSeek</option></select></div>
+                <div class="field"><label>模型</label><select><option>deepseek-chat</option></select></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="prio-block open">
+            <div class="prio-head">
+              <div class="l"><span class="prio-tag p0">P0</span> 操作权限与打断</div>
+              <span style="font-size:11px;color:var(--text-muted)">直接影响 ask_user 频率</span>
+            </div>
+            <div class="prio-body">
+              <div class="choice active"><div class="t">平衡（建议）</div><div class="d">可逆普通操作直接做；删除/发送/提权才确认</div></div>
+              <div class="choice"><div class="t">谨慎</div><div class="d">几乎每步有副作用都问 —— 易频繁打断</div></div>
+              <div class="choice"><div class="t">高效</div><div class="d">非危险操作不再打断</div></div>
+            </div>
+          </div>
+
+          <div class="prio-block open">
+            <div class="prio-head">
+              <div class="l"><span class="prio-tag p1">P1</span> 图像识别 / OCR</div>
+              <span style="font-size:11px;color:var(--text-muted)">看图能力相关</span>
+            </div>
+            <div class="prio-body">
+              <div class="grid-2">
+                <div class="field"><label>Base URL</label><input value="https://api.openai.com/v1" readonly /></div>
+                <div class="field"><label>视觉模型</label><select><option>gpt-4o-mini</option></select></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="prio-block open">
+            <div class="prio-head">
+              <div class="l"><span class="prio-tag p1">P1</span> 系统</div>
+              <span style="font-size:11px;color:var(--text-muted)">开机启动 / 更新</span>
+            </div>
+            <div class="prio-body">
+              <label style="display:flex;gap:8px;align-items:center;font-size:13px;"><input type="checkbox" /> 开机自动启动</label>
+              <div style="margin-top:10px;"><button class="btn-primary" type="button">保存设置</button></div>
+            </div>
+          </div>
+
+          <div class="prio-block">
+            <div class="prio-head" style="cursor:default">
+              <div class="l"><span class="prio-tag p2">P2 高级</span> 智能加速 · 命令工具 · 个人资料 · 上下文压缩</div>
+              <span style="font-size:11px;color:var(--text-muted)">默认折叠</span>
+            </div>
+            <div class="prio-body" style="display:block;color:var(--text-muted)">
+              System One、command_tools、个人简历字段、摘要模型等收进「高级」手风琴，避免设置首屏过长。
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- chat -->
+  <section id="chat" class="stage chat-stage">
+    <div class="panel">
+      <div class="panel-label"><span><strong>主聊天</strong> · 暖白字 + 精简进度 + 图标工具</span><span>发送用图标+字</span></div>
+      <div style="background:#eef0f3;padding:18px;">
+        <div class="chat-shell">
+          <div class="chat-top">
+            <div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;">
+              <div class="brand-mark" style="width:20px;height:20px;"></div>拾光
+            </div>
+            <div>
+              <button class="ico-btn icon-only" title="新会话" type="button"><svg class="ico"><use href="#i-plus"/></svg></button>
+              <button class="ico-btn icon-only" title="历史" type="button"><svg class="ico"><use href="#i-history"/></svg></button>
+              <button class="ico-btn icon-only" title="关闭" type="button">×</button>
+            </div>
+          </div>
+          <div class="progress">
+            <div class="progress-track"><div class="progress-fill"></div></div>
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">整理下载文件夹</span>
+            <span>5/8</span>
+          </div>
+          <div class="messages">
+            <div class="bubble user">帮我整理桌面下载文件夹</div>
+            <div class="bubble assistant">已加载 Skill「桌面整理」。方案已生成，确认后执行（可撤销）。</div>
+          </div>
+          <div class="composer">
+            <button class="ico-btn icon-only" title="添加附件" type="button" style="border:1px solid var(--border);"><svg class="ico"><use href="#i-plus"/></svg></button>
+            <textarea placeholder="输入消息…">同意方案</textarea>
+            <button class="send" type="button"><svg class="ico"><use href="#i-send"/></svg>发送</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <aside class="notes">
+      <h2>聊天工具图标原则</h2>
+      <ul>
+        <li>顶栏：新会话 / 历史 / 关闭 → <strong>图标按钮</strong>（悬停出 title）。</li>
+        <li>主操作「发送」：图标 + 文字，避免只剩图形难懂。</li>
+        <li>进度条继续弱化，默认不展开。</li>
+      </ul>
+    </aside>
+  </section>
+
+  <!-- terminal -->
+  <section id="term" class="stage term-stage">
+    <div class="panel">
+      <div class="panel-label">
+        <span><strong>服务器命令窗</strong> · 工具栏图标化示意（AI 模式 + 文件面板）</span>
+        <span>对照现状：最大化/文件/AI/清屏/断开 全是长文字</span>
+      </div>
+      <div class="term-wrap">
+        <div class="term-shell">
+          <div class="term-bar">
+            <div class="left">
+              <svg class="ico" style="color:#f0c57a"><use href="#i-server"/></svg>
+              <span class="host">prod-web · 192.168.1.20</span>
+              <span class="status">● 已连接</span>
+            </div>
+            <div class="term-actions">
+              <button class="ico-btn icon-only" title="最大化" type="button"><svg class="ico"><use href="#i-max"/></svg></button>
+              <button class="ico-btn icon-only active" title="文件列表" type="button"><svg class="ico"><use href="#i-files"/></svg></button>
+              <button class="ico-btn icon-only active" title="退出 AI 模式" type="button"><svg class="ico"><use href="#i-ai"/></svg></button>
+              <button class="ico-btn icon-only" title="清空对话" type="button"><svg class="ico"><use href="#i-clear"/></svg></button>
+              <button class="ico-btn icon-only danger" title="断开连接" type="button"><svg class="ico"><use href="#i-plug"/></svg></button>
+            </div>
+          </div>
+          <div class="term-body">
+            <div class="term-main">
+              <div class="term-ai">
+                <div class="term-empty">
+                  <div class="art" style="padding:0;overflow:hidden;border-style:solid;">
+                    <img src="../src/assets/generated/terminal-empty-20261027.png" alt="" width="120" height="88" style="width:100%;height:100%;object-fit:cover;display:block;" />
+                  </div>
+                  想检查或处理什么？直接描述目标，AI 会操作当前服务器。
+                  <div style="margin-top:10px;">
+                    <button class="ico-btn" type="button" style="border:1px solid rgba(255,255,255,.12);color:#d7dde8;">
+                      <svg class="ico"><use href="#i-usage"/></svg>检查运行情况
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div class="term-composer">
+                <textarea placeholder="例如：检查 nginx 最近有没有报错"></textarea>
+                <button class="term-send" type="button"><svg class="ico"><use href="#i-send"/></svg>发送</button>
+              </div>
+            </div>
+            <aside class="term-files">
+              <div class="term-files-toolbar">
+                <button class="ico-btn icon-only" title="上传文件" type="button"><svg class="ico"><use href="#i-upload"/></svg></button>
+                <button class="ico-btn icon-only" title="刷新" type="button"><svg class="ico"><use href="#i-refresh"/></svg></button>
+                <button class="ico-btn icon-only" title="上级目录" type="button"><svg class="ico"><use href="#i-up"/></svg></button>
+                <button class="ico-btn" title="选文件给 AI" type="button" style="font-size:11px;">
+                  <svg class="ico"><use href="#i-plus"/></svg>给 AI
+                </button>
+              </div>
+              <div class="term-path">/var/www/app</div>
+              <div class="term-file-list">
+                <div><span>📁 logs</span><span></span></div>
+                <div><span>📄 nginx.conf</span><span style="color:#8b93a7">预览</span></div>
+                <div><span>📄 app.env</span><span style="color:#8b93a7">预览</span></div>
+              </div>
+            </aside>
+          </div>
+          <div class="term-foot">图标为主 · 悬停显示名称 · 敏感操作仍用文字确认按钮（同意上传 / 取消）</div>
+        </div>
+      </div>
+    </div>
+    <aside class="notes">
+      <h2>命令窗按钮映射</h2>
+      <ul>
+        <li><strong>图标 only</strong>：最大化、文件面板、AI 模式、清屏/清空、断开、上传、刷新、上级。</li>
+        <li><strong>图标+短文</strong>：发送、给 AI、检查运行情况。</li>
+        <li><strong>保持文字</strong>：同意覆盖并上传、取消此操作（后果不清时不图标化）。</li>
+        <li><strong>AI 生图</strong>：仅空状态插画 1 张（右图占位）；需 DashScope 密钥或你指定提供商后再生成。</li>
+      </ul>
+      <div class="icon-map">
+        <div class="cell"><svg class="ico"><use href="#i-files"/></svg><br/>文件面板</div>
+        <div class="cell"><svg class="ico"><use href="#i-ai"/></svg><br/>AI 模式</div>
+        <div class="cell"><svg class="ico"><use href="#i-upload"/></svg><br/>上传</div>
+        <div class="cell"><svg class="ico"><use href="#i-refresh"/></svg><br/>刷新</div>
+        <div class="cell"><svg class="ico"><use href="#i-clear"/></svg><br/>清空</div>
+        <div class="cell"><svg class="ico"><use href="#i-plug"/></svg><br/>断开</div>
+      </div>
+    </aside>
+  </section>
+
+  <!-- review -->
+  <section id="review" class="stage review-stage">
+    <div class="review">
+      <h2>本轮方案梳理（确认前不改源码）</h2>
+
+      <div class="review-block">
+        <h3><span class="tag plan">A</span> 桌面整理降级为 Skill</h3>
+        <p><strong>问题：</strong>整理是早期主功能，但顶栏「整理规则 / 操作记录」与聊天主路径重复，宣传时产品线过长。</p>
+        <p><strong>方案：</strong></p>
+        <ul>
+          <li>能力仍在：扫描 / 方案卡 / 执行 / 撤销 / 自动规则 —— 不删后端。</li>
+          <li>体验改口：对用户呈现为内置 Skill「桌面整理」；聊天命中时 <code>load_skill</code>。</li>
+          <li>顶栏去掉「整理规则」「操作记录」；两者作为 Skill 管理页的子入口（见「信息架构」页）。</li>
+          <li>自动整理开关可挪到该 Skill 管理页或设置 P2，不再和模型配置抢首屏。</li>
+        </ul>
+      </div>
+
+      <div class="review-block">
+        <h3><span class="tag plan">B</span> 设置层级与优先级</h3>
+        <table class="matrix">
+          <thead><tr><th>层级</th><th>内容</th><th>展示</th></tr></thead>
+          <tbody>
+            <tr><td>P0</td><td>聊天模型配置、操作权限（平衡/谨慎/高效）</td><td>默认展开，置顶</td></tr>
+            <tr><td>P1</td><td>图像识别/OCR、系统（开机启动/更新）</td><td>展开，次之</td></tr>
+            <tr><td>P2 高级</td><td>智能加速 System One、命令工具、个人资料、上下文压缩、临时目录清理</td><td>默认折叠</td></tr>
+          </tbody>
+        </table>
+        <p style="margin-top:8px">原则：先能聊、少打断；再看图；专家项进高级。避免「智能加速」大卡片压过模型与权限。</p>
+      </div>
+
+      <div class="review-block">
+        <h3><span class="tag fix">C</span> 图标策略（含命令窗）</h3>
+        <ul>
+          <li>统一 24 坐标线性图标族，<code>currentColor</code>，选中用琥珀浅底，不给每个按钮不同彩色。</li>
+          <li>命令窗现状全是文字（最大化、显示文件列表、AI 模式、Tab 补全、清屏、断开、上传、刷新、上级、发送、停止）→ 工具栏改为图标；确认类危险操作保留文字。</li>
+          <li>主窗口顶栏可「图标+短标签」；聊天顶栏图标 only。</li>
+          <li>实现时优先项目内 SVG / 技能库 CC0 图标，不引入沉重 iconfont 运行时。</li>
+        </ul>
+      </div>
+
+      <div class="review-block">
+        <h3><span class="tag wait">D</span> AI 生图（待你授权具体素材）</h3>
+        <p><strong>已生成：</strong><code>src/assets/generated/terminal-empty-20261027.png</code>（1280×720），已挂到「命令窗口」页空状态。密钥未写入项目。</p>
+        <p>可选下一张：<code>skill-organize-cover</code>（Skills「桌面整理」卡片小图）。需要再说一声。</p>
+      </div>
+
+      <div class="review-block">
+        <h3><span class="tag fix">建议落地顺序</span></h3>
+        <ul>
+          <li>1）视觉 token + 聊天气泡/进度（你已基本认可）</li>
+          <li>2）顶栏收敛 + 整理进 Skills 管理入口</li>
+          <li>3）设置 P0/P1/P2 分层</li>
+          <li>4）命令窗 / 聊天工具栏图标化</li>
+          <li>5）空状态插画（有密钥后再做）</li>
+          <li>并行：ask_user 降频提示词（上一轮方案）</li>
+        </ul>
+        <p>请直接拍板：整理进 Skills 是否 OK、设置分层是否 OK、命令窗图标映射是否 OK、要不要现在配密钥生那 1～2 张图。</p>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    const tabs = document.querySelectorAll(".tabs button");
+    const stages = {
+      ia: document.getElementById("ia"),
+      settings: document.getElementById("settings"),
+      chat: document.getElementById("chat"),
+      term: document.getElementById("term"),
+      review: document.getElementById("review"),
+    };
+    tabs.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        tabs.forEach((b) => b.classList.toggle("active", b === btn));
+        Object.entries(stages).forEach(([key, el]) => {
+          el.classList.toggle("active", key === btn.dataset.tab);
+        });
+      });
+    });
+  </script>
+</body>
+</html>

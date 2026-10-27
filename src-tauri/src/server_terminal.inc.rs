@@ -1,5 +1,6 @@
 // Desktop-only interactive terminal. Deliberately not exposed by server tools/MCP.
 include!("terminal_command_policy.rs");
+include!("server_terminal_completion.rs");
 
 // A dedicated command template allows ordinary file edits without trusting arbitrary
 // interpreter code as safe. The remote command validates real paths before writing.
@@ -274,6 +275,7 @@ async fn terminal_action(
                     output: Vec::new(),
                     status: "connecting".into(),
                     error: None,
+                    completion: "checking".into(),
                 },
             );
         }
@@ -282,6 +284,7 @@ async fn terminal_action(
                 let state = app.state::<crate::AppState>();
                 let hub = &state.servers;
                 let session = connect(hub, &server)?;
+                let (enhance_completion, completion_status) = terminal_completion_probe(&session);
                 let mut channel = session.channel_session()?;
                 channel.request_pty(
                     "xterm-256color",
@@ -295,8 +298,17 @@ async fn terminal_action(
                 )?;
                 channel.handle_extended_data(ExtendedData::Merge)?;
                 channel.shell()?;
+                let completion_marker = format!("__SHIGUANG_COMPLETION_{}__", uuid::Uuid::new_v4().simple());
+                if enhance_completion {
+                    channel.write_all(terminal_completion_bootstrap(&completion_marker).as_bytes())?;
+                }
                 session.set_blocking(false);
+                let (startup_output, completion_status) = if enhance_completion {
+                    terminal_read_completion_startup(&mut channel, &completion_marker)?
+                } else { (Vec::new(), completion_status.to_string()) };
                 if let Some(t) = hub.terminals.lock().unwrap().get_mut(&id) {
+                    t.output.extend(startup_output);
+                    t.completion = completion_status;
                     t.status = "connected".into();
                 }
                 let mut pending = Vec::<u8>::new();
@@ -363,7 +375,7 @@ async fn terminal_action(
         .ok_or_else(|| anyhow!("终端尚未连接"))?;
     match action.as_str() {
         "poll" => Ok(
-            json!({ "status": terminal.status, "error": terminal.error, "output": std::mem::take(&mut terminal.output) }),
+            json!({ "status": terminal.status, "error": terminal.error, "completion": terminal.completion, "output": std::mem::take(&mut terminal.output) }),
         ),
         "write" => {
             let text = data.unwrap_or_default();

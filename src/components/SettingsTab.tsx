@@ -302,7 +302,7 @@ export default function SettingsTab() {
     : catalogSupportsVision(chatCatalogId, settings.model);
 
   return (
-    <div className="space-y-5 max-w-2xl">
+    <div className="settings-layout flex flex-col gap-5 max-w-3xl">
       <LlmProfilesSection
         settings={settings}
         update={update}
@@ -320,6 +320,8 @@ export default function SettingsTab() {
         }}
       />
 
+      <details className="settings-group">
+        <summary>高级 · 智能加速与上下文压缩</summary>
       <section className="space-y-2.5 rounded-xl border border-sky-500/20 bg-sky-500/[0.04] p-4">
         <div className="text-sm font-medium text-slate-100">
           智能加速
@@ -394,9 +396,10 @@ export default function SettingsTab() {
         </div>
       </section>
 
-      <section className="space-y-2.5">
+      </details>
+      <section className="space-y-2.5 settings-vision">
         <div className="text-sm font-medium text-slate-100">
-          图像识别（视觉模型）
+          图像识别 / OCR
           <span className="ml-2 text-xs font-normal text-slate-500">
             {chatSeesImages
               ? "当前聊天模型可直接查看附件、截图及 read_image 打开的图片，无需独立视觉接口。关闭图片读取工具不影响附件看图。"
@@ -443,10 +446,12 @@ export default function SettingsTab() {
         </label>
       </section>
 
-      <SubagentSettings settings={settings} update={update} />
+      <details className="settings-group"><summary>高级 · 子代理配置</summary>
+        <SubagentSettings settings={settings} update={update} />
+      </details>
 
-      <section className="space-y-2.5">
-        <div className="text-sm font-medium text-slate-100">AI 操作权限</div>
+      <section className="settings-permissions settings-group space-y-2.5">
+        <div className="text-sm font-medium text-slate-100">操作权限与打断</div>
         <div className="grid grid-cols-1 gap-2">
           {[
             ["confirmation", "谨慎", "每次执行有副作用的操作前都先询问。"],
@@ -469,6 +474,7 @@ export default function SettingsTab() {
         </div>
       </section>
 
+      <details className="settings-group"><summary>高级 · 命令工具与个人资料</summary>
       <section className="space-y-2.5">
         <div className="text-sm font-medium text-slate-100">
           后台任务与命令执行
@@ -563,30 +569,9 @@ export default function SettingsTab() {
       </section>
 
       <ProfileSection />
+      </details>
 
-      <section className="space-y-2.5">
-        <div className="text-sm font-medium text-slate-100">桌面整理</div>
-        <div className="text-xs text-slate-500">桌面路径：{settings.desktop_path}</div>
-        <label className="block">
-          <div className="text-xs text-slate-400 mb-1">整理根目录（分类文件夹直接建在这里，默认桌面顶层）</div>
-          <input
-            value={settings.organize_root}
-            onChange={(e) => update({ organize_root: e.target.value })}
-            className="w-full bg-slate-800 text-sm rounded px-3 py-2 outline-none border border-slate-700 focus:border-sky-500"
-          />
-        </label>
-        <label className="flex items-center gap-2.5 text-sm text-slate-300 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={settings.auto_organize}
-            onChange={(e) => update({ auto_organize: e.target.checked })}
-            className="w-4 h-4 accent-sky-500"
-          />
-          启用自动整理（命中已审核规则的桌面新文件自动归类）
-        </label>
-      </section>
-
-      <section className="space-y-2.5">
+      <section className="settings-system settings-group space-y-2.5">
         <div className="text-sm font-medium text-slate-100">系统</div>
         <label className="flex items-center gap-2.5 text-sm text-slate-300 cursor-pointer">
           <input
@@ -599,13 +584,14 @@ export default function SettingsTab() {
         </label>
       </section>
 
-      <ManualUpdateSection />
+      <div className="settings-system settings-group"><ManualUpdateSection /></div>
 
-      <BrowserExtensionSection />
+      <details className="settings-group"><summary>浏览器扩展与临时文件</summary>
+        <BrowserExtensionSection />
+        <TempCleanupSection tempPath={settings.temp_path} />
+      </details>
 
-      <TempCleanupSection tempPath={settings.temp_path} />
-
-      <div className="flex items-center gap-3 pt-1">
+      <div className="settings-save flex items-center gap-3 pt-1">
         <button
           onClick={save}
           className="px-5 py-2 rounded bg-gradient-to-r from-sky-500 to-indigo-600 text-white text-sm font-medium hover:opacity-90 transition"

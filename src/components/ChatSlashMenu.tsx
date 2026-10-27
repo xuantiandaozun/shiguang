@@ -12,7 +12,7 @@ export default function ChatSlashMenu({
   if (!commands.length) {
     return (
       <div className="rounded-lg border border-slate-700/80 bg-slate-900/98 shadow-xl px-3 py-2 text-xs text-slate-500">
-        没有匹配的命令。在主面板「工作流」页创建后，可用 /工作流名 快速运行。
+        没有匹配的命令。可直接描述任务，AI 会按需加载 Skills。
       </div>
     );
   }

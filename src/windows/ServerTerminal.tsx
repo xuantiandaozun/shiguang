@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { ipc } from "../lib/ipc";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import ServerFiles from "../components/ServerFiles";
+import Icon from "../components/Icon";
 import ServerTerminalChat from "../components/ServerTerminalChat";
 import { useTerminalFiles } from "../lib/useTerminalFiles";
 import { useTerminalAgent } from "../lib/useTerminalAgent";
-import { createTerminalInputQueue, terminalTabSequence } from "../lib/terminalInput";
+import { createTerminalInputQueue, terminalTabSequence, terminalCompletionStatus } from "../lib/terminalInput";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -18,6 +19,8 @@ export default function ServerTerminal() {
   const [status, setStatus] = useState("connecting");
   const [error, setError] = useState("");
   const [completionHint, setCompletionHint] = useState("");
+  const [completionStatus, setCompletionStatus] = useState("checking");
+  const completionInfo = terminalCompletionStatus(completionStatus);
   const lastTab = useRef(0);
   const [aiMode, setAiMode] = useState(false);
   const aiModeRef = useRef(false);
@@ -63,7 +66,7 @@ export default function ServerTerminal() {
     finally { setWindowBusy(false); }
   };
   const connect = async () => {
-    setError(""); setStatus("connecting");
+    setError(""); setStatus("connecting"); setCompletionStatus("checking");
     try { await call("connect", { cols: terminal.current?.cols, rows: terminal.current?.rows }); }
     catch (e) { setError(String(e)); setStatus("disconnected"); }
   };
@@ -125,9 +128,9 @@ export default function ServerTerminal() {
     const timer = window.setInterval(async () => {
       if (polling) return; polling = true;
       try {
-        const result = await call<{ status: string; error: string | null; output: number[] }>("poll");
+        const result = await call<{ status: string; error: string | null; completion?: string; output: number[] }>("poll");
         if (!dead) {
-          setStatus(result.status); if (result.error) setError(result.error);
+          setStatus(result.status); setCompletionStatus(result.completion || "unknown"); if (result.error) setError(result.error);
           if (result.output.length) {
             const bytes = new Uint8Array(result.output);
             output.current = (output.current + decoder.decode(bytes, { stream: true })).slice(-48000);
@@ -151,15 +154,16 @@ export default function ServerTerminal() {
   return <div className="h-screen flex flex-col bg-[#0b1120] text-slate-200">
     <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-700 px-4 py-3 text-sm">
       <span className="shrink-0"><span className={`inline-block mr-2 h-2 w-2 rounded-full ${status === "connected" ? "bg-emerald-400" : status === "connecting" ? "bg-amber-400" : "bg-slate-500"}`} />{status === "connected" ? "已连接" : status === "connecting" ? "连接中…" : "已断开"}<span className="ml-3 text-slate-500">{aiMode ? "AI 对话" : "命令终端"}</span></span>
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <button disabled={windowBusy} className="disabled:opacity-40" aria-label={maximized ? "还原窗口" : "最大化窗口"} onClick={() => void toggleMaximize()}>{maximized ? "还原" : "最大化"}</button>
-        <button className={showFiles ? "text-sky-300" : ""} aria-expanded={showFiles} aria-controls="remote-file-panel" onClick={() => setShowFiles(!showFiles)}>{showFiles ? "隐藏文件列表" : "显示文件列表"}</button>
-        <button disabled={switching} className={`${aiMode ? "text-sky-300" : ""} disabled:opacity-40`} onClick={() => void switchMode()}>{switching ? "切换中…" : aiMode ? "退出 AI 模式" : "AI 模式"}</button>
-        {!aiMode && <button disabled={status !== "connected" || switching} className="disabled:opacity-40" title="向当前终端发送 Tab，按服务器 Shell 的当前目录和规则补全" onMouseDown={e => e.preventDefault()} onClick={() => { terminal.current?.focus(); lastTab.current = Date.now(); setCompletionHint(""); void call("write", { data: "\t" }).catch(e => setError(String(e))); }}>Tab 补全</button>}
-        {aiMode ? <button disabled={agent.busy || !!agent.pending} className="disabled:opacity-40" onClick={agent.clear}>清空对话</button> : <button onClick={() => terminal.current?.clear()}>清屏</button>}
-        {status === "disconnected" ? <button className="text-sky-300" disabled={switching} onClick={connect}>重新连接</button> : <button disabled={switching} onClick={() => { void agent.stop(false).then(() => call("disconnect")).catch(e => setError(String(e))); }}>断开连接</button>}
+      <div className="terminal-toolbar flex flex-wrap items-center gap-1">
+        <button disabled={windowBusy} className="disabled:opacity-40" title={maximized ? "还原窗口" : "最大化窗口"} aria-label={maximized ? "还原窗口" : "最大化窗口"} onClick={() => void toggleMaximize()}><Icon name="maximize" /><span className="sr-only">{maximized ? "还原" : "最大化"}</span></button>
+        <button className={showFiles ? "text-sky-300" : ""} title={showFiles ? "隐藏文件列表" : "显示文件列表"} aria-expanded={showFiles} aria-controls="remote-file-panel" onClick={() => setShowFiles(!showFiles)}><Icon name="files" /><span className="sr-only">{showFiles ? "隐藏文件列表" : "显示文件列表"}</span></button>
+        <button disabled={switching} className={`${aiMode ? "text-sky-300" : ""} disabled:opacity-40`} title={aiMode ? "退出 AI 模式" : "AI 模式"} aria-pressed={aiMode} onClick={() => void switchMode()}><Icon name="ai" /><span className="sr-only">{switching ? "切换中…" : aiMode ? "退出 AI 模式" : "AI 模式"}</span></button>
+        {!aiMode && <button disabled={status !== "connected" || switching} className="disabled:opacity-40" title="向当前终端发送 Tab，按服务器 Shell 的当前目录和规则补全" onMouseDown={e => e.preventDefault()} onClick={() => { terminal.current?.focus(); lastTab.current = Date.now(); setCompletionHint(""); void call("write", { data: "\t" }).catch(e => setError(String(e))); }}><Icon name="tab" /><span className="sr-only">Tab 补全</span></button>}
+        {aiMode ? <button disabled={agent.busy || !!agent.pending} className="disabled:opacity-40" title="清空对话" onClick={agent.clear}><Icon name="clear" /><span className="sr-only">清空对话</span></button> : <button title="清屏" onClick={() => terminal.current?.clear()}><Icon name="clear" /><span className="sr-only">清屏</span></button>}
+        {status === "disconnected" ? <button className="text-sky-300" disabled={switching} title="重新连接" onClick={connect}><Icon name="refresh" /><span className="sr-only">重新连接</span></button> : <button disabled={switching} onClick={() => { void agent.stop(false).then(() => call("disconnect")).catch(e => setError(String(e))); }} title="断开连接"><Icon name="plug" /><span className="sr-only">断开连接</span></button>}
       </div>
     </header>
+    {!aiMode && status === "connected" && <p role="status" className={`border-b border-slate-800 px-4 py-1 text-xs ${completionInfo.enhanced ? "text-emerald-400" : "text-amber-300"}`}>{completionInfo.label}</p>}
     {error && <div role="alert" className="max-h-24 overflow-auto px-4 py-2 text-sm text-red-300 whitespace-pre-wrap break-all">{error}</div>}
     <div className="flex flex-1 min-h-0 overflow-hidden">
       <div className="flex flex-1 min-w-0 flex-col">

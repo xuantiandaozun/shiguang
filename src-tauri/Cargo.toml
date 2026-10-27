@@ -1,6 +1,6 @@
 [package]
 name = "shiguang"
-version = "0.1.5"
+version = "0.1.6"
 description = "ShiGuang - AI desktop assistant for Windows"
 edition = "2021"
 rust-version = "1.85"

@@ -61,6 +61,17 @@ impl SkillStore {
     pub fn new(app_dir: &Path) -> Self {
         let dir = app_dir.join("skills");
         let _ = fs::create_dir_all(&dir);
+        // Seed once without overwriting user/AI edits on subsequent launches.
+        let seed_dir = dir.join("desktop-organize");
+        let seed_path = seed_dir.join("SKILL.md");
+        if !seed_path.exists() {
+            if let Err(error) = (|| -> std::io::Result<()> {
+                fs::create_dir_all(&seed_dir)?;
+                use std::io::Write;
+                let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&seed_path)?;
+                file.write_all(include_str!("../default-skills/desktop-organize/SKILL.md").as_bytes())
+            })() { log::warn!("初始化桌面整理外部技能失败: {error}"); }
+        }
         let meta_path = dir.join(".meta.json");
         let meta = load_meta(&meta_path);
         Self {
@@ -944,7 +955,7 @@ mod tests {
 
     #[test]
     fn builtin_desktop_organize_parses() {
-        let content = builtin_skills::get("desktop-organize").expect("embedded");
+        let content = include_str!("../default-skills/desktop-organize/SKILL.md");
         let parsed = parse_frontmatter(content, Path::new("desktop-organize/SKILL.md")).unwrap();
         assert_eq!(parsed.name, "desktop-organize");
         assert!(!parsed.description.is_empty());
@@ -967,11 +978,25 @@ mod tests {
     }
 
     #[test]
+    fn seeded_desktop_skill_is_editable_and_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("dh-desktop-skill-{}", uuid::Uuid::new_v4()));
+        let store = SkillStore::new(&dir);
+        assert!(!SkillStore::is_internal("desktop-organize"));
+        assert!(store.root().join("desktop-organize/SKILL.md").is_file());
+        store.create("desktop-organize", "用户分类偏好", "# 自定义分类").unwrap();
+        drop(store);
+        let store = SkillStore::new(&dir);
+        let body = fs::read_to_string(store.root().join("desktop-organize/SKILL.md")).unwrap();
+        assert!(body.contains("自定义分类"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn create_rejects_internal_name() {
         let dir = std::env::temp_dir().join(format!("dh-skills-test-{}", uuid::Uuid::new_v4()));
         let _ = fs::create_dir_all(&dir);
         let store = SkillStore::new(&dir);
-        let err = store.create("desktop-organize", "x", "# body").unwrap_err();
+        let err = store.create("windows-cli", "x", "# body").unwrap_err();
         assert!(err.to_string().contains("内部技能"));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1022,7 +1047,7 @@ mod tests {
         assert!(store.write_resource("demo", "../escape.txt", "x").is_err());
         assert!(store.write_resource("demo", "SKILL.md", "x").is_err());
         assert!(store
-            .write_resource("desktop-organize", "x.txt", "x")
+            .write_resource("windows-cli", "x.txt", "x")
             .is_err());
         let resources = store.list_resources("demo").unwrap();
         assert!(resources.iter().any(|v| v["path"] == "scripts/main.py"));

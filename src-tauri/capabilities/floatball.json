@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "floatball-positioning",
+  "description": "Allow only the floating ball to resize, dock and restore itself.",
+  "windows": ["floatball"],
+  "permissions": [
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "core:window:allow-unminimize",
+    "core:window:allow-show"
+  ]
+}

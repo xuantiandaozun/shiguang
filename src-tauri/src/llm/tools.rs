@@ -52,18 +52,12 @@ fn tools_for_category(category: &str) -> &'static [&'static str] {
             "browser_evaluate",
             "browser_status",
             "browser_fast_loop",
-            "find_browser_recipes",
-            "save_browser_recipe",
-            "run_browser_recipe",
         ],
         "web" => &["web_search", "web_fetch"],
         "organize" => &[
             "scan_desktop",
             "propose_organization",
-            "get_operation_history",
             "undo_batch",
-            "create_rule",
-            "toggle_rule",
         ],
         "todos" => &["add_todo", "list_todos", "complete_todo", "snooze_todo"],
         "profile" => &["list_profile", "save_profile_entry", "delete_profile_entry"],
@@ -88,7 +82,7 @@ fn tools_for_category(category: &str) -> &'static [&'static str] {
             "delete_skill",
             "manage_skill",
         ],
-        "workflows" => &["list_workflows", "create_workflow", "manage_workflow"],
+
         _ => &[],
     }
 }
@@ -130,7 +124,19 @@ fn activate_categories(categories: &[String]) -> Vec<String> {
     names
 }
 
+fn retired_tool(name: &str) -> bool {
+    matches!(name, "create_rule" | "toggle_rule" | "get_operation_history" |
+        "list_workflows" | "create_workflow" | "manage_workflow" |
+        "find_browser_recipes" | "save_browser_recipe" | "run_browser_recipe")
+}
+
 pub fn definitions() -> Value {
+    let Value::Array(mut tools) = legacy_definitions() else { return json!([]); };
+    tools.retain(|tool| !retired_tool(tool.pointer("/function/name").and_then(Value::as_str).unwrap_or("")));
+    Value::Array(tools)
+}
+
+fn legacy_definitions() -> Value {
     let mut definitions = builtin_definitions();
     definitions.as_array_mut().unwrap().extend(crate::server_tools::definitions().into_iter().map(|t| json!({"type":"function","function":{"name":t["name"],"description":t["description"],"parameters":t["inputSchema"]}})));
     definitions
@@ -151,9 +157,9 @@ fn builtin_definitions() -> Value {
                             "type": "array",
                             "items": {
                                 "type": "string",
-                                "enum": ["files", "browser", "web", "organize", "todos", "profile", "commands", "servers", "system", "delegation", "skills", "workflows"]
+                                "enum": ["files", "browser", "web", "organize", "todos", "profile", "commands", "servers", "system", "delegation", "skills"]
                             },
-                            "description": "要检索的能力：files=本地文件/图片，browser=已打开的网页，web=公开网页搜索/抓取，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，servers=拾光已保存的SSH连接、服务器新增修改删除、远程命令和SFTP传输，system=硬件与进程，delegation=资料、文件和浏览器子代理，skills=管理技能，workflows=固定流程与定时执行"
+                            "description": "要检索的能力：files=本地文件/图片，browser=已打开的网页，web=公开网页搜索/抓取，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，servers=拾光已保存的SSH连接、服务器新增修改删除、远程命令和SFTP传输，system=硬件与进程，delegation=资料、文件和浏览器子代理，skills=管理技能"
                         }
                     },
                     "required": ["query", "categories"]
@@ -1008,7 +1014,7 @@ fn builtin_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "ask_user",
-                "description": "需要用户确认、选择或补充信息时调用。会在聊天里弹出选项卡片并等待回答；在收到结果前不要继续执行有副作用的操作。问题用用户能听懂的话说清影响、是否可撤销、同意后会发生什么。选项写具体后果，不要只写「是/否」；若有建议，把该项放第一并在 label 末尾加「（建议）」。一次只问当前必须决定的事，最多 4 题。用户关掉卡片会返回 dismissed：继续等下一条消息，不要当成同意，也不要立刻再弹同一问题。整理方案仍用 propose_organization 的方案卡片，不要用本工具替代。",
+                "description": "仅在缺少无法安全获取的关键输入、存在实质歧义或需要新增授权时调用。只读检查、常规下一步、实现细节及已授权的同范围操作不要提问；相关问题合并一次询问，专用方案卡已确认的操作不重复确认。会在聊天里弹出选项卡片并等待回答；在收到结果前不要继续执行有副作用的操作。问题用用户能听懂的话说清影响、是否可撤销、同意后会发生什么。选项写具体后果，不要只写「是/否」；若有建议，把该项放第一并在 label 末尾加「（建议）」。一次只问当前必须决定的事，最多 4 题。用户关掉卡片会返回 dismissed：继续等下一条消息，不要当成同意，也不要立刻再弹同一问题。整理方案仍用 propose_organization 的方案卡片，不要用本工具替代。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1282,7 +1288,7 @@ pub fn registry_definitions(db: &Db, native_vision: bool) -> Value {
     Value::Array(
         entries
             .into_iter()
-            .filter(|entry| entry.definition.is_object())
+            .filter(|entry| entry.definition.is_object() && !retired_tool(&entry.name))
             .filter(|entry| entry.name != "read_image" || crate::commands::load_settings(db).read_image_enabled)
             .map(|entry| {
                 let mut definition = entry.definition;
@@ -1691,6 +1697,7 @@ pub async fn execute(
     cancel: &tokio_util::sync::CancellationToken,
     session_id: i64,
 ) -> Result<Value> {
+    if retired_tool(name) { bail!("该能力已下线。整理偏好请更新 desktop-organize 外部 Skill，通用流程请使用 Skill。"); }
     let state = app.state::<crate::AppState>();
     let db = &state.db;
     if let Some(entry) = db.tool_registry_entry(name)? {

@@ -1,0 +1,76 @@
+/* Semantic action hierarchy for light desktop screens. */
+body[data-window="main"] .server-page :is(input, textarea, select) { background: #fff; border-color: #e8dfd8; }
+body[data-window="main"] .server-page :is(input, textarea, select):focus { border-color: #bc5228; }
+body[data-window="main"] .server-list-row .ui-button:not(.ui-primary):not(.ui-danger) { color: #705449; }
+body[data-window="main"] .server-page .ui-button {
+  border: 1px solid #e5cfae;
+  background: #ffffff;
+  color: #705449;
+  font-weight: 500;
+  transition: background-color 120ms, border-color 120ms, box-shadow 120ms;
+}
+body[data-window="main"] .server-page .ui-button:hover:not(:disabled) {
+  background: #fff0d7;
+  border-color: #dca758;
+}
+body[data-window="main"] .server-page .ui-primary {
+  background: #bc5228;
+  border-color: #bc5228;
+  color: #ffffff;
+  box-shadow: none;
+}
+body[data-window="main"] .server-page .ui-primary:hover:not(:disabled) {
+  background: #a94720;
+  border-color: #a94720;
+}
+body[data-window="main"] .server-page .ui-danger {
+  background: transparent;
+  border-color: transparent;
+  color: #ba4545;
+}
+body[data-window="main"] .server-page .ui-danger:hover:not(:disabled) {
+  background: #fff0ed;
+  border-color: #f0c5bf;
+}
+/* Tables use light text actions rather than four equally weighted filled blocks. */
+body[data-window="main"] .server-list-row .ui-button:not(.ui-primary):not(.ui-danger) {
+  background: transparent;
+  border-color: transparent;
+}
+body[data-window="main"] .server-list-row .ui-button:not(.ui-primary):not(.ui-danger):hover:not(:disabled) {
+  background: #fffaf0;
+  border-color: #e5cfae;
+}
+/* Normalize legacy settings actions without touching selection cards or input fields. */
+body[data-window="main"] .settings-layout button {
+  border-radius: 8px;
+  transition: background-color 120ms, border-color 120ms;
+}
+body[data-window="main"] .settings-layout button:is([class*="bg-slate-"], [class*="border-slate-"]) {
+  background-color: #ffffff;
+  border: 1px solid #e8dcd5;
+  color: #705449;
+}
+body[data-window="main"] .settings-layout button:is([class*="bg-slate-"], [class*="border-slate-"]):hover:not(:disabled) {
+  background-color: #fff0d7;
+  border-color: #dca758;
+}
+body[data-window="main"] .settings-layout button[class*="from-sky-"],
+body[data-window="main"] .settings-layout button[class~="bg-sky-500"] {
+  background-image: none;
+  background-color: #bc5228;
+  color: #ffffff;
+  border: 1px solid #bc5228;
+}
+body[data-window="main"] .settings-layout button[class*="from-sky-"]:hover:not(:disabled),
+body[data-window="main"] .settings-layout button[class~="bg-sky-500"]:hover:not(:disabled) {
+  background-color: #a94720;
+}
+body[data-window="main"] .settings-layout button:is([class~="text-rose-400"], [class~="text-red-400"], [class~="text-rose-300"]) {
+  background-color: transparent;
+  color: #ba4545;
+  border-color: transparent;
+}
+body[data-window="main"] .settings-layout button:is([class~="text-rose-400"], [class~="text-red-400"], [class~="text-rose-300"]):hover:not(:disabled) {
+  background-color: #fff0ed;
+}

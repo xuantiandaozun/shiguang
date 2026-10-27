@@ -6,6 +6,8 @@ import MainWindow from "./windows/MainWindow";
 import Reminder from "./windows/Reminder";
 import DelegationWindow from "./windows/DelegationWindow";
 import "./index.css";
+import "./theme.css";
+import "./buttons.css";
 
 const ServerTerminal = React.lazy(() => import("./windows/ServerTerminal"));
 

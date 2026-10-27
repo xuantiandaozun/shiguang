@@ -61,6 +61,7 @@ struct TerminalEntry {
     output: Vec<u8>,
     status: String,
     error: Option<String>,
+    completion: String,
 }
 pub struct ServerHub {
     terminals: Mutex<HashMap<String, TerminalEntry>>,
@@ -102,6 +103,7 @@ impl ServerHub {
     pub fn new(dir: &Path) -> Result<Self> {
         let conn = Connection::open(dir.join("servers.db"))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS servers(id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS server_secrets(id TEXT PRIMARY KEY, secret TEXT NOT NULL); CREATE TABLE IF NOT EXISTS remote_tasks(id TEXT PRIMARY KEY, data TEXT NOT NULL);")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS server_usage(server_id TEXT PRIMARY KEY, last_used INTEGER NOT NULL);")?;
         let mut tasks = HashMap::new();
         {
             let mut stmt =
@@ -154,7 +156,7 @@ impl ServerHub {
     }
     fn list(&self) -> Result<Vec<Server>> {
         let db = self.db.lock().unwrap();
-        let mut stmt = db.prepare("SELECT data FROM servers ORDER BY rowid")?;
+        let mut stmt = db.prepare("SELECT s.data FROM servers s LEFT JOIN server_usage u ON u.server_id=s.id ORDER BY COALESCE(u.last_used,0) DESC, s.rowid ASC")?;
         let mut result = Vec::new();
         for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
             result.push(serde_json::from_str(&row?)?);
@@ -301,6 +303,11 @@ fn authenticate(hub: &ServerHub, session: &Session, server: &Server, fp: &str) -
     if !session.authenticated() {
         bail!("SSH 身份认证失败");
     }
+    // Only successful authentication counts as use (terminal, SSH and SFTP).
+    if let Err(error) = hub.db.lock().unwrap().execute(
+        "INSERT INTO server_usage(server_id,last_used) VALUES(?1,?2) ON CONFLICT(server_id) DO UPDATE SET last_used=excluded.last_used",
+        params![server.id, chrono::Utc::now().timestamp_millis()],
+    ) { log::warn!("记录服务器使用时间失败: {error}"); }
     Ok(())
 }
 fn connect(hub: &ServerHub, server: &Server) -> Result<Session> {
@@ -988,7 +995,7 @@ mod tests {
             let hub = ServerHub::new(&dir).unwrap();
             let (sender, _receiver) = std::sync::mpsc::channel();
             hub.terminals.lock().unwrap().insert("server".into(), TerminalEntry {
-                sender, output: vec![], status: "connecting".into(), error: None,
+                sender, output: vec![], status: "connecting".into(), error: None, completion: "checking".into(),
             });
             assert!(hub.busy("server"));
             assert!(!hub.busy("other"));

@@ -5,10 +5,6 @@
 /// (文件夹名/技能名, 完整 SKILL.md 文本)
 pub static ALL: &[(&str, &str)] = &[
     (
-        "desktop-organize",
-        include_str!("../builtin-skills/desktop-organize/SKILL.md"),
-    ),
-    (
         "windows-cli",
         include_str!("../builtin-skills/windows-cli/SKILL.md"),
     ),

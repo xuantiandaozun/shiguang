@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { open, confirm } from "@tauri-apps/plugin-dialog";
 import { fileSize, remoteJoin, TerminalFiles } from "../lib/useTerminalFiles";
+import Icon from "./Icon";
+import FileTypeIcon from "./FileTypeIcon";
 
 const button = "rounded px-2 py-1.5 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed";
 const date = (mtime: number | null) => mtime === null ? "—" : new Date(mtime * 1000).toLocaleString();
@@ -58,18 +60,18 @@ export default function ServerFiles({ files, connected, onLocalFiles }: { files:
     <div className="flex items-center justify-between border-b border-slate-700 px-3 py-2">
       <h2 className="font-medium">远程文件</h2>
       <div className="flex items-center gap-1">
-        <button className={`${button} text-sky-300`} disabled={!connected || uploading || loading || !listing.path.startsWith("/")} title={`上传至 ${listing.path}`} onClick={() => void choose()}>上传文件</button>
-        <button className={button} disabled={!connected || refreshing} onClick={() => void refresh()} aria-label="刷新远程目录">{refreshing ? "刷新中…" : "刷新"}</button>
+        <button className={`${button} text-sky-300`} disabled={!connected || uploading || loading || !listing.path.startsWith("/")} title={`上传至 ${listing.path}`} onClick={() => void choose()}><Icon name="upload" /><span className="sr-only">上传文件</span></button>
+        <button className={button} disabled={!connected || refreshing} onClick={() => void refresh()} title={refreshing ? "刷新中…" : "刷新远程目录"} aria-label="刷新远程目录"><Icon name="refresh" className={refreshing ? "animate-spin" : ""} /></button>
       </div>
     </div>
     <form className="flex gap-1 px-2 py-2" onSubmit={e => { e.preventDefault(); if (address.trim() && connected) void refresh(address.trim()); }}>
-      <button type="button" title="上级目录" aria-label="上级目录" className={button} disabled={!connected || loading || listing.path === "/"} onClick={() => void refresh(remoteJoin(listing.path, ".."))}>上级</button>
+      <button type="button" title="上级目录" aria-label="上级目录" className={button} disabled={!connected || loading || listing.path === "/"} onClick={() => void refresh(remoteJoin(listing.path, ".."))}><Icon name="up" /></button>
       <input aria-label="远程目录路径" className="min-w-0 flex-1 rounded border border-slate-600 bg-slate-950 px-2 py-1.5 font-mono text-xs focus:border-sky-400 focus:outline-none" value={address} onChange={e => setAddress(e.target.value)} />
       <button className={button} disabled={!connected || loading || !address.trim()}>前往</button>
     </form>
     <div className="flex gap-2 px-3 pb-2">
       <input aria-label="筛选文件名" placeholder="筛选当前目录" className="min-w-0 flex-1 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs" value={filter} onChange={e => setFilter(e.target.value)} />
-      <button className={`${button} text-xs text-slate-400`} disabled={uploading} onClick={() => void choose(true)}>选文件给 AI</button>
+      <button className={`${button} text-xs text-slate-400`} disabled={uploading} onClick={() => void choose(true)}><Icon name="plus" className="mr-1" />给 AI</button>
     </div>
     {address !== listing.path && <p className="px-3 pb-2 text-xs text-amber-300 break-all">当前列表及上传目录：{listing.path}（输入路径后点击“前往”）</p>}
     {(error || failure) && <div role="alert" className="max-h-24 overflow-auto px-3 pb-2 text-xs text-red-300 whitespace-pre-wrap break-all">{error || failure}</div>}
@@ -77,9 +79,12 @@ export default function ServerFiles({ files, connected, onLocalFiles }: { files:
     <div className="min-h-0 flex-1 overflow-auto" aria-busy={refreshing}>
       <table className="w-full table-fixed text-left text-xs">
         <thead className="sticky top-0 bg-slate-800 text-slate-400"><tr><th className="px-3 py-2 font-normal">名称</th><th className="w-20 pr-3 text-right font-normal">大小</th><th className="w-14 pr-2 text-right font-normal">操作</th></tr></thead>
-        <tbody>{entries.map(entry => <tr key={entry.name} className={`border-t border-slate-800 ${selected === entry.name ? "bg-sky-950/60" : "hover:bg-slate-800/70"}`} onClick={() => setSelected(entry.name)} onDoubleClick={() => { if (entry.stat.is_dir && connected && !loading) void refresh(remoteJoin(listing.path, entry.name)); }}>
+        <tbody>{entries.map(entry => <tr key={entry.name} className={`remote-file-row border-t border-slate-800 ${selected === entry.name ? "is-selected" : ""}`} aria-selected={selected === entry.name} onClick={() => setSelected(entry.name)} onDoubleClick={() => { if (entry.stat.is_dir && connected && !loading) void refresh(remoteJoin(listing.path, entry.name)); }}>
           <td className="px-3 py-2" title={`${entry.name}\n修改时间：${date(entry.stat.mtime)}\n权限：${entry.stat.permissions === null ? "—" : (entry.stat.permissions & 0o777).toString(8)}`}>
-            {entry.stat.is_dir ? <button className="w-full truncate text-left text-sky-300 disabled:opacity-40" disabled={!connected || loading} onClick={() => void refresh(remoteJoin(listing.path, entry.name))}>▸ {entry.name}</button> : <span className="block truncate">{entry.stat.is_file ? "" : "↗ "}{entry.name}</span>}
+            <div className="flex min-w-0 items-center gap-2">
+              <FileTypeIcon name={entry.name} directory={entry.stat.is_dir} regular={entry.stat.is_file} />
+              {entry.stat.is_dir ? <button className="min-w-0 flex-1 truncate text-left text-sky-300 disabled:opacity-40" disabled={!connected || loading} onClick={() => void refresh(remoteJoin(listing.path, entry.name))}>{entry.name}</button> : <span className="min-w-0 truncate">{entry.name}</span>}
+            </div>
           </td>
           <td className="pr-3 text-right text-slate-400">{entry.stat.is_dir ? "目录" : fileSize(entry.stat.size)}</td>
           <td className="pr-2 text-right">{entry.stat.is_file && <button className="py-1 text-sky-300 disabled:opacity-40" disabled={!connected || previewBusy} onClick={() => void showPreview(remoteJoin(listing.path, entry.name))}>预览</button>}</td>
