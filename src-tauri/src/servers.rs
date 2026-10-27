@@ -1,4 +1,5 @@
 //! Local SQLite connections and plaintext credentials, plus isolated SSH/SFTP tasks.
+include!("server_terminal.inc.rs");
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use rusqlite::{params, Connection};
@@ -50,7 +51,19 @@ struct TaskEntry {
     cancel: CancellationToken,
     socket: Option<TcpStream>,
 }
+enum TerminalInput {
+    Data(Vec<u8>),
+    Resize(u32, u32),
+    Close,
+}
+struct TerminalEntry {
+    sender: std::sync::mpsc::Sender<TerminalInput>,
+    output: Vec<u8>,
+    status: String,
+    error: Option<String>,
+}
 pub struct ServerHub {
+    terminals: Mutex<HashMap<String, TerminalEntry>>,
     config: Mutex<()>,
     db: Mutex<Connection>,
     tasks: Mutex<HashMap<String, TaskEntry>>,
@@ -112,6 +125,7 @@ impl ServerHub {
         let dir = dir.join("remote-tasks");
         std::fs::create_dir_all(&dir)?;
         Ok(Self {
+            terminals: Mutex::new(HashMap::new()),
             config: Mutex::new(()),
             db: Mutex::new(conn),
             tasks: Mutex::new(tasks),
@@ -188,6 +202,7 @@ impl ServerHub {
         Ok(())
     }
     fn busy(&self, id: &str) -> bool {
+        if self.terminals.lock().unwrap().get(id).is_some_and(|t| t.status == "connected" || t.status == "connecting") { return true; }
         self.tasks
             .lock()
             .unwrap()
@@ -964,6 +979,24 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("shiguang-ssh-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+    #[test]
+    fn interactive_terminal_blocks_profile_changes_only_while_active() {
+        let dir = test_dir();
+        {
+            let hub = ServerHub::new(&dir).unwrap();
+            let (sender, _receiver) = std::sync::mpsc::channel();
+            hub.terminals.lock().unwrap().insert("server".into(), TerminalEntry {
+                sender, output: vec![], status: "connecting".into(), error: None,
+            });
+            assert!(hub.busy("server"));
+            assert!(!hub.busy("other"));
+            hub.terminals.lock().unwrap().get_mut("server").unwrap().status = "connected".into();
+            assert!(hub.busy("server"));
+            hub.terminals.lock().unwrap().get_mut("server").unwrap().status = "disconnected".into();
+            assert!(!hub.busy("server"));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn sqlite_roundtrip_and_restart_do_not_expose_secret() {

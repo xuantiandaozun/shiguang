@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "default capability for all windows",
-  "windows": ["floatball", "chat", "main", "reminder", "delegation-*"],
+  "windows": ["floatball", "chat", "main", "reminder", "delegation-*", "terminal-*"],
   "permissions": [
     "core:default",
     "core:window:default",

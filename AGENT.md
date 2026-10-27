@@ -22,6 +22,7 @@ LLM 走 OpenAI 兼容接口（默认 DeepSeek），Function Calling + SSE 流式
   - `browser/` 浏览器：扩展桥 ext + CDP cdp/launch；page-api + Readability（browser_read 抽正文）
   - `tasks.rs` 后台命令；`machine.rs` 本机信息；`lookup_cache.rs` 外部对照数据缓存；`skills.rs` + `builtin_skills.rs` Agent Skills；`reader.rs` / `writer.rs`；`ocr.rs`；`retention.rs` 工具结果头尾保留与落盘；`repeat_guard.rs` 重复工具劝告；`ask_user.rs` 聊天内选择题；`session_todo.rs` 会话内任务进度（与提醒待办分表）；`compact.rs` 对话摘要压缩；`web.rs` 公开网页搜索与抓取
 - `src-tauri/builtin-skills/` 内部 Skills 源文件（改完需重新编译打包才生效）
+- `src-tauri/sidecars/` 独立辅助程序 Cargo 包：两个 bin 复用 `src/bin/` 源码，索引助手仅编译 `ntfs_helper` 的协议/执行部分和 `ntfs_usn`；不依赖桌面库，也不运行 Tauri build.rs。`scripts/build-index-helper.mjs` 使用 `target/sidecars/` 独立缓存，内容变化才同步到 `binaries/` 和主程序同级。主包的默认 `desktop-client` feature 启用 NTFS 提权客户端。发版修改版本时同步 sidecars/Cargo.toml。
 
 ## 关键架构
 1. **主代理循环** `agent.rs::run_chat`：上限 50 轮；超长工具结果保留头尾并落入 `temp/tool-spills/`，对话过长时再压缩较早的工具结果（`retention.rs`）。对话仍然过长时调用模型把较早历史收成 `<compacted-summary>` 检查点（`compact.rs`，不改聊天界面记录）。同一工具+相同参数连续 3/5/8 次时追加劝告、不拦截（`repeat_guard.rs`；`list_todos` 等记账工具对计数透明）。需要确认时 `ask_user` 在聊天里弹出选项卡片并阻塞等待（`ask_user.rs`）。多步任务用 `todo_write` 整表替换当前进度，聊天窗显示进度条（`session_todo.rs`，不入库；下一轮用户消息清空；与提醒待办分表）。事件：`llm-token` / `llm-reasoning` / `llm-message-done` / `llm-error` / `llm-cancelled` / `tool-status` / `ask-user` / `ask-user-settled` / `session-todos` / `subagent-finished` / `subagent-chat`。
@@ -55,7 +56,10 @@ LLM 走 OpenAI 兼容接口（默认 DeepSeek），Function Calling + SSE 流式
 - 开发：`npm run tauri:dev`
 - 检查：`cargo check --manifest-path src-tauri/Cargo.toml`、`npx tsc --noEmit`
 - 测试：`cargo test --manifest-path src-tauri/Cargo.toml --lib`
-- 打包：`npm run tauri:build`
+- 辅助程序测试：`cargo test --manifest-path src-tauri/sidecars/Cargo.toml --target-dir src-tauri/target/sidecars --locked --bins`
+- 构建 EXE（不生成安装程序）：`npm run tauri:build`
+- 构建安装程序（含更新产物）：`npm run tauri:bundle`
+- 打包约定：用户说「打包」「打个包」「重新打包」时，默认只执行 `npm run tauri:build`，生成 EXE，不生成安装程序。只有明确要求发版、更新 GitHub 版本或生成安装包时，才执行 `npm run tauri:bundle`。发布、上传等操作按用户要求另行执行，构建安装包不代表已发布。
 
 ## 数据位置
 `%APPDATA%/com.deskhelper.win/`：`deskhelper.db`、`tasks/`、`skills/`（仅外部）、`lookup-cache.json`、`screenshots/`、`temp/`（AI 临时文件，含 `tool-spills/` 超长工具结果全文）、`file_backups/`。

@@ -6,7 +6,6 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tauri::Manager;
 
 pub const PROTOCOL_VERSION: u32 = 2;
 const REQUEST_DIR_NAME: &str = "ntfs-helper";
@@ -338,6 +337,16 @@ fn protocol_error(request_id: String, message: &str) -> HelperResponse {
     }
 }
 
+// Only the desktop app needs Tauri and the elevation client. Sidecars share
+// the protocol/execution code above without pulling in the desktop library.
+#[cfg(feature = "desktop-client")]
+pub use desktop::*;
+
+#[cfg(feature = "desktop-client")]
+mod desktop {
+use super::*;
+use tauri::Manager;
+
 #[cfg(windows)]
 pub async fn probe_elevated(
     app: &tauri::AppHandle,
@@ -536,6 +545,8 @@ fn launch_elevated(helper: &Path, request: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+} // mod desktop
 
 #[cfg(test)]
 mod tests {

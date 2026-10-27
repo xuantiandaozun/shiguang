@@ -5,10 +5,19 @@ description = "ShiGuang - AI desktop assistant for Windows"
 edition = "2021"
 rust-version = "1.85"
 default-run = "shiguang"
+autobins = false
 
 [lib]
 name = "shiguang_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Speed up repeated local release builds; does not lower optimization level.
+[profile.release]
+incremental = true
+
+[features]
+default = ["desktop-client"]
+desktop-client = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -65,5 +74,5 @@ windows-sys = { version = "0.61.2", features = [
 tauri-plugin-updater = "2"
 
 [[bin]]
-name = "shiguang-index-helper"
-path = "src/bin/shiguang-index-helper.rs"
+name = "shiguang"
+path = "src/main.rs"

@@ -1,0 +1,41 @@
+[package]
+name = "shiguang-sidecars"
+version = "0.1.4"
+edition = "2021"
+rust-version = "1.85"
+autobins = false
+
+# Reuse the protocol and tool schema sources, never the desktop app library.
+[[bin]]
+name = "shiguang-index-helper"
+path = "../src/bin/shiguang-index-helper.rs"
+
+[[bin]]
+name = "shiguang-mcp"
+path = "../src/bin/shiguang-mcp.rs"
+
+[lints.rust]
+# Shared source includes desktop-only code, which is never enabled here.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("desktop-client"))'] }
+
+[dependencies]
+anyhow = "1"
+dirs = "5"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "time"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Ioctl",
+] }
+
+[profile.release]
+incremental = true

@@ -87,6 +87,7 @@ pub struct Settings {
     pub vision_api_key: String,
     /// 视觉模型名称
     pub vision_model: String,
+    pub read_image_enabled: bool,
     // ---- 子代理（run_subagent 独立 LLM 循环）----
     /// 子代理思考模式开关，默认关闭（省 token、响应快）
     pub subagent_thinking_enabled: bool,
@@ -198,6 +199,7 @@ pub fn load_settings(db: &Db) -> Settings {
         ),
         vision_api_key: get("vision_api_key", ""),
         vision_model: get("vision_model", "qwen-vl-max"),
+        read_image_enabled: get("read_image_enabled", "true") == "true",
         subagent_thinking_enabled: db
             .get_setting("subagent_thinking_enabled")
             .ok()
@@ -1232,6 +1234,7 @@ pub fn save_settings(
         ("vision_base_url", settings.vision_base_url.trim()),
         ("vision_api_key", settings.vision_api_key.trim()),
         ("vision_model", settings.vision_model.trim()),
+        ("read_image_enabled", if settings.read_image_enabled { "true" } else { "false" }),
     ] {
         db.set_setting(k, v).map_err(|e| e.to_string())?;
     }

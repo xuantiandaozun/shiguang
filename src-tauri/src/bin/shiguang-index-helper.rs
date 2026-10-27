@@ -1,7 +1,12 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use anyhow::{anyhow, Context, Result};
-use shiguang_lib::ntfs_helper::{
+#[path = "../ntfs_helper.rs"]
+mod ntfs_helper;
+#[path = "../ntfs_usn.rs"]
+mod ntfs_usn;
+
+use ntfs_helper::{
     execute_request_in_dir, response_path, validate_request_path, HelperRequest,
 };
 use std::path::{Path, PathBuf};
@@ -12,7 +17,7 @@ fn main() {
         // response is written when the request path was valid enough to derive it.
         if let Some(path) = request_arg().and_then(|path| error_response_path(&path).ok()) {
             let response = serde_json::json!({
-                "version": shiguang_lib::ntfs_helper::PROTOCOL_VERSION,
+                "version": ntfs_helper::PROTOCOL_VERSION,
                 "request_id": request_id_from_path(&path).unwrap_or_default(),
                 "result": null,
                 "error": error.to_string(),

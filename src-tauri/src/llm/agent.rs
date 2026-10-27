@@ -506,7 +506,7 @@ fn is_failed_tool_result(result: &Value) -> bool {
 }
 
 /// 构造请求体。工具定义在同一次请求里保持稳定，避免中途增删打断前缀缓存。
-/// 主模型本身能看图时不带 read_image（图片直接嵌入，OCR 仍保留）；否则带上原来的视觉工具。
+/// 原生视觉模型通过 read_image 打开本地图片，附件仍直接嵌入。
 /// 收尾轮次仍带上同一份 tools，只用 tool_choice=none 禁止再调。
 /// DeepSeek 思考模式参数只对 DeepSeek 接口附加，其它兼容服务收到未知字段可能 400。
 fn request_body(
@@ -537,6 +537,13 @@ fn request_body_with_tools(
         prepare_messages_for_api(messages)
     } else {
         messages.to_vec()
+    };
+    let tool_definitions = if settings.read_image_enabled {
+        tool_definitions
+    } else {
+        Value::Array(tool_definitions.as_array().into_iter().flatten()
+            .filter(|tool| tool.pointer("/function/name").and_then(Value::as_str) != Some("read_image"))
+            .cloned().collect())
     };
     let mut body = json!({
         "model": cfg.model,
@@ -1212,7 +1219,7 @@ mod tests {
             reasoning_effort: "low".into(),
             vision_base_url: String::new(),
             vision_api_key: String::new(),
-            vision_model: String::new(),
+            vision_model: String::new(), read_image_enabled: true,
             subagent_thinking_enabled: false,
             subagent_reasoning_effort: "low".into(),
             subagent_model: String::new(),
@@ -1276,7 +1283,7 @@ mod tests {
             reasoning_effort: "low".into(),
             vision_base_url: String::new(),
             vision_api_key: String::new(),
-            vision_model: String::new(),
+            vision_model: String::new(), read_image_enabled: true,
             subagent_thinking_enabled: false,
             subagent_reasoning_effort: "low".into(),
             subagent_model: String::new(),
@@ -1333,7 +1340,7 @@ mod tests {
     }
 
     #[test]
-    fn vision_exp_embeds_images_and_hides_read_image() {
+    fn vision_exp_embeds_images_and_keeps_read_image() {
         let settings = sample_settings("deepseek-v4-flash-vision-exp");
         let cfg = client::LlmConfig {
             base_url: settings.base_url.clone(),
@@ -1350,7 +1357,7 @@ mod tests {
             true,
         );
         assert_eq!(body["model"], "deepseek-v4-flash-vision-exp");
-        assert!(!tool_names(&body).iter().any(|n| n == "read_image"));
+        assert!(tool_names(&body).iter().any(|n| n == "read_image"));
         assert!(tool_names(&body).iter().any(|n| n == "ocr_image"));
         // 文件不存在时仍发文本，不把损坏的 image_url 塞进请求
         assert!(body["messages"][0]["content"]

@@ -377,7 +377,7 @@ mod tests {
         let mut settings: Settings = serde_json::from_value(json!({
             "base_url":"x","api_key":"x","model":"x","llm_profiles":[],"active_llm_profile_id":"",
             "organize_root":"","auto_organize":false,"autostart":false,"desktop_path":"",
-            "thinking_enabled":false,"reasoning_effort":"low","vision_base_url":"","vision_api_key":"","vision_model":"",
+            "thinking_enabled":false,"reasoning_effort":"low","vision_base_url":"","vision_api_key":"","vision_model":"","read_image_enabled":true,
             "subagent_thinking_enabled":false,"subagent_reasoning_effort":"low","subagent_model":"",
             "context_window":128000,"command_tools_enabled":false,"permission_level":"balanced",
             "profile_name":"","profile_alias":"","profile_gender":"","profile_birth":"","profile_phone":"","profile_email":"","profile_city":"","temp_path":""

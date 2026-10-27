@@ -113,6 +113,7 @@ export interface Settings {
   context_window: number;
   /** 当前生效主模型的最终识图能力（由档案配置派生） */
   model_supports_vision: boolean;
+  read_image_enabled: boolean;
   system_one_enabled: boolean;
   system_one_base_url: string;
   system_one_api_key: string;
@@ -373,6 +374,7 @@ export interface LlmUsageRequest {
 }
 
 export const ipc = {
+  serverTerminal: <T = unknown>(action: string, serverId: string, extra: Record<string, unknown> = {}) => invoke<T>("server_terminal", { action, serverId, ...extra }),
   revealServerSecret: (serverId: string) => invoke<string>("reveal_server_secret", { serverId }),
   serverAction: <T = unknown>(name: string, args: Record<string, unknown> = {}) => invoke<T>("server_action", { name, args }),
   trustServerHost: (serverId: string, fingerprint: string) => invoke<ServerConnection>("trust_server_host", { serverId, fingerprint }),

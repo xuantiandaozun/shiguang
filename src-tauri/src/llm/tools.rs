@@ -326,7 +326,7 @@ fn builtin_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "read_image",
-                "description": "用云端视觉模型理解图片内容（布局、含义、图表分析等）。纯提取文字请优先用免费的本地 ocr_image。支持 png/jpg/jpeg/gif/webp/bmp。需要在设置中配置视觉模型 API Key。",
+                "description": "打开本地图片以理解布局、含义或图表。聊天模型支持图片时直接交给它查看，否则调用独立视觉模型。纯提取文字可用本地 ocr_image。支持 png/jpg/jpeg/gif/webp/bmp。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1283,7 +1283,7 @@ pub fn registry_definitions(db: &Db, native_vision: bool) -> Value {
         entries
             .into_iter()
             .filter(|entry| entry.definition.is_object())
-            .filter(|entry| !(native_vision && entry.name == "read_image"))
+            .filter(|entry| entry.name != "read_image" || crate::commands::load_settings(db).read_image_enabled)
             .map(|entry| {
                 let mut definition = entry.definition;
                 if entry.name == "discover_capabilities" && entry.executor_kind == "builtin" {
@@ -1346,7 +1346,7 @@ pub fn registry_definitions_for_categories(
                         .any(|category| category == &entry.category)
             })
             .filter(|entry| entry.definition.is_object())
-            .filter(|entry| !(native_vision && entry.name == "read_image"))
+            .filter(|entry| entry.name != "read_image" || crate::commands::load_settings(db).read_image_enabled)
             .map(|entry| entry.definition)
             .collect(),
     )
@@ -1396,26 +1396,9 @@ pub fn definitions_for<S: AsRef<str>>(names: &[S]) -> Value {
     )
 }
 
-/// 主模型能看图时去掉 read_image，OCR 仍保留；否则发全量工具（含原来的视觉接口）。
-pub fn chat_definitions(native_vision: bool) -> Value {
-    let all = definitions();
-    if !native_vision {
-        return all;
-    }
-    let Some(arr) = all.as_array() else {
-        return all;
-    };
-    Value::Array(
-        arr.iter()
-            .filter(|t| {
-                t.get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(|n| n.as_str())
-                    != Some("read_image")
-            })
-            .cloned()
-            .collect(),
-    )
+/// 原生视觉模型同样需要 read_image 来打开本地图片。
+pub fn chat_definitions(_native_vision: bool) -> Value {
+    definitions()
 }
 
 const RECALL_PAGE_CHARS: usize = 6_000;
@@ -2146,6 +2129,18 @@ pub async fn execute(
             let path = crate::reader::resolve_path(app, raw)?;
             let question = args.get("question").and_then(|v| v.as_str());
             let settings = crate::commands::load_settings(db);
+            if !settings.read_image_enabled {
+                bail!("图片读取工具已关闭，请在设置中启用。");
+            }
+            if settings.model_supports_vision {
+                crate::llm::vision::encode_image_data_uri(&path, crate::llm::vision::MAX_NATIVE_IMAGE_BYTES)?;
+                return Ok(json!({
+                    "path": path.to_string_lossy().replace('\\', "/"),
+                    "native_image": true,
+                    "question": question,
+                    "result": "图片已交给当前聊天模型，请直接查看并回答问题。"
+                }));
+            }
             if settings.vision_api_key.trim().is_empty() {
                 bail!("尚未配置视觉模型 API Key。纯提取文字可改用 ocr_image（本地免费）；要看图理解请在「设置 → 图像识别」填写视觉 Key。");
             }

@@ -185,6 +185,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             servers::server_action,
+            servers::server_terminal,
             servers::reveal_server_secret,
             servers::trust_server_host,
             commands::send_chat_message,

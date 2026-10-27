@@ -399,10 +399,14 @@ export default function SettingsTab() {
           图像识别（视觉模型）
           <span className="ml-2 text-xs font-normal text-slate-500">
             {chatSeesImages
-              ? "当前聊天模型已能直接看图，附件和截图会发给它；OCR 仍可用于只要文字、省 token。下方视觉接口仅在主模型不能看图时使用"
+              ? "当前聊天模型可直接查看附件、截图及 read_image 打开的图片，无需独立视觉接口。关闭图片读取工具不影响附件看图。"
               : "主模型不能看图时，read_image 会调用下面这套视觉接口；OCR 始终可用"}
           </span>
         </div>
+        <label className="flex items-center gap-2 text-sm text-slate-300">
+          <input type="checkbox" checked={settings.read_image_enabled} onChange={(e) => update({ read_image_enabled: e.target.checked })} />
+          允许 AI 读取本地图片（read_image）
+        </label>
         <label className="block">
           <div className="text-xs text-slate-400 mb-1">Base URL（OpenAI 兼容接口）</div>
           <input
