@@ -4,6 +4,16 @@
 
 一个常驻 Windows 托盘的 AI 桌面助手：悬浮球 + 聊天小窗与 AI 对话，帮你**整理桌面文件**、**管理待办并准时提醒**、**操作浏览器**。
 
+## 最近更新（v0.1.4–v0.1.6）
+
+- **服务器管理与 AI 运维**：新增 SSH / SFTP 连接管理、独立交互终端和聊天式运维；支持远程目录浏览、文本预览、多文件上传和传输进度，终端支持 Tab 补全。
+- **精准委托**：Codex / Cursor 可通过本地 MCP 交给拾光执行任务，支持关键节点暂停审核、多轮纠偏、续跑和独立历史。
+- **模型与代理**：供应商独立维护模型与套餐有效期，支持自动调用资料、文件和浏览器子代理，并修复主 AI 工具发现。
+- **界面与交互**：焕新主窗口、聊天窗、设置和悬浮球，优化服务器排序、文件类型图标及终端输入；运维按实际风险确认，减少重复询问。
+- **技能与发布**：桌面整理改为可编辑的外部技能；默认本地构建安装包，由 GitHub 校验、签名并生成更新信息，保留手动云端构建备用。
+
+服务器更新详情见 [v0.1.5 发布说明](docs/releases/0.1.5.md)。
+
 ## 功能一览
 
 | 模块 | 说明 |
@@ -18,9 +28,10 @@
 | Agent Skills | 内置只读 Skill + AI 可自建/沉淀的外部 Skill；启用目录会注入对话，按意图加载匹配技能。可与 Claude / Codex / Cursor 的技能目录同步 |
 | 委托任务 MCP | Codex / Cursor 可将目标交给拾光 AI 独立执行；双方可多轮交流，用户可查看独立历史并随时插话或中断。配置见 [委托 MCP 指南](docs/DELEGATION_MCP.md) |
 | 服务器 SSH / SFTP | 本地保存服务器连接和可查看的密码，执行命令、浏览目录、上传下载文件及目录；内置 AI 与 Codex / Cursor 共用连接，见 [服务器 MCP 指南](docs/SERVERS_MCP.md) |
+| 服务器终端与 AI 运维 | 保留目录与 Shell 状态的交互终端，支持 Tab 补全；可切换聊天模式让 AI 执行并总结，按风险确认；侧栏支持远程文件浏览、文本预览和上传进度 |
 | 文件与视觉 | 读文件（文本/PDF）、OCR、看图、带自动备份的安全写入、只读子代理 |
 | 悬浮球 | 桌面常驻小圆球，可拖动，单击展开/收起聊天窗；聊天窗、主窗口关闭后程序仍在托盘运行 |
-| 主窗口 | 待办管理 / 整理规则 / 操作记录（撤销）/ 后台任务 / 委托任务 / Skills / 用量 / 设置 |
+| 主窗口 | 待办管理 / 整理规则 / 操作记录（撤销）/ 后台任务 / 委托任务 / 服务器 / Skills / 用量 / 设置 |
 
 ## 安全设计
 
@@ -31,6 +42,13 @@
 - 文件写入自动备份；破坏性 shell 命令必须征得同意
 - 整盘与批量文件扫描会先询问是否维护元数据索引；索引只保存元数据，不读取文件内容
 - 高速 NTFS/MFT 索引由短生命周期的只读辅助进程隔离执行，弹出 UAC 前必须获得明确同意；其空间结果来自 MFT `$DATA` 逻辑大小，属于带覆盖率的快速估算，精确结果需普通元数据扫描
+
+### 服务器与模型数据
+
+- 首次 SSH 连接或主机指纹变化时，必须人工核对并信任指纹。
+- 连接密码和私钥口令以明文保存在本机数据库，请妥善保护数据目录；删除连接不会删除远程文件。
+- AI 运维所需的操作目标、命令结果和本机路径会发送给已配置的模型；SFTP 上传的文件本体不会发送给模型。
+- 关闭终端或取消本地等待不保证远程进程停止；取消上传后，已完成的文件可能仍保留。
 
 ## 技术栈
 
@@ -60,6 +78,8 @@ npm run tauri:build
 
 产物：`src-tauri/target/release/bundle/nsis/` 下的 NSIS 安装包。安装成功后会在安装目录解压 `browser-extension/`（与 exe 同级），换电脑时在 Chrome/Edge 里「加载已解压的扩展」选这个文件夹即可。
 
+发布维护者可使用 `npm run release:local` 在本地构建，再上传 GitHub 草稿，由工作流校验 SHA256、签名并生成 `latest.json`，供应用内检查更新使用。完整步骤及云端构建备用方式见 [本地构建并发布](docs/LOCAL_RELEASE.md)。
+
 > 注意：Windows 通知仅在**安装后**的应用上显示应用名和图标；直接运行 exe 或开发模式下通知会显示为 PowerShell 发起，这是系统限制。
 
 ## 数据位置
@@ -71,7 +91,7 @@ npm run tauri:build
 - `tasks/`、`skills/`、`screenshots/`、`temp/`（AI 临时文件）、`file_backups/`、`ntfs-helper/`
 - `lookup-cache.json`（AI 从外部 CLI 提炼的 id↔名称 / 字段对照，短期缓存）
 
-API Key 仅保存在本机此数据库中，不会上传。
+API Key 保存在本机数据库中，调用模型时用于向所配置的 API 服务认证；不会上传至项目仓库。
 
 ## 目录结构
 
@@ -95,9 +115,12 @@ src-tauri/src/
   todo/scheduler.rs     待办提醒调度（通知 / 弹窗 / 带输入弹窗）
   tasks.rs              后台命令（含长时间任务挂起等待）
   lookup_cache.rs / cli_json.rs   外部对照缓存、CLI JSON 解析
+  servers.rs / server_tools.rs  SSH/SFTP 连接、命令与文件传输
+  server_terminal.inc.rs  交互终端与 AI 运维支持
   skills.rs + builtin_skills.rs  Agent Skills
   reader.rs / writer.rs / ocr.rs / machine.rs / tempfs.rs
 src-tauri/builtin-skills/  内置 Skill 源文件（编译进应用）
+src-tauri/default-skills/  默认外部技能（含可编辑的桌面整理技能）
 browser-extension/      配套浏览器扩展（WebSocket 桥接桌面端）
 scripts/gen-icon.cjs    应用图标生成脚本（node scripts/gen-icon.cjs）
 scripts/build-index-helper.mjs  打包前构建 NTFS 索引 sidecar

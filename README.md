@@ -4,6 +4,16 @@
 
 A tray-resident AI desktop assistant: a floating ball + chat window backed by an LLM that **organizes your desktop**, **reminds you of todos on time**, and **operates your browser**.
 
+## Recent Updates (v0.1.4–v0.1.6)
+
+- **Servers & AI operations:** SSH/SFTP connection management, standalone interactive terminals, and conversational operations; remote directory browsing, text previews, multi-file uploads, transfer progress, and terminal Tab completion.
+- **Task delegation:** Local MCP integration lets Codex / Cursor delegate work to ShiGuang, with review checkpoints, multi-round corrections, resume, and separate task history.
+- **Models & agents:** Per-provider model catalogs and plan expiration tracking, automatic research/file/browser subagents, and fixes to main-agent tool discovery.
+- **Interface & interaction:** Refreshed main window, chat, settings, and floating ball; improved server ordering, file-type icons, and terminal input. Risk-based operations approval reduces repeated prompts.
+- **Skills & releases:** Desktop organization is now an editable external skill. Releases default to local builds with GitHub verification, signing, and update metadata generation; manual cloud builds remain available.
+
+See the [v0.1.5 release notes (Chinese)](docs/releases/0.1.5.md) for server details.
+
 ## Features
 
 | Module | Description |
@@ -16,9 +26,12 @@ A tray-resident AI desktop assistant: a floating ball + chat window backed by an
 | Background Commands | Run PowerShell, cmd, or AI-written scripts. Short jobs wait inline; long jobs pause the chat (no extra model calls) and resume when the process finishes. JSON stdout is parsed automatically. Command tools can be disabled in Settings |
 | Models & Usage | Save several LLM profiles (DeepSeek, Qwen, Volcengine Agent Plan, OpenAI, …) and switch which one is active. The Usage tab shows token counts and cache-hit rate |
 | Agent Skills | Built-in read-only skills + external skills the AI can create and refine; the enabled catalog is injected into chat so matching skills load by intent. Syncs with Claude / Codex / Cursor skill folders |
+| Task Delegation MCP | Let Codex / Cursor delegate tasks to ShiGuang, review checkpoints, exchange follow-ups, and interrupt execution. See the [delegation guide (Chinese)](docs/DELEGATION_MCP.md) |
+| SSH / SFTP Servers | Shared saved connections for the built-in AI and MCP clients; remote commands, directory browsing, file and directory transfers. See the [server guide (Chinese)](docs/SERVERS_MCP.md) |
+| Server Terminal & AI Operations | Stateful interactive shell with Tab completion; switch to conversational AI operations with risk-based approval. Remote file sidebar includes text previews and upload progress |
 | File & Vision Tools | Read files (text / PDF), OCR, image understanding, safe writes with automatic backups, read-only subagents |
 | Floating Ball | Always-on draggable orb; click to toggle the chat window; closing windows keeps the app running in the tray |
-| Main Window | Todos / Rules / History (undo) / Background Tasks / Skills / Usage / Settings |
+| Main Window | Todos / Rules / History (undo) / Background Tasks / Delegated Tasks / Servers / Skills / Usage / Settings |
 
 ## Safety by Design
 
@@ -29,6 +42,13 @@ A tray-resident AI desktop assistant: a floating ball + chat window backed by an
 - File writes are auto-backed up; destructive shell commands require explicit consent
 - Whole-drive and bulk file scans ask before creating a maintained metadata index; the index stores metadata only and never reads file contents
 - Fast elevated NTFS/MFT indexing is isolated in a short-lived read-only helper and requires explicit approval before UAC is shown; its `$DATA` logical-size totals are coverage-labelled estimates, while exact values require a normal metadata scan
+
+### Server & Model Data
+
+- First-time SSH connections and changed host fingerprints require manual verification and trust.
+- Connection passwords and private-key passphrases are stored in plaintext in the local database; protect the data directory. Deleting a connection does not delete remote files.
+- AI operations send necessary targets, command results, and local paths to the configured model. File contents transferred through SFTP are not sent to the model.
+- Closing a terminal or cancelling a local wait does not guarantee remote processes stop. Completed uploads may remain after cancellation.
 
 ## Tech Stack
 
@@ -58,6 +78,8 @@ npm run tauri:build
 
 Output: NSIS installer under `src-tauri/target/release/bundle/nsis/`. After install, `browser-extension/` is extracted next to the exe so you can load the unpacked Chrome/Edge extension on another PC.
 
+Release maintainers can use `npm run release:local`, upload the installer to a GitHub draft, then run the workflow to verify SHA256, sign it, and generate `latest.json` for in-app update checks. See [local release instructions (Chinese)](docs/LOCAL_RELEASE.md), including the cloud-build fallback.
+
 > Note: Windows notifications show the app name and icon only for the **installed** app; otherwise they appear as coming from PowerShell — a system limitation.
 
 ## Data Location
@@ -69,7 +91,7 @@ Output: NSIS installer under `src-tauri/target/release/bundle/nsis/`. After inst
 - `tasks/`, `skills/`, `screenshots/`, `temp/` (AI scratch files), `file_backups/`, `ntfs-helper/`
 - `lookup-cache.json` — short-lived id↔name / field maps the AI extracts from external CLIs
 
-API keys live only in this local database and are never uploaded.
+API keys are stored in the local database and used to authenticate requests to the configured API provider; they are not uploaded to the project repository.
 
 ## Directory Layout
 
@@ -93,9 +115,12 @@ src-tauri/src/
   todo/scheduler.rs     Todo reminder scheduler (notify / popup / popup-with-input)
   tasks.rs              Background commands (including await until a long job finishes)
   lookup_cache.rs / cli_json.rs   External CLI reference cache and JSON stdout parsing
+  servers.rs / server_tools.rs  SSH/SFTP connections, commands and file transfers
+  server_terminal.inc.rs  Interactive terminal and AI operations support
   skills.rs + builtin_skills.rs  Agent Skills
   reader.rs / writer.rs / ocr.rs / machine.rs / tempfs.rs
 src-tauri/builtin-skills/  Built-in skill sources (compiled into the app)
+src-tauri/default-skills/  Default external skills (including editable desktop organization)
 browser-extension/      Companion browser extension (WebSocket bridge to the app)
 scripts/gen-icon.cjs    Icon generator (node scripts/gen-icon.cjs)
 scripts/build-index-helper.mjs  Builds the NTFS index sidecar before packaging
