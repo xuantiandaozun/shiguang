@@ -133,3 +133,7 @@ scripts/build-index-helper.mjs  打包前构建 NTFS 索引 sidecar
 ## 开源协议
 
 [MIT](LICENSE)
+
+## 友链
+
+本项目认可并链接 [LINUX DO 社区](https://linux.do)，项目最早也是在 L 站和佬友们分享的。

@@ -133,3 +133,7 @@ scripts/build-index-helper.mjs  Builds the NTFS index sidecar before packaging
 ## License
 
 [MIT](LICENSE)
+
+## Community
+
+This project endorses and links to the [LINUX DO community](https://linux.do), where the project was first shared with fellow developers.
