@@ -397,7 +397,8 @@ pub async fn dispatch(app: &tauri::AppHandle, name: &str, args: &Value) -> Resul
                 if !list {
                     return Ok(json!(sftp.stat(Path::new(&path)).map(stat_json)?));
                 }
-                let mut dir = sftp.opendir(Path::new(&path))?;
+                let resolved = terminal_remote_path(&sftp.realpath(Path::new(&path))?)?;
+                let mut dir = sftp.opendir(Path::new(&resolved))?;
                 let mut entries = vec![];
                 let mut truncated = false;
                 loop {
@@ -417,7 +418,7 @@ pub async fn dispatch(app: &tauri::AppHandle, name: &str, args: &Value) -> Resul
                         Err(e) => return Err(e.into()),
                     }
                 }
-                Ok(json!({"entries":entries,"truncated":truncated}))
+                Ok(json!({"path":resolved,"entries":entries,"truncated":truncated}))
             })
             .await?
         }
@@ -1186,6 +1187,16 @@ mod tests {
         let mut directory = sftp.opendir(Path::new("/uploaded")).unwrap();
         assert_eq!(directory.readdir().unwrap().0.to_string_lossy(), "子目录");
         drop(directory);
+        // Exercise terminal file-panel canonical paths, overwrite detection and UTF-8 preview.
+        assert_eq!(terminal_upload_destination(&sftp, "/uploaded/new.txt", false).unwrap(), ("/uploaded/new.txt".into(), false));
+        assert_eq!(terminal_upload_destination(&sftp, "/uploaded/子目录/data.bin", false).unwrap().1, true);
+        assert!(terminal_upload_destination(&sftp, "relative.txt", false).is_err());
+        assert!(terminal_upload_destination(&sftp, "/uploaded/..", false).is_err());
+        assert!(terminal_upload_destination(&sftp, "/uploaded/子目录", false).is_err());
+        std::fs::write(remote.join("uploaded/note.txt"), "文件预览测试\n").unwrap();
+        let mut preview_bytes = Vec::new();
+        sftp.open(Path::new("/uploaded/note.txt")).unwrap().read_to_end(&mut preview_bytes).unwrap();
+        assert_eq!(terminal_preview_text(preview_bytes).unwrap()["content"], "文件预览测试\n");
         drop(sftp);
         drop(session);
         let mut upload_overwrite = upload.clone();

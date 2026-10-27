@@ -16,7 +16,7 @@ pub fn definitions() -> Vec<Value> {
         ("delete_server", "删除本地连接及凭据，不删除远程文件。运行中任务存在时拒绝删除。", id(), vec!["server_id"]),
         ("test_server_connection", "检查 SSH 主机指纹；未信任时不发送凭据，返回待确认的指纹。已信任则测试登录。", id(), vec!["server_id"]),
         ("ssh_exec", "启动远程非交互命令，返回 task_id。每次独立 Shell；需明确工作目录。用 wait_remote_task 等待结果。破坏性操作须有用户授权。超时/取消仅断开连接，远程进程可能继续，勿自动重试。", json!({"server_id":s(),"command":s(),"workdir":s(),"timeout_seconds":{"type":"integer","minimum":1,"maximum":86400}}), vec!["server_id","command"]),
-        ("sftp_list", "列出远程目录，最多返回 2000 项并标识是否截断。", json!({"server_id":s(),"remote_path":s()}), vec!["server_id","remote_path"]),
+        ("sftp_list", "列出远程目录，返回解析后的绝对 path、entries 及 truncated；最多 2000 项。后续路径可基于返回的 path 拼接。", json!({"server_id":s(),"remote_path":s()}), vec!["server_id","remote_path"]),
         ("sftp_stat", "读取远程路径元数据。", json!({"server_id":s(),"remote_path":s()}), vec!["server_id","remote_path"]),
         ("sftp_upload", "上传单个文件或目录到精确远程路径（目录目标为根目录）；拒绝跟随符号链接。默认拒绝覆盖。先传临时文件，完成后重命名。返回 task_id。", json!({"server_id":s(),"local_path":s(),"remote_path":s(),"overwrite":{"type":"boolean"}}), vec!["server_id","local_path","remote_path"]),
         ("sftp_download", "下载文件或目录到本机绝对路径（目录目标为根目录）；拒绝符号链接，默认拒绝覆盖。返回 task_id。", json!({"server_id":s(),"local_path":s(),"remote_path":s(),"overwrite":{"type":"boolean"}}), vec!["server_id","local_path","remote_path"]),

@@ -32,10 +32,16 @@ jobs:
       - name: 检查前端类型
         run: npx tsc --noEmit
 
+      - name: 终端上下文与文件刷新回归测试
+        run: |
+          node scripts/test-terminal-agent-context.mjs
+          node scripts/test-terminal-files.mjs
+
       - name: 构建并发布
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_INCREMENTAL: "0"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
