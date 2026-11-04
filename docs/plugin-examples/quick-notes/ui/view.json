@@ -2,6 +2,7 @@
   "title": "快速便签",
   "description": "也可以在聊天里说「记一条便签……」，或输入 /便签。",
   "blocks": [
+    { "type": "button", "label": "打开便签墙", "action": { "open_window": "quick-notes-board" } },
     {
       "type": "form",
       "fields": [{ "key": "text", "label": "新便签", "type": "textarea", "rows": 2, "placeholder": "想记点什么" }],

@@ -144,7 +144,7 @@ module.exports.add = (args, sg) => {
 }
 ```
 
-块类型：`section`（title, blocks）、`row`、`text`（text, muted）、`markdown`、`stat`（label, value）、`table`（columns, row_actions）、`list`（title, subtitle 模板, row_actions）、`form`（fields: text/textarea/number/select/checkbox/datetime；submit；reset）、`button`（label, action=工具调用或 `"refresh"`）、`json`。
+块类型：`section`（title, blocks）、`row`、`text`（text, muted）、`markdown`、`stat`（label, value）、`table`（columns, row_actions）、`list`（title, subtitle 模板, row_actions）、`form`（fields: text/textarea/number/select/checkbox/datetime；submit；reset）、`button`（label, action=工具调用 / `"refresh"` / `{"open_window": "route", "query": "id={{row.id}}"}`）、`json`。
 
 - `source: {tool, args}`：先调用工具取数据，结果（可用 `path` 取子字段）在模板里叫 `data`。
 - 模板：`{{data.x}}`、`{{row.x}}`、`{{form.x}}`、`{{params.x}}`；整串只有一个占位符时保留原类型（数字仍是数字）。

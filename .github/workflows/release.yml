@@ -127,3 +127,5 @@ jobs:
           prerelease: false
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
+          # 安装包需要带上内置插件目录（开发构建不放进 resources，避免改插件触发重编译）
+          args: --config src-tauri/tauri.plugins.conf.json

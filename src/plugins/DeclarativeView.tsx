@@ -171,7 +171,15 @@ function BlockView({ plugin, block, scope, refreshAll, version }: { plugin: Plug
     case "button":
       return (
         <div>
-          <button className={button} disabled={busy} onClick={() => (block.action === "refresh" ? refreshAll() : run(block.action, local))}>
+          <button
+            className={button}
+            disabled={busy}
+            onClick={() => {
+              if (block.action === "refresh") refreshAll();
+              else if (block.action?.open_window) void ipc.openPluginWindow(plugin.id, String(block.action.open_window), block.action.query ? String(fill(block.action.query, local)) : undefined);
+              else run(block.action, local);
+            }}
+          >
             {fill(block.label, local)}
           </button>
           {message && <div className="mt-1 text-xs text-rose-400">{message}</div>}
