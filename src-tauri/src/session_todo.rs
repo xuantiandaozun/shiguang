@@ -1,5 +1,7 @@
 //! 当前这次任务的进度清单（agent 用 todo_write 整表替换）。
 //! 与用户提醒待办（todos 表 / add_todo）完全分开：不入库、不提醒、下一轮用户消息清空。
+//! 例外：上一轮因工具轮数用完而停下、仍有未完成项时，进度带到下一轮（用户说"继续"
+//! 不必再翻历史重建状态），并给代理一次性的检查点提示。
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -56,6 +58,10 @@ impl SessionTodoCounts {
 pub struct SessionTodoHub {
     by_session: Mutex<HashMap<i64, Vec<SessionTodo>>>,
     active_session: Mutex<Option<i64>>,
+    /// 因轮数用完而中断、进度应带到下一轮的会话。
+    carry_over: Mutex<HashSet<i64>>,
+    /// 本轮从上一轮带过来的进度，供代理取一次生成检查点提示。
+    carried: Mutex<HashMap<i64, Vec<SessionTodo>>>,
 }
 
 impl SessionTodoHub {
@@ -64,16 +70,40 @@ impl SessionTodoHub {
     }
 
     /// 用户新发一条消息：清空该会话进度，并记下后续 todo_write 写到哪一轮。
+    /// 上一轮被标记为带进度时保留原进度。
     pub fn begin_turn(&self, session_id: i64) -> SessionTodoSnapshot {
-        {
+        let carry = recover(&self.carry_over).remove(&session_id);
+        let todos = {
             let mut map = self.lock_map();
-            map.insert(session_id, Vec::new());
+            let kept = if carry { map.get(&session_id).cloned().unwrap_or_default() } else { Vec::new() };
+            map.insert(session_id, kept.clone());
+            kept
+        };
+        if todos.is_empty() {
+            recover(&self.carried).remove(&session_id);
+        } else {
+            recover(&self.carried).insert(session_id, todos.clone());
         }
         *self.lock_active() = Some(session_id);
-        SessionTodoSnapshot {
-            session_id,
-            todos: Vec::new(),
+        SessionTodoSnapshot { session_id, todos }
+    }
+
+    /// 本轮因轮数用完而结束：有未完成项就带到下一轮。返回是否标记。
+    pub fn mark_unfinished(&self, session_id: i64) -> bool {
+        let unfinished = self.list(session_id).iter().any(|t| t.status != STATUS_COMPLETED);
+        if unfinished {
+            recover(&self.carry_over).insert(session_id);
         }
+        unfinished
+    }
+
+    /// 取出（仅一次）从上一轮带过来的进度。
+    pub fn take_carried(&self, session_id: i64) -> Option<Vec<SessionTodo>> {
+        recover(&self.carried).remove(&session_id)
+    }
+
+    pub fn completed_count(&self, session_id: i64) -> usize {
+        self.list(session_id).iter().filter(|t| t.status == STATUS_COMPLETED).count()
     }
 
     pub fn replace_active(&self, todos: Vec<SessionTodo>) -> Result<SessionTodoSnapshot> {
@@ -103,6 +133,8 @@ impl SessionTodoHub {
 
     pub fn drop_session(&self, session_id: i64) {
         self.lock_map().remove(&session_id);
+        recover(&self.carry_over).remove(&session_id);
+        recover(&self.carried).remove(&session_id);
         let mut active = self.lock_active();
         if *active == Some(session_id) {
             *active = None;
@@ -118,6 +150,27 @@ impl SessionTodoHub {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
     }
+}
+
+fn recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 给代理的检查点提示：上一轮停在哪里、哪些已完成，继续时从未完成项接着做。
+pub fn carry_over_note(todos: &[SessionTodo]) -> String {
+    let mut out = String::from("上一轮因工具调用轮数用完而停下，以下是当时的进度（已带到本轮）：
+");
+    for t in todos {
+        let mark = match t.status.as_str() {
+            STATUS_COMPLETED => "[已完成]",
+            STATUS_IN_PROGRESS => "[进行中]",
+            _ => "[待办]",
+        };
+        out.push_str(&format!("- {mark} {}
+", t.content));
+    }
+    out.push_str("用户若是让你继续，就从未完成项接着做：已完成项的结果在上面的工具记录里，不要重新查找或重复执行；先用 todo_write 更新进度。");
+    out
 }
 
 pub fn parse_todos(args: &Value) -> Result<Vec<SessionTodo>> {
@@ -271,6 +324,29 @@ mod tests {
         let again = hub.begin_turn(7);
         assert!(again.todos.is_empty());
         assert!(hub.list(7).is_empty());
+    }
+
+    #[test]
+    fn unfinished_progress_carries_into_the_next_turn_once() {
+        let hub = SessionTodoHub::new();
+        hub.begin_turn(5);
+        hub.replace_active(vec![
+            SessionTodo { content: "发布第一条".into(), status: STATUS_COMPLETED.into() },
+            SessionTodo { content: "发布第二条".into(), status: STATUS_IN_PROGRESS.into() },
+        ])
+        .unwrap();
+        assert!(hub.mark_unfinished(5));
+        let next = hub.begin_turn(5);
+        assert_eq!(next.todos.len(), 2);
+        let carried = hub.take_carried(5).unwrap();
+        assert!(carry_over_note(&carried).contains("[进行中] 发布第二条"));
+        assert!(hub.take_carried(5).is_none());
+        // 没有再次标记：再下一轮正常清空。
+        assert!(hub.begin_turn(5).todos.is_empty());
+        // 全部完成时不带。
+        hub.replace_active(vec![SessionTodo { content: "收尾".into(), status: STATUS_COMPLETED.into() }]).unwrap();
+        assert!(!hub.mark_unfinished(5));
+        assert!(hub.begin_turn(5).todos.is_empty());
     }
 
     #[test]

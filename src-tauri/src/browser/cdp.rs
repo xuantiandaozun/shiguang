@@ -206,6 +206,19 @@ impl CdpClient {
                     "png_base64": base64::engine::general_purpose::STANDARD.encode(bytes)
                 }))
             }
+            "page_operation" => {
+                let method = params.get("method").and_then(Value::as_str).unwrap_or("");
+                if !matches!(method, "capabilities" | "action" | "probe" | "extract") {
+                    bail!("未知页面操作方法");
+                }
+                let page = self.current_page().await?;
+                let args = params.get("args").cloned().unwrap_or(json!({}));
+                let expression = format!("{}\n;window.__dh.{}({});", page_inject_js(), method, serde_json::to_string(&args)?);
+                let value = page.evaluate(expression).await
+                    .map_err(|e| anyhow!("页面操作失败: {e}"))?
+                    .into_value::<Value>().map_err(|e| anyhow!("页面操作结果解析失败: {e}"))?;
+                Ok(json!({"result":value}))
+            }
             "evaluate" => {
                 let expr = params
                     .get("expression")

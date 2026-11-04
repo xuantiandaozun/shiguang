@@ -21,13 +21,20 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Mozilla Readability：正文抽取（与 page-api 一并注入）
+pub mod operations;
+
 pub const READABILITY_JS: &str = include_str!("../../../browser-extension/readability.js");
 /// 与浏览器扩展共用的页面操作 JS（单一实现，注入后提供 window.__dh）
 pub const PAGE_API_JS: &str = include_str!("../../../browser-extension/page-api.js");
 
-/// CDP / debugger 通道注入源：Readability + page-api
+pub const PAGE_OPERATIONS_JS: &str = include_str!("../../../browser-extension/page-operations.js");
+
+/// 真实输入引擎的页面侧判定（定位/可操作性/读回/页面状态）。
+pub const PAGE_RUNTIME_JS: &str = include_str!("../../../browser-extension/page-runtime.js");
+
+/// All transports share the same low-level primitives and semantic operations.
 pub fn page_inject_js() -> String {
-    format!("{}\n{}", READABILITY_JS, PAGE_API_JS)
+    format!("{}\n{}\n{}\n{}", READABILITY_JS, PAGE_API_JS, PAGE_OPERATIONS_JS, PAGE_RUNTIME_JS)
 }
 
 /// 给动态脚本注入 `$el` / `$args`。
@@ -262,7 +269,8 @@ mod tests {
 
     #[test]
     fn page_api_exposes_adaptive_interaction_primitives() {
-        assert!(PAGE_API_JS.contains("const DH_VER = 10"));
+        assert!(PAGE_API_JS.contains("const DH_VER = 11"));
+        assert!(PAGE_API_JS.contains("relocate("));
         assert!(PAGE_API_JS.contains("aria-controls"));
         assert!(PAGE_API_JS.contains("unique_fuzzy"));
         assert!(PAGE_API_JS.contains("activePopupScrollable"));

@@ -36,8 +36,11 @@
 // - type 可从触发器/组合控件通用解析到实际可编辑后代、关联控件或新打开浮层中的
 //   输入框；原生 select 支持唯一模糊匹配，歧义时返回候选而非猜测。
 // - scroll 会沿 aria-controls/aria-owns 等控件关系寻找浮层中的真实滚动容器。
+// v11 变更：
+// - ref 记录元素指纹（标签/角色/名称/文字）。框架重渲染把元素替换后，按指纹在
+//   当前页唯一重定位；不唯一或找不到才报失效，避免为一次重渲染重拍快照。
 (() => {
-  const DH_VER = 10;
+  const DH_VER = 11;
   if (window.__dh && window.__dhVer === DH_VER) return;
 
   const INTERACTIVE_SEL = [
@@ -239,6 +242,39 @@
     return parts.filter(Boolean).join(" ");
   }
 
+  // ref 指纹：只取重渲染后通常不变的特征。可编辑元素的文字会随输入变化，不参与比较。
+  function fingerprintOf(el) {
+    return {
+      tag: el.tagName,
+      role: el.getAttribute("role") || "",
+      type: el.getAttribute("type") || "",
+      name: el.getAttribute("name") || "",
+      aria: el.getAttribute("aria-label") || "",
+      placeholder: el.getAttribute("placeholder") || el.getAttribute("data-placeholder") || "",
+      text: isEditable(el) ? "" : short(ownTextOf(el) || el.innerText || "", 60),
+    };
+  }
+
+  // 只接受唯一的可见匹配；多个同样的元素（列表里的「删除」按钮）宁可报失效也不猜。
+  function relocate(meta) {
+    if (!meta || !meta.tag) return null;
+    let found = null;
+    for (const el of document.getElementsByTagName(meta.tag)) {
+      if ((el.getAttribute("role") || "") !== meta.role || (el.getAttribute("aria-label") || "") !== meta.aria) continue;
+      if ((el.getAttribute("name") || "") !== meta.name || (el.getAttribute("type") || "") !== meta.type) continue;
+      if (!visibleStyle(el)) continue;
+      const fp = fingerprintOf(el);
+      if (fp.placeholder !== meta.placeholder || fp.text !== meta.text) continue;
+      if (found) return null;
+      found = el;
+    }
+    return found;
+  }
+
+  function rememberMeta(table, n, el) {
+    table[n] = fingerprintOf(el);
+  }
+
   // 供 click/type 返回值确认目标用：简短描述元素身份
   function describeEl(el) {
     const tag = el.tagName.toLowerCase();
@@ -254,6 +290,7 @@
   // AI 面对的候选从几百个降到十几个，选择精度显著提升。
   function buildSnapshot(maxChars, scopeRoot) {
     const refs = {};
+    const meta = {};
     const numberedMap = new Map();
     let count = 0;
     let total = 0;
@@ -277,6 +314,7 @@
       count += 1;
       numberedMap.set(el, count);
       refs[count] = el;
+      rememberMeta(meta, count, el);
       return count;
     };
 
@@ -324,6 +362,7 @@
       pushLine(0, `◇ 局部快照，范围: ${describeEl(scopeRoot)}（编号已重排，仅本范围内有效）`);
       walk(scopeRoot, 1, false, false);
       window.__dhRefs = refs;
+      window.__dhRefMeta = meta;
       if (count === 0 && !truncated) lines.push("(范围内没有检测到可交互元素)");
       return lines.join("\n");
     }
@@ -363,13 +402,20 @@
       lines.push(`（全页约有 ${rough} 个可交互元素，建议用 scope 参数聚焦目标容器（弹窗/表单/列表的编号或 CSS 选择器）获取局部快照）`);
     }
     window.__dhRefs = refs;
+    window.__dhRefMeta = meta;
     return lines.join("\n") || "(页面为空)";
   }
 
   function getRef(ref) {
-    const el = (window.__dhRefs || {})[ref];
-    if (!el || !el.isConnected) return null;
-    return el;
+    const refs = window.__dhRefs || (window.__dhRefs = {});
+    const el = refs[ref];
+    if (el && el.isConnected) return el;
+    const found = relocate((window.__dhRefMeta || {})[ref]);
+    if (found) {
+      refs[ref] = found;
+      window.__dhRelocated = (window.__dhRelocated || 0) + 1;
+    }
+    return found;
   }
 
   // 只返回匹配目标的紧凑候选，避免为了找一个“提交”按钮而把整页导航和卡片交给模型。
@@ -379,6 +425,7 @@
     if (!needle) return { error: "缺少查找文字" };
     const tokens = needle.split(/\s+/).filter(Boolean);
     const refs = {};
+    const meta = {};
     const results = [];
     const seen = new Set();
     const all = Array.from(document.querySelectorAll(INTERACTIVE_SEL));
@@ -391,9 +438,11 @@
       seen.add(el);
       const ref = results.length + 1;
       refs[ref] = el;
+      rememberMeta(meta, ref, el);
       results.push({ ref, element: label });
     }
     window.__dhRefs = refs;
+    window.__dhRefMeta = meta;
     return {
       query: String(query),
       count: results.length,
@@ -610,6 +659,10 @@
   window.__dh = {
     // 给 browser_evaluate 的 ref 模式使用；返回真实 DOM 元素，不做站点专用封装。
     ref: (ref) => getRef(ref),
+    // 供 page-operations / page-runtime 复用：登记新 ref 时同步记录指纹。
+    fingerprint: (el) => fingerprintOf(el),
+    describe: (el) => describeEl(el),
+    isEditable: (el) => isEditable(el),
     // scope：数字=上次快照中的元素编号，字符串=CSS 选择器；只遍历该元素子树
     snapshot: (maxChars, scope) => {
       if (scope == null || scope === "") return buildSnapshot(maxChars || 8000, null);

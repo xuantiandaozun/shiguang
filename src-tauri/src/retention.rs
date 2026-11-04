@@ -142,6 +142,91 @@ pub fn trim_old_tool_messages(messages: &mut [Value], spill_dir: Option<&Path>) 
     }
 }
 
+// ---- 被取代的旧观察折叠 ----
+// 状态类工具（页面快照、同一查询、同一文件范围、同一命令、同一任务状态）再次调用后，
+// 旧结果描述的是过去的状态，留着只会占上下文并误导模型。按"观察对象"分组，只保留最新一条。
+// 折叠会改动较早的消息、让该位置之后的前缀缓存失效，所以攒够一批再一起折叠。
+
+const FOLD_MARK: &str = "[已折叠：旧观察";
+/// 一次折叠至少回收这么多字符，否则先不动，保护前缀缓存。
+pub const FOLD_MIN_BATCH_CHARS: usize = 6_000;
+/// 短结果不值得折叠（折叠说明本身也有长度）。
+const FOLD_MIN_CHARS: usize = 400;
+
+/// 观察对象：同一个 key 的新结果会取代旧结果。返回 None 的工具结果不参与折叠
+/// （正文阅读、搜索结果、动作回执等都是独立信息，不会被"更新"）。
+pub fn observation_key(tool: &str, args: &Value) -> Option<String> {
+    let field = |name: &str| -> String {
+        match args.get(name) {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::String(s)) => s.trim().to_string(),
+            Some(other) => other.to_string(),
+        }
+    };
+    let key = match tool {
+        "browser_snapshot" => format!("scope={}", field("scope")),
+        "browser_find" => format!("query={}", field("query")),
+        "browser_tabs" | "browser_status" | "list_tasks" | "list_skills" | "list_servers" | "get_system_info" | "scan_desktop" => String::new(),
+        "browser_network_observe" if field("action") == "list" => String::new(),
+        "browser_extract" => args.to_string(),
+        "read_file" => format!("{}|{}|{}", field("path"), field("offset"), field("limit")),
+        "check_task" | "await_task" => format!("task={}", field("task_id")),
+        "run_command" => {
+            let command = field("command");
+            if command.is_empty() { format!("argv={}", field("argv")) } else { format!("cmd={command}") }
+        }
+        _ => return None,
+    };
+    Some(format!("{tool}:{key}"))
+}
+
+/// 折叠被更新观察取代的旧工具结果；返回折叠条数。回收量不足一批时不动。
+pub fn fold_superseded(messages: &mut [Value], min_batch_chars: usize) -> usize {
+    let mut calls: std::collections::HashMap<String, (String, Value)> = std::collections::HashMap::new();
+    for m in messages.iter() {
+        for call in m.get("tool_calls").and_then(Value::as_array).into_iter().flatten() {
+            let Some(id) = call.get("id").and_then(Value::as_str) else { continue };
+            let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("").to_string();
+            let args = call
+                .pointer("/function/arguments")
+                .and_then(Value::as_str)
+                .and_then(|raw| serde_json::from_str(raw).ok())
+                .unwrap_or(Value::Null);
+            calls.insert(id.to_string(), (name, args));
+        }
+    }
+    let mut latest: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut candidates: Vec<(usize, String)> = Vec::new();
+    let mut reclaim = 0usize;
+    for (index, m) in messages.iter().enumerate().rev() {
+        if m.get("role").and_then(Value::as_str) != Some("tool") {
+            continue;
+        }
+        let Some(id) = m.get("tool_call_id").and_then(Value::as_str) else { continue };
+        let Some((name, args)) = calls.get(id) else { continue };
+        let Some(key) = observation_key(name, args) else { continue };
+        if latest.insert(key) {
+            continue; // 该对象最新的一条，保留
+        }
+        let content = m.get("content").and_then(Value::as_str).unwrap_or("");
+        let chars = content.chars().count();
+        if chars < FOLD_MIN_CHARS || content.starts_with(FOLD_MARK) {
+            continue;
+        }
+        reclaim += chars;
+        candidates.push((index, name.clone()));
+    }
+    if candidates.is_empty() || reclaim < min_batch_chars {
+        return 0;
+    }
+    for (index, name) in &candidates {
+        messages[*index]["content"] = Value::String(format!(
+            "{FOLD_MARK}] 这是 {name} 较早的结果，之后已有同一对象的更新结果，以最新一次为准。确需旧原文时用 get_tool_call_history（tool_name={name}）查询。"
+        ));
+    }
+    candidates.len()
+}
+
 fn omission_notice(omitted_chars: usize, spill_path: Option<&str>) -> String {
     match spill_path {
         Some(path) => format!(
@@ -242,6 +327,48 @@ fn take_last_chars(s: &str, n: usize) -> &str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn call_round(id: &str, name: &str, args: serde_json::Value, content: &str) -> Vec<Value> {
+        vec![
+            json!({"role":"assistant","content":null,"tool_calls":[{"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}]}),
+            json!({"role":"tool","tool_call_id":id,"content":content}),
+        ]
+    }
+
+    #[test]
+    fn fold_keeps_latest_observation_per_object_and_batches() {
+        let big = "x".repeat(4_000);
+        let mut messages = vec![json!({"role":"system","content":"s"})];
+        messages.extend(call_round("a", "browser_snapshot", json!({}), &big));
+        messages.extend(call_round("b", "browser_read", json!({}), &big));
+        messages.extend(call_round("c", "browser_snapshot", json!({"scope":"dialog"}), &big));
+        messages.extend(call_round("d", "browser_snapshot", json!({"max_chars":6000}), &big));
+        messages.extend(call_round("e", "run_command", json!({"command":"git status"}), &big));
+        messages.extend(call_round("f", "run_command", json!({"command":"git status"}), &big));
+        // 回收量不足一批时不动。
+        assert_eq!(fold_superseded(&mut messages, 20_000), 0);
+        assert_eq!(fold_superseded(&mut messages, FOLD_MIN_BATCH_CHARS), 2);
+        let content = |id: &str| messages.iter().find(|m| m["tool_call_id"] == id).unwrap()["content"].as_str().unwrap().to_string();
+        assert!(content("a").starts_with(FOLD_MARK));
+        assert!(content("e").starts_with(FOLD_MARK));
+        // 正文阅读、不同 scope、每个对象的最新一次都保留。
+        assert_eq!(content("b"), big);
+        assert_eq!(content("c"), big);
+        assert_eq!(content("d"), big);
+        assert_eq!(content("f"), big);
+        // 再次执行不重复折叠。
+        assert_eq!(fold_superseded(&mut messages, 0), 0);
+    }
+
+    #[test]
+    fn observation_keys_cover_state_queries_only() {
+        assert!(observation_key("browser_click", &json!({"ref":1})).is_none());
+        assert!(observation_key("web_search", &json!({"query":"x"})).is_none());
+        assert_eq!(observation_key("read_file", &json!({"path":"a.txt"})), observation_key("read_file", &json!({"path":"a.txt"})));
+        assert_ne!(observation_key("read_file", &json!({"path":"a.txt","offset":0})), observation_key("read_file", &json!({"path":"a.txt","offset":200})));
+        assert!(observation_key("browser_network_observe", &json!({"action":"start"})).is_none());
+        assert!(observation_key("browser_network_observe", &json!({"action":"list"})).is_some());
+    }
 
     fn long_text(chars: usize) -> String {
         "测".repeat(chars)

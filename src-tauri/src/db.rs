@@ -695,6 +695,40 @@ impl Db {
               ON llm_usage(created_at);
             CREATE INDEX IF NOT EXISTS idx_llm_usage_source
               ON llm_usage(source, created_at);
+            CREATE TABLE IF NOT EXISTS workspaces(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL UNIQUE,
+              root TEXT NOT NULL,
+              data_json TEXT NOT NULL DEFAULT '{}',
+              last_used_at TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS session_workspaces(
+              session_id INTEGER PRIMARY KEY,
+              workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS agent_runs(
+              id TEXT PRIMARY KEY,
+              agent TEXT NOT NULL,
+              workspace_id INTEGER,
+              session_id INTEGER NOT NULL DEFAULT 0,
+              title TEXT NOT NULL,
+              root TEXT NOT NULL,
+              mode TEXT NOT NULL,
+              status TEXT NOT NULL,
+              data_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS agent_run_events(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+              kind TEXT NOT NULL,
+              content TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_run_events_run ON agent_run_events(run_id, id);
             "#,
         )?;
 
@@ -2915,5 +2949,246 @@ mod llm_usage_tests {
         assert_eq!(snap.recent[2].source, "chat");
 
         cleanup(db, &path);
+    }
+}
+
+// ---------- workspaces & agent runs ----------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceRow {
+    pub id: i64,
+    pub name: String,
+    pub root: String,
+    pub data: serde_json::Value,
+    pub last_used_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRunRow {
+    pub id: String,
+    pub agent: String,
+    pub workspace_id: Option<i64>,
+    pub session_id: i64,
+    pub title: String,
+    pub root: String,
+    pub mode: String,
+    pub status: String,
+    pub data: serde_json::Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRunEvent {
+    pub id: i64,
+    pub run_id: String,
+    pub kind: String,
+    pub content: String,
+    pub created_at: String,
+}
+
+fn workspace_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceRow> {
+    let raw: String = r.get(3)?;
+    Ok(WorkspaceRow {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        root: r.get(2)?,
+        data: serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({})),
+        last_used_at: r.get(4)?,
+        created_at: r.get(5)?,
+        updated_at: r.get(6)?,
+    })
+}
+
+fn agent_run_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRunRow> {
+    let raw: String = r.get(8)?;
+    Ok(AgentRunRow {
+        id: r.get(0)?,
+        agent: r.get(1)?,
+        workspace_id: r.get(2)?,
+        session_id: r.get(3)?,
+        title: r.get(4)?,
+        root: r.get(5)?,
+        mode: r.get(6)?,
+        status: r.get(7)?,
+        data: serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({})),
+        created_at: r.get(9)?,
+        updated_at: r.get(10)?,
+    })
+}
+
+const WORKSPACE_COLS: &str = "id, name, root, data_json, last_used_at, created_at, updated_at";
+const AGENT_RUN_COLS: &str = "id, agent, workspace_id, session_id, title, root, mode, status, data_json, created_at, updated_at";
+
+impl Db {
+    pub fn workspace_list(&self) -> Result<Vec<WorkspaceRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!("SELECT {WORKSPACE_COLS} FROM workspaces ORDER BY COALESCE(last_used_at, updated_at) DESC"))?;
+        let rows = stmt.query_map([], workspace_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    pub fn workspace_get(&self, id: i64) -> Result<Option<WorkspaceRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(&format!("SELECT {WORKSPACE_COLS} FROM workspaces WHERE id=?1"), params![id], workspace_from_row)
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn workspace_by_name(&self, name: &str) -> Result<Option<WorkspaceRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(&format!("SELECT {WORKSPACE_COLS} FROM workspaces WHERE name=?1 COLLATE NOCASE"), params![name.trim()], workspace_from_row)
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// id=0 新建；否则更新。名称唯一（忽略大小写）。
+    pub fn workspace_save(&self, id: i64, name: &str, root: &str, data: &serde_json::Value) -> Result<WorkspaceRow> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("工作区名称不能为空"));
+        }
+        if let Some(existing) = self.workspace_by_name(name)? {
+            if existing.id != id {
+                return Err(anyhow!("已有同名工作区「{}」", existing.name));
+            }
+        }
+        let now = now_str();
+        let raw = serde_json::to_string(data)?;
+        let conn = self.conn.lock().unwrap();
+        let id = if id == 0 {
+            conn.execute(
+                "INSERT INTO workspaces(name, root, data_json, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?4)",
+                params![name, root.trim(), raw, now],
+            )?;
+            conn.last_insert_rowid()
+        } else {
+            let changed = conn.execute(
+                "UPDATE workspaces SET name=?1, root=?2, data_json=?3, updated_at=?4 WHERE id=?5",
+                params![name, root.trim(), raw, now, id],
+            )?;
+            if changed == 0 {
+                return Err(anyhow!("工作区不存在"));
+            }
+            id
+        };
+        drop(conn);
+        self.workspace_get(id)?.ok_or_else(|| anyhow!("工作区保存失败"))
+    }
+
+    pub fn workspace_delete(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM session_workspaces WHERE workspace_id=?1", params![id])?;
+        conn.execute("DELETE FROM workspaces WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn workspace_touch(&self, id: i64) -> Result<()> {
+        self.conn.lock().unwrap().execute("UPDATE workspaces SET last_used_at=?1 WHERE id=?2", params![now_str(), id])?;
+        Ok(())
+    }
+
+    pub fn session_workspace(&self, session_id: i64) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT workspace_id FROM session_workspaces WHERE session_id=?1", params![session_id], |r| r.get(0))
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn set_session_workspace(&self, session_id: i64, workspace_id: Option<i64>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        match workspace_id {
+            Some(id) => conn.execute(
+                "INSERT INTO session_workspaces(session_id, workspace_id) VALUES(?1, ?2)
+                 ON CONFLICT(session_id) DO UPDATE SET workspace_id=excluded.workspace_id",
+                params![session_id, id],
+            )?,
+            None => conn.execute("DELETE FROM session_workspaces WHERE session_id=?1", params![session_id])?,
+        };
+        Ok(())
+    }
+
+    pub fn agent_run_create(&self, run: &AgentRunRow) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agent_runs(id, agent, workspace_id, session_id, title, root, mode, status, data_json, created_at, updated_at)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+            params![run.id, run.agent, run.workspace_id, run.session_id, run.title, run.root, run.mode, run.status, serde_json::to_string(&run.data)?, now_str()],
+        )?;
+        Ok(())
+    }
+
+    pub fn agent_run_get(&self, id: &str) -> Result<Option<AgentRunRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(&format!("SELECT {AGENT_RUN_COLS} FROM agent_runs WHERE id=?1"), params![id], agent_run_from_row)
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn agent_run_list(&self, limit: usize) -> Result<Vec<AgentRunRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!("SELECT {AGENT_RUN_COLS} FROM agent_runs ORDER BY updated_at DESC LIMIT ?1"))?;
+        let rows = stmt.query_map(params![limit as i64], agent_run_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    pub fn agent_run_update(&self, id: &str, status: &str, data: &serde_json::Value) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE agent_runs SET status=?2, data_json=?3, updated_at=?4 WHERE id=?1",
+            params![id, status, serde_json::to_string(data)?, now_str()],
+        )?;
+        Ok(())
+    }
+
+    pub fn agent_run_event(&self, run_id: &str, kind: &str, content: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agent_run_events(run_id, kind, content, created_at) VALUES(?1, ?2, ?3, ?4)",
+            params![run_id, kind, content, now_str()],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn agent_run_events(&self, run_id: &str, after: i64, limit: usize) -> Result<Vec<AgentRunEvent>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id, run_id, kind, content, created_at FROM agent_run_events WHERE run_id=?1 AND id>?2 ORDER BY id LIMIT ?3")?;
+        let rows = stmt.query_map(params![run_id, after, limit as i64], |r| {
+            Ok(AgentRunEvent { id: r.get(0)?, run_id: r.get(1)?, kind: r.get(2)?, content: r.get(3)?, created_at: r.get(4)? })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// 应用重启时外派进程已不存在：运行中的标记为 idle（可用原会话追问续接）。
+    pub fn recover_agent_runs(&self) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE agent_runs SET status='idle', updated_at=?1 WHERE status IN ('running','asking')",
+            params![now_str()],
+        )?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod workspace_store_tests {
+    use super::*;
+
+    #[test]
+    fn workspaces_are_unique_and_bound_per_session() {
+        let path = std::env::temp_dir().join(format!("shiguang-ws-{}.db", uuid::Uuid::new_v4()));
+        let db = Db::new(&path).unwrap();
+        let ws = db.workspace_save(0, "博客", "D:/blok", &serde_json::json!({"aliases":["blog"]})).unwrap();
+        assert!(db.workspace_save(0, "博客", "D:/other", &serde_json::json!({})).is_err());
+        let updated = db.workspace_save(ws.id, "博客", "D:/blok2", &serde_json::json!({})).unwrap();
+        assert_eq!(updated.root, "D:/blok2");
+        db.set_session_workspace(7, Some(ws.id)).unwrap();
+        assert_eq!(db.session_workspace(7).unwrap(), Some(ws.id));
+        db.workspace_delete(ws.id).unwrap();
+        assert_eq!(db.session_workspace(7).unwrap(), None);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
     }
 }

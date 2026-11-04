@@ -9,23 +9,95 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 async fn main() -> Result<()> {
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
-    let mut stdout = tokio::io::stdout();
+    // 每个请求单独处理：ask_main 可能阻塞几十分钟，不能卡住 ping 等其它请求。
+    let stdout = std::sync::Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
     while let Some(line) = lines.next_line().await? {
         let req: Value = match serde_json::from_str(&line) { Ok(v) => v, Err(_) => continue };
         let Some(id) = req.get("id").cloned() else { continue };
-        let result = handle(&req).await;
-        let response = match result {
-            Ok(value) => json!({"jsonrpc":"2.0","id":id,"result":value}),
-            Err(e) => json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":e.to_string()}}),
-        };
-        stdout.write_all(response.to_string().as_bytes()).await?;
-        stdout.write_all(b"\n").await?;
-        stdout.flush().await?;
+        let stdout = stdout.clone();
+        tokio::spawn(async move {
+            let response = match handle(&req).await {
+                Ok(value) => json!({"jsonrpc":"2.0","id":id,"result":value}),
+                Err(e) => json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":e.to_string()}}),
+            };
+            let mut out = stdout.lock().await;
+            let _ = out.write_all(response.to_string().as_bytes()).await;
+            let _ = out.write_all(b"\n").await;
+            let _ = out.flush().await;
+        });
     }
     Ok(())
 }
 
+/// 外派模式：拾光启动 Claude Code / Codex 时通过环境变量指定运行编号，只暴露回问主 AI 的两个工具。
+fn agent_run() -> Option<String> {
+    std::env::var("SHIGUANG_AGENT_RUN").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn agent_tools() -> Vec<Value> {
+    vec![
+        json!({"name":"ask_main","description":"向拾光（外派你的主助手，背后是用户）提问并等待回答。用于：需求不清、需要扩大改动范围、要动线上数据或装新依赖、需要线上/浏览器实测结果、需要用户决定的事。问题要具体，给出你倾向的方案和理由。调用会阻塞直到拾光回答。","inputSchema":{"type":"object","properties":{"question":{"type":"string"},"context":{"type":"string","description":"可选：已查到的事实、候选方案"}},"required":["question"]}}),
+        json!({"name":"report_checkpoint","description":"到达任务约定的关键节点时汇报并等待拾光审核；拾光回复后按回复继续（可能是继续、调整范围或停止）。","inputSchema":{"type":"object","properties":{"milestone":{"type":"string"},"done":{"type":"string","description":"已完成的内容"},"evidence":{"type":"string","description":"证据：测试/构建结果、关键 diff"},"next":{"type":"string","description":"打算的下一步"}},"required":["milestone","done"]}}),
+    ]
+}
+
+async fn call_agent_tool(run: &str, name: &str, args: Value) -> Result<Value> {
+    let kind = match name {
+        "ask_main" => "ask",
+        "report_checkpoint" => "checkpoint",
+        _ => return Err(anyhow!("未知工具")),
+    };
+    let asked = bridge(json!({"action":"agent_ask","id":run,"kind":kind,"payload":args})).await?;
+    if let Some(answer) = asked.get("answer").and_then(Value::as_str) {
+        return Ok(json!(answer));
+    }
+    let qid = asked.get("qid").and_then(Value::as_str).ok_or_else(|| anyhow!("拾光没有受理这个问题"))?.to_string();
+    let start = tokio::time::Instant::now();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        let polled = match bridge(json!({"action":"agent_poll","id":run,"qid":qid})).await {
+            Ok(v) => v,
+            Err(_) if start.elapsed().as_secs() < 1800 => continue,
+            Err(e) => return Err(e),
+        };
+        if let Some(answer) = polled.get("answer").and_then(Value::as_str) {
+            return Ok(json!(answer));
+        }
+        if polled.get("cancelled").and_then(Value::as_bool) == Some(true) {
+            return Err(anyhow!("外派任务已被中断，请停止工作并简短总结当前进度"));
+        }
+        if start.elapsed().as_secs() >= 1800 {
+            return Ok(json!("拾光 30 分钟内没有回答。请按现有信息做最稳妥的选择，并在最终总结里写明这个待确认的问题。"));
+        }
+    }
+}
+
 async fn handle(req: &Value) -> Result<Value> {
+    if let Some(run) = agent_run() {
+        return match req.get("method").and_then(Value::as_str).unwrap_or("") {
+            "initialize" => Ok(json!({
+                "protocolVersion":"2025-11-25",
+                "capabilities":{"tools":{}},
+                "serverInfo":{"name":"shiguang","version":env!("CARGO_PKG_VERSION")},
+                "instructions":"你是拾光外派的编码智能体。需要决定、需要线上实测或需求不清时用 ask_main 提问；到约定的关键节点用 report_checkpoint 汇报。两者都会阻塞到拾光回复。"
+            })),
+            "ping" => Ok(json!({})),
+            "tools/list" => Ok(json!({"tools":agent_tools()})),
+            "tools/call" => {
+                let params = req.get("params").ok_or_else(|| anyhow!("missing params"))?;
+                let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+                let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                match call_agent_tool(&run, name, args).await {
+                    Ok(answer) => {
+                        let text = answer.as_str().map(str::to_string).unwrap_or_else(|| answer.to_string());
+                        Ok(json!({"content":[{"type":"text","text":text}]}))
+                    }
+                    Err(e) => Ok(json!({"isError":true,"content":[{"type":"text","text":e.to_string()}]})),
+                }
+            }
+            _ => Err(anyhow!("method not found")),
+        };
+    }
     match req.get("method").and_then(Value::as_str).unwrap_or("") {
         "initialize" => Ok(json!({
             "protocolVersion":"2025-11-25",

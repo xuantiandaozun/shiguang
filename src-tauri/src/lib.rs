@@ -1,6 +1,7 @@
 // tools.rs 的 json! 工具定义较大，默认 128 递归上限不够
 #![recursion_limit = "256"]
 
+pub mod agents;
 pub mod ask_user;
 pub mod browser;
 pub mod builtin_skills;
@@ -33,6 +34,7 @@ pub mod todo;
 pub mod tray;
 pub mod web;
 pub mod windows;
+pub mod workspaces;
 pub mod writer;
 
 use std::sync::atomic::AtomicBool;
@@ -66,6 +68,8 @@ pub struct AppState {
     /// 后台子代理任务
     pub subagents: llm::subagent::SubagentHub,
     pub delegations: delegation::DelegationHub,
+    /// 外派给 Claude Code / Codex 的编码任务
+    pub agents: agents::AgentHub,
 }
 
 pub fn notify_user(app: &tauri::AppHandle, title: &str, body: &str) {
@@ -130,6 +134,7 @@ pub fn run() {
             let _ = std::fs::create_dir_all(tempfs::temp_dir_in(&app_dir));
             let db = db::Db::new(&app_dir.join("deskhelper.db"))?;
             db.recover_delegations()?;
+            db.recover_agent_runs()?;
             if let Err(e) = llm::tools::seed_registry(&db) {
                 log::warn!("初始化动态工具注册表失败，将使用代码内置定义: {e}");
             }
@@ -155,6 +160,7 @@ pub fn run() {
                 session_todos: session_todo::SessionTodoHub::new(),
                 subagents: llm::subagent::SubagentHub::new(),
                 delegations: delegation::DelegationHub::default(),
+                agents: agents::AgentHub::default(),
             });
             mcp_bridge::spawn(app.handle().clone(), &app_dir);
             // 每次进程启动开空白会话（已有空会话则复用），与聊天窗欢迎态一致。
@@ -193,6 +199,7 @@ pub fn run() {
             commands::import_clipboard_attachments,
             commands::save_pasted_file,
             commands::stop_chat_message,
+            commands::save_reply_markdown,
             commands::get_current_session,
             commands::list_sessions,
             commands::new_session,
@@ -207,6 +214,18 @@ pub fn run() {
             commands::create_delegation,
             commands::reply_delegation,
             commands::cancel_delegation,
+            commands::list_workspaces,
+            commands::save_workspace,
+            commands::delete_workspace,
+            commands::detect_workspace,
+            commands::list_code_agents,
+            commands::set_code_agent,
+            commands::list_agent_runs,
+            commands::get_agent_run,
+            commands::reply_agent_run,
+            commands::stop_agent_run,
+            commands::show_agent_run_window,
+            commands::finish_agent_run_worktree,
             commands::toggle_chat,
             commands::open_main_window,
             commands::hide_chat,

@@ -170,6 +170,64 @@ export interface SessionView {
   messages: ChatMsg[];
 }
 
+export interface WorkspaceLink { label: string; url: string }
+export interface WorkspaceData {
+  aliases?: string[];
+  summary?: string;
+  deploy?: string;
+  verify_commands?: string[];
+  tools?: string;
+  links?: (WorkspaceLink | string)[];
+  rules?: string[];
+  notes?: string[];
+  default_agent?: "claude_code" | "codex" | "";
+  agent_mode?: "plan" | "edit" | "full" | "";
+}
+export interface Workspace {
+  id: number;
+  name: string;
+  root: string;
+  data: WorkspaceData;
+  last_used_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+export interface CodeAgentInfo {
+  kind: "claude_code" | "codex";
+  label: string;
+  path: string | null;
+  version: string | null;
+  enabled: boolean;
+  available: boolean;
+  path_override: string;
+}
+export type AgentRunStatus = "running" | "asking" | "idle" | "error" | "cancelled" | "closed";
+export interface AgentRun {
+  id: string;
+  agent: "claude_code" | "codex";
+  workspace_id: number | null;
+  session_id: number;
+  title: string;
+  root: string;
+  mode: string;
+  status: AgentRunStatus;
+  data: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+export interface AgentRunEvent {
+  id: number;
+  run_id: string;
+  kind: string;
+  content: string;
+  created_at: string;
+}
+export interface AgentRunView {
+  run: AgentRun;
+  events: AgentRunEvent[];
+  agent_label: string;
+}
+
 export interface DelegationTask {
   id: string;
   title: string;
@@ -297,6 +355,7 @@ export interface AskQuestion {
   header?: string | null;
   options: AskOption[];
   multi_select: boolean;
+  details?: string | null;
 }
 
 export interface AskUserPrompt {
@@ -387,6 +446,7 @@ export const ipc = {
   savePastedFile: (filename: string, dataBase64: string) =>
     invoke<string>("save_pasted_file", { filename, dataBase64 }),
   stopChat: () => invoke<void>("stop_chat_message"),
+  saveReplyMarkdown: (path: string, content: string) => invoke<void>("save_reply_markdown", { path, content }),
   getCurrentSession: () => invoke<SessionView>("get_current_session"),
   listSessions: () => invoke<SessionInfo[]>("list_sessions"),
   newSession: () => invoke<SessionView>("new_session"),
@@ -401,6 +461,18 @@ export const ipc = {
   createDelegation: (title: string, goal: string) => invoke<DelegationTask>("create_delegation", { title, goal }),
   replyDelegation: (id: string, content: string) => invoke<DelegationTask>("reply_delegation", { id, content }),
   cancelDelegation: (id: string) => invoke<DelegationTask>("cancel_delegation", { id }),
+  listWorkspaces: () => invoke<Workspace[]>("list_workspaces"),
+  saveWorkspace: (id: number, name: string, root: string, data: WorkspaceData) => invoke<Workspace>("save_workspace", { id, name, root, data }),
+  deleteWorkspace: (id: number) => invoke<void>("delete_workspace", { id }),
+  detectWorkspace: (root: string) => invoke<Record<string, any>>("detect_workspace", { root }),
+  listCodeAgents: () => invoke<CodeAgentInfo[]>("list_code_agents"),
+  setCodeAgent: (kind: string, enabled: boolean, path: string) => invoke<CodeAgentInfo[]>("set_code_agent", { kind, enabled, path }),
+  listAgentRuns: () => invoke<AgentRun[]>("list_agent_runs"),
+  getAgentRun: (id: string, after = 0) => invoke<AgentRunView>("get_agent_run", { id, after }),
+  replyAgentRun: (id: string, content: string) => invoke<unknown>("reply_agent_run", { id, content }),
+  stopAgentRun: (id: string) => invoke<unknown>("stop_agent_run", { id }),
+  showAgentRunWindow: (id: string) => invoke<void>("show_agent_run_window", { id }),
+  finishAgentRunWorktree: (id: string, action: "apply" | "discard") => invoke<unknown>("finish_agent_run_worktree", { id, action }),
   toggleChat: () => invoke<void>("toggle_chat"),
   openMain: () => invoke<void>("open_main_window"),
   hideChat: () => invoke<void>("hide_chat"),

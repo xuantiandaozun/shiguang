@@ -5,19 +5,21 @@ import TodosTab from "../components/TodosTab";
 import TasksTab from "../components/TasksTab";
 import DelegationsTab from "../components/DelegationsTab";
 import SkillsTab from "../components/SkillsTab";
+import WorkspacesTab from "../components/WorkspacesTab";
 import UsageTab, { cacheHitRatio, formatPercent, formatTokenCount } from "../components/UsageTab";
 import SettingsTab from "../components/SettingsTab";
 import appIcon from "../assets/brand-mark.svg";
 import { ipc, onEvent } from "../lib/ipc";
 import type { LlmUsageTotals } from "../lib/ipc";
 
-type Tab = "servers" | "todos" | "tasks" | "delegations" | "skills" | "usage" | "settings";
+type Tab = "servers" | "todos" | "tasks" | "delegations" | "workspaces" | "skills" | "usage" | "settings";
 
-const NAV_ICONS: Record<string, IconName> = { todos: "todo", servers: "server", skills: "skill", usage: "usage", settings: "settings" };
+const NAV_ICONS: Record<string, IconName> = { todos: "todo", servers: "server", workspaces: "files", skills: "skill", usage: "usage", settings: "settings" };
 const TABS: Array<{ key: Tab; label: string }> = [
   { key: "todos", label: "待办事项" },
 
   { key: "servers", label: "服务器" },
+  { key: "workspaces", label: "工作区" },
 
   { key: "skills", label: "Skills" },
   { key: "usage", label: "用量" },
@@ -99,6 +101,7 @@ export default function MainWindow() {
         {tab === "tasks" && <TasksTab />}
         {tab === "servers" && <ServersTab />}
         {tab === "delegations" && <DelegationsTab />}
+        {tab === "workspaces" && <WorkspacesTab />}
         {tab === "skills" && <SkillsTab />}
         {tab === "usage" && <UsageTab />}
         {tab === "settings" && <SettingsTab />}

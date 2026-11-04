@@ -136,6 +136,12 @@ impl ExtServer {
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel::<Value>();
         self.inner.pending.lock().await.insert(id, tx);
+        // 多步真实输入（每步含等待页面安静）可能超过默认时长，由调用方按步数放宽。
+        let wait = params
+            .get("__timeout_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(35)
+            .clamp(5, 300);
         let req = json!({ "id": id, "action": action, "params": params });
         {
             let mut guard = self.inner.writer.lock().await;
@@ -144,7 +150,7 @@ impl ExtServer {
                 .await
                 .map_err(|e| anyhow!("发送扩展消息失败: {}", e))?;
         }
-        let resp = tokio::time::timeout(Duration::from_secs(35), rx)
+        let resp = tokio::time::timeout(Duration::from_secs(wait), rx)
             .await
             .map_err(|_| anyhow!("扩展响应超时"))?
             .map_err(|_| anyhow!("扩展连接中断"))?;

@@ -14,10 +14,48 @@ const MAX_NATIVE_IMAGES: usize = 8;
 const MAX_HISTORY_MESSAGES: usize = 200;
 const NATIVE_VISION_NOTICE: &str = "\n当前对话模型可以直接看图：用户附件和工具截图中的图片已嵌入消息，请直接理解画面。只要文字、想省 token 时用 ocr_image。";
 
-/// 单次任务的工具调用轮次预算。浏览器类任务动辄 10+ 轮，给足余量。
-const MAX_TOOL_ROUNDS: usize = 50;
-/// 倒数第几轮时注入收尾提醒
+/// 单次任务的工具调用轮次初始预算。快用完时按进度续：有进展每次加
+/// EXTEND_TOOL_ROUNDS，最多到 HARD_MAX_TOOL_ROUNDS；原地打转则按时收尾。
+const BASE_TOOL_ROUNDS: usize = 50;
+const EXTEND_TOOL_ROUNDS: usize = 30;
+const HARD_MAX_TOOL_ROUNDS: usize = 150;
+/// 倒数第几轮时判断是否续轮（不续则注入收尾提醒）
 const WARN_BEFORE_END: usize = 3;
+
+/// 一个预算窗口内的进展信号。
+#[derive(Debug, Default, Clone, PartialEq)]
+struct ProgressWindow {
+    /// 窗口内进度清单新完成的项数
+    todo_completed_delta: usize,
+    calls: usize,
+    failures: usize,
+    /// 重复调用提醒次数（同一工具+相同参数反复调用）
+    repeat_reminders: usize,
+}
+
+/// 本轮推荐技能的提示：放在对话末尾，不改动前面的技能目录（保持前缀缓存）。
+fn skill_relevance_note(name: &str, description: &str) -> String {
+    let description: String = description.chars().take(120).collect();
+    format!(
+        "<skill_relevance>\n本轮请求很可能适用技能 `{name}`（{description}）。动手前先 load_skill 读它，按其中步骤和注意事项做；读完发现不适用就按实际情况处理。\n</skill_relevance>"
+    )
+}
+
+/// 是否续轮：进度清单有新完成项就续；否则要求失败少、没有原地重复，
+/// 且（配置了 Jev 并有把握时）Jev 评估至少"有一些进展"。
+fn should_extend(window: &ProgressWindow, jev: Option<(f64, f64)>, min_confidence: f64) -> bool {
+    if window.todo_completed_delta > 0 {
+        return true;
+    }
+    if window.calls == 0 {
+        return false;
+    }
+    let healthy = window.repeat_reminders == 0 && window.failures as f64 <= window.calls as f64 * 0.3;
+    match jev {
+        Some((score, confidence)) if confidence >= min_confidence => healthy && score >= 1.0,
+        _ => healthy,
+    }
+}
 
 /// 模型可能以纯文本形式输出工具调用的标记对（DeepSeek 特殊 token / DSML / XML 风格）。
 /// 无工具请求（收尾总结）时模型尤其容易把这些写进正文，需过滤。
@@ -67,6 +105,7 @@ pub async fn run_chat(
         lookup_block,
         stored_compact,
         user_goal,
+        workspace_list,
     ) = {
         let state = app.state::<crate::AppState>();
         let mut history = state.db.load_chat(session_id, MAX_HISTORY_MESSAGES)?;
@@ -101,6 +140,7 @@ pub async fn run_chat(
         };
         let skills_block = state.skills.catalog_reminder();
         let lookup_block = state.lookup_cache.catalog_block();
+        let workspace_list = state.db.workspace_list().unwrap_or_default();
         (
             history,
             profile,
@@ -109,6 +149,7 @@ pub async fn run_chat(
             lookup_block,
             stored_compact,
             latest_user,
+            workspace_list,
         )
     };
 
@@ -121,6 +162,13 @@ pub async fn run_chat(
         "content": sys,
     })];
     if let Some(catalog) = &skills_block {
+        messages.push(json!({
+            "role": "system",
+            "content": catalog,
+        }));
+    }
+    // 工作区目录同样按稳定顺序紧随其后，集合不变则前缀缓存不变。
+    if let Some(catalog) = crate::workspaces::catalog_block(&workspace_list) {
         messages.push(json!({
             "role": "system",
             "content": catalog,
@@ -145,6 +193,12 @@ pub async fn run_chat(
     if native_vision {
         tail.push_str(NATIVE_VISION_NOTICE);
     }
+    // 上一轮因轮数用完停下时带过来的进度：作为检查点，继续时不必翻历史重建状态。
+    let carried = app.state::<crate::AppState>().session_todos.take_carried(session_id);
+    if let Some(todos) = &carried {
+        tail.push_str("\n\n");
+        tail.push_str(&crate::session_todo::carry_over_note(todos));
+    }
     messages.push(json!({
         "role": "system",
         "content": tail,
@@ -156,32 +210,63 @@ pub async fn run_chat(
     let http = reqwest::Client::new();
     let mut text_call_retries = 0usize;
     let mut repeat_guard = crate::repeat_guard::RepeatGuard::new();
+    let mut jev_workspace: Option<String> = None;
     let mut routed_categories: Vec<String> = if crate::system_one::configured(&settings) {
-        let cards = {
+        let (cards, skill_cards) = {
             let state = app.state::<crate::AppState>();
-            tools::registry_category_cards(&state.db)
+            // 对话里已经加载过的技能不再推荐。
+            let loaded = |name: &str| {
+                let tag = format!("<skill_content name=\"{name}\">");
+                messages.iter().any(|m| m.get("content").and_then(Value::as_str).is_some_and(|c| c.contains(&tag)))
+            };
+            let skills: Vec<crate::system_one::SkillCard> = state
+                .skills
+                .list()
+                .into_iter()
+                .filter(|s| s.enabled && !loaded(&s.name))
+                .map(|s| crate::system_one::SkillCard { name: s.name, description: s.description })
+                .collect();
+            (tools::registry_category_cards(&state.db), skills)
         };
-        match crate::system_one::route_tool_category(&http, &settings, &user_goal, cards).await {
-            Ok(route)
-                if route.confidence >= settings.system_one_min_confidence
-                    && route.choice != "multi_or_uncertain" =>
-            {
-                crate::llm::persist_usage(
-                    &app,
-                    "system_one_tool_router",
-                    &settings.system_one_model,
-                    &route.usage,
-                );
-                vec![route.choice]
+        let workspace_cards: Vec<crate::system_one::SkillCard> = workspace_list
+            .iter()
+            .map(|w| {
+                let aliases = crate::workspaces::list(w, "aliases").join("、");
+                crate::system_one::SkillCard {
+                    name: w.name.clone(),
+                    description: format!("{} 别名：{aliases}", crate::workspaces::text(w, "summary")),
+                }
+            })
+            .collect();
+        let excerpt = |name: &str| {
+            let state = app.state::<crate::AppState>();
+            let raw = state.skills.read_raw(name).ok()?;
+            Some(crate::skills::body_excerpt(&raw, 700))
+        };
+        let plan = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                finalize_cancelled(&app, session_id, request_message_id, "", &tool_log).await?;
+                return Ok(());
             }
-            Ok(route) => {
-                crate::llm::persist_usage(
-                    &app,
-                    "system_one_tool_router",
-                    &settings.system_one_model,
-                    &route.usage,
-                );
-                Vec::new()
+            result = crate::system_one::plan_turn(Some(&app), &http, &settings, &user_goal, cards, &skill_cards, excerpt, &workspace_cards) => result,
+        };
+        match plan {
+            Ok(plan) => {
+                jev_workspace = plan.workspace.clone();
+                if let Some(name) = &plan.skill {
+                    let description = skill_cards.iter().find(|s| &s.name == name).map(|s| s.description.as_str()).unwrap_or("");
+                    messages.push(json!({ "role": "system", "content": skill_relevance_note(name, description) }));
+                }
+                match plan.route {
+                    Some(route)
+                        if route.confidence >= settings.system_one_min_confidence
+                            && route.choice != "multi_or_uncertain" =>
+                    {
+                        vec![route.choice]
+                    }
+                    _ => Vec::new(),
+                }
             }
             Err(e) => {
                 log::warn!("System One 工具路由失败，回退完整工具目录: {e}");
@@ -191,24 +276,84 @@ pub async fn run_chat(
     } else {
         Vec::new()
     };
+    // 工作区：用户消息里点名（名称/别名）优先，其次 Jev 判断，再沿用会话已绑定的。
+    let bound_workspace = {
+        let state = app.state::<crate::AppState>();
+        let named = crate::workspaces::match_in_text(&workspace_list, &user_goal).or_else(|| {
+            let name = jev_workspace.as_deref()?;
+            workspace_list.iter().find(|w| w.name == name).map(|w| w.id)
+        });
+        if let Some(id) = named {
+            let _ = state.db.set_session_workspace(session_id, Some(id));
+            let _ = state.db.workspace_touch(id);
+        }
+        crate::workspaces::current(&state.db, session_id)
+    };
+    if let Some(ws) = &bound_workspace {
+        messages.push(json!({ "role": "system", "content": crate::workspaces::brief(ws) }));
+        // 路由精简了类别时，保证工作区与外派工具可用。
+        if !routed_categories.is_empty() {
+            for category in ["workspaces", "agents", "commands", "files"] {
+                if !routed_categories.iter().any(|c| c == category) {
+                    routed_categories.push(category.to_string());
+                }
+            }
+        }
+    }
 
-    for round in 0..MAX_TOOL_ROUNDS {
+    let mut budget = BASE_TOOL_ROUNDS;
+    let mut window = ProgressWindow::default();
+    let mut window_todo_base = app.state::<crate::AppState>().session_todos.completed_count(session_id);
+    let mut next_round = 0usize;
+    while next_round < budget {
+        let round = next_round;
+        next_round += 1;
         crate::commands::ensure_profile_usable(&settings, &settings.active_llm_profile_id)?;
         if cancel.is_cancelled() {
             finalize_cancelled(&app, session_id, request_message_id, "", &tool_log).await?;
             return Ok(());
         }
-        if round == MAX_TOOL_ROUNDS - WARN_BEFORE_END {
-            messages.push(json!({
-                "role": "system",
-                "content": "注意：本轮对话的工具调用预算即将用完，请优先收尾，用最少的步骤完成任务。",
-            }));
+        if round + WARN_BEFORE_END == budget {
+            let completed = app.state::<crate::AppState>().session_todos.completed_count(session_id);
+            window.todo_completed_delta = completed.saturating_sub(window_todo_base);
+            let jev = if budget < HARD_MAX_TOOL_ROUNDS && crate::system_one::configured(&settings) {
+                let todos = json!(app.state::<crate::AppState>().session_todos.list(session_id));
+                let recent = json!(tool_log.iter().rev().take(12).collect::<Vec<_>>());
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        finalize_cancelled(&app, session_id, request_message_id, "", &tool_log).await?;
+                        return Ok(());
+                    }
+                    result = crate::system_one::assess_progress(Some(&app), &http, &settings, &user_goal, &todos, &recent) => {
+                        result.map_err(|e| log::warn!("Jev 进度评估失败，按本地信号判断: {e}")).ok()
+                    }
+                }
+            } else {
+                None
+            };
+            if budget < HARD_MAX_TOOL_ROUNDS && should_extend(&window, jev, settings.system_one_min_confidence) {
+                budget = (budget + EXTEND_TOOL_ROUNDS).min(HARD_MAX_TOOL_ROUNDS);
+                log::info!("任务仍在推进，工具轮数预算延长到 {budget}（{window:?}，Jev={jev:?}）");
+                window = ProgressWindow::default();
+                window_todo_base = completed;
+            } else {
+                messages.push(json!({
+                    "role": "system",
+                    "content": "注意：本轮对话的工具调用预算即将用完，请优先收尾，用最少的步骤完成任务；没做完的部分用 todo_write 记下进度，下一轮继续。",
+                }));
+            }
         }
         trim_context(&app, &mut messages);
-        if let Ok(true) =
-            crate::compact::compact_if_needed(&app, &http, &cfg, &settings, &mut messages, &cancel)
-                .await
-        {
+        let compacted = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                finalize_cancelled(&app, session_id, request_message_id, "", &tool_log).await?;
+                return Ok(());
+            }
+            result = crate::compact::compact_if_needed(&app, &http, &cfg, &settings, &mut messages, &cancel) => result,
+        };
+        if let Ok(true) = compacted {
             let cover_until = history
                 .iter()
                 .map(|m| m.id)
@@ -348,12 +493,15 @@ pub async fn run_chat(
             }
             // Jev/System One 不是主模型的替代品。主模型在复杂页面上负责补充候选和
             // 参数，Jev 始终作为快速复核层参与；只有服务未配置/不可用时保持旧链路。
+            // 复核和实际执行必须处于同一个取消作用域，不能先等待复核请求结束。
+            let execution = async {
             let system_one_review = if call.name.starts_with("browser_")
                 && call.name != "browser_status"
                 && settings.system_one_browser_assist
                 && crate::system_one::configured(&settings)
             {
                 match crate::system_one::review_browser_action(
+                    &app,
                     &http,
                     &settings,
                     &user_goal,
@@ -366,12 +514,6 @@ pub async fn run_chat(
                         if review.choice != "execute"
                             && review.confidence >= settings.system_one_min_confidence =>
                     {
-                        crate::llm::persist_usage(
-                            &app,
-                            "system_one_browser",
-                            &settings.system_one_model,
-                            &review.usage,
-                        );
                         Some(json!({
                             "error": "System One 建议先修正或补充证据，浏览器动作尚未执行",
                             "system_one": {
@@ -382,15 +524,7 @@ pub async fn run_chat(
                             }
                         }))
                     }
-                    Ok(review) => {
-                        crate::llm::persist_usage(
-                            &app,
-                            "system_one_browser",
-                            &settings.system_one_model,
-                            &review.usage,
-                        );
-                        None
-                    }
+                    Ok(_) => None,
                     Err(e) => {
                         log::warn!("System One 浏览器复核失败，沿用现有安全链路: {e}");
                         None
@@ -399,7 +533,6 @@ pub async fn run_chat(
             } else {
                 None
             };
-            let execution = async {
                 if let Some(review) = system_one_review {
                     Ok(review)
                 } else {
@@ -439,6 +572,10 @@ pub async fn run_chat(
             } else {
                 "done"
             };
+            window.calls += 1;
+            if tool_status == "error" {
+                window.failures += 1;
+            }
             let content = model_tool_content(&app, &call.name, &call.id, &result);
             {
                 let state = app.state::<crate::AppState>();
@@ -467,6 +604,7 @@ pub async fn run_chat(
                 "content": content,
             }));
             if let Some(reminder) = repeat_guard.observe(&call.name, &call.arguments) {
+                window.repeat_reminders += 1;
                 round_reminders.push(reminder);
             }
         }
@@ -477,6 +615,10 @@ pub async fn run_chat(
         }
     }
 
+    // 预算用完而停下：未完成的进度带到下一轮，用户说"继续"时直接接上。
+    if app.state::<crate::AppState>().session_todos.mark_unfinished(session_id) {
+        log::info!("工具轮数用完，未完成进度已带到下一轮");
+    }
     finalize_with_summary(
         &app,
         &http,
@@ -585,10 +727,13 @@ async fn finalize_cancelled(
     };
     if !saved.is_empty() {
         let state = app.state::<crate::AppState>();
-        let response_message_id = state.db.save_chat(session_id, "assistant", &saved)?;
-        state
-            .db
-            .link_tool_calls_response(session_id, request_message_id, response_message_id)?;
+        // 持久化失败不能吞掉中断通知，让界面永远停在“中断中”。
+        let persisted = state.db.save_chat(session_id, "assistant", &saved)
+            .and_then(|response_message_id| state.db.link_tool_calls_response(
+                session_id, request_message_id, response_message_id));
+        if let Err(error) = persisted {
+            log::error!("保存中断回复失败: {error}");
+        }
     }
     let _ = app.emit("llm-cancelled", json!({ "content": cleaned }));
     let _ = app.emit("sessions-changed", ());
@@ -1012,6 +1157,11 @@ fn model_tool_content(app: &AppHandle, name: &str, call_id: &str, result: &Value
 
 /// 对话过长时压缩较早的工具结果：保留头尾，全文落到 temp/tool-spills。
 fn trim_context(app: &AppHandle, messages: &mut [Value]) {
+    // 先折叠被更新观察取代的旧结果（按内容是否过时），再按长度压缩剩下的较早结果。
+    let folded = crate::retention::fold_superseded(messages, crate::retention::FOLD_MIN_BATCH_CHARS);
+    if folded > 0 {
+        log::info!("折叠了 {folded} 条被更新观察取代的旧工具结果");
+    }
     let dir = crate::tempfs::tool_spill_dir(app).ok();
     crate::retention::trim_old_tool_messages(messages, dir.as_deref());
 }
@@ -1104,6 +1254,30 @@ fn native_image_user_message(path: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn round_budget_extends_only_on_progress() {
+        let progress = ProgressWindow { todo_completed_delta: 1, calls: 40, failures: 30, repeat_reminders: 3 };
+        assert!(should_extend(&progress, Some((0.1, 0.99)), 0.75), "进度清单有新完成项就续");
+        let healthy = ProgressWindow { todo_completed_delta: 0, calls: 40, failures: 5, repeat_reminders: 0 };
+        assert!(should_extend(&healthy, None, 0.75));
+        assert!(should_extend(&healthy, Some((1.4, 0.9)), 0.75));
+        assert!(!should_extend(&healthy, Some((0.3, 0.9)), 0.75), "Jev 有把握地判为原地打转");
+        assert!(should_extend(&healthy, Some((0.3, 0.4)), 0.75), "Jev 没把握时只看本地信号");
+        let looping = ProgressWindow { todo_completed_delta: 0, calls: 40, failures: 2, repeat_reminders: 2 };
+        assert!(!should_extend(&looping, None, 0.75));
+        let failing = ProgressWindow { todo_completed_delta: 0, calls: 40, failures: 20, repeat_reminders: 0 };
+        assert!(!should_extend(&failing, None, 0.75));
+        assert!(!should_extend(&ProgressWindow::default(), None, 0.75));
+    }
+
+    #[test]
+    fn skill_relevance_note_names_the_skill() {
+        let note = skill_relevance_note("toutiao-publish-zh", "头条号发文章");
+        assert!(note.contains("`toutiao-publish-zh`") && note.contains("load_skill"));
+        assert_eq!(crate::skills::body_excerpt("---\nname: a\ndescription: b\n---\n\n# 步骤\n正文", 5), "# 步骤\n");
+        assert_eq!(crate::skills::body_excerpt("没有 frontmatter", 100), "没有 frontmatter");
+    }
 
     #[test]
     fn tool_result_distinguishes_failure_from_intentional_stop() {

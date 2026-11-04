@@ -17,6 +17,7 @@ import type {
 import { useChatStore } from "../stores/chat";
 import type { UiMessage } from "../stores/chat";
 import Markdown from "../components/Markdown";
+import ReplyActions from "../components/ReplyActions";
 import ChatSlashMenu from "../components/ChatSlashMenu";
 import appIcon from "../assets/brand-mark.svg";
 import {
@@ -820,6 +821,8 @@ export default function ChatPanel() {
 const TOOL_LABELS: Record<string, string> = {
   list_servers: "查看服务器", get_server: "读取连接", create_server: "新增服务器", update_server: "修改服务器", delete_server: "删除连接", test_server_connection: "测试连接", ssh_exec: "执行远程命令", sftp_list: "浏览远程目录", sftp_stat: "查看远程文件", sftp_upload: "上传文件", sftp_download: "下载文件", list_remote_tasks: "查看远程任务", get_remote_task: "读取远程结果", wait_remote_task: "等待远程任务", cancel_remote_task: "取消远程任务",
   discover_capabilities: "发现所需能力",
+  workspace_list: "查看工作区", workspace_open: "打开工作区", workspace_detect: "识别项目", workspace_save: "保存工作区",
+  delegate_to_agent: "外派编码任务", await_agent: "等待外派结果", agent_reply: "回复外派智能体", stop_agent: "中断外派", list_agents: "查看编码智能体", finish_agent_worktree: "处理隔离改动",
   get_tool_call_history: "查询工具调用历史",
   recall_session: "查回对话原文",
   scan_desktop: "扫描目录",
@@ -856,6 +859,10 @@ const TOOL_LABELS: Record<string, string> = {
   browser_tabs: "查询标签页",
   browser_activate_tab: "切换标签页",
   browser_screenshot: "页面截图",
+  browser_capabilities: "识别网页操作能力",
+  browser_action: "操作网页控件",
+  browser_wait: "等待页面条件",
+  browser_extract: "提取网页数据",
   browser_evaluate: "执行页面脚本",
   browser_status: "诊断浏览器连接",
   find_browser_recipes: "查找浏览器经验",
@@ -1000,6 +1007,7 @@ function MessageBubble({
             </details>
           ))}
         {m.content && <Markdown content={m.content} />}
+        {m.content && !m.streaming && <ReplyActions content={m.content} />}
         {m.streaming && <span className="inline-block w-1.5 h-3.5 bg-sky-400 ml-0.5 animate-pulse" />}
         {m.plan && (
           <PlanCard
@@ -1166,6 +1174,11 @@ function AskUserCard({
           <div key={q.id}>
             {q.header && <div className="text-[11px] text-sky-300 mb-0.5">{q.header}</div>}
             <div className="text-xs text-slate-200 mb-1.5 leading-5">{q.question}</div>
+            {q.details && (
+              <pre className="mb-1.5 max-h-48 overflow-y-auto scrollbar-thin whitespace-pre-wrap break-words rounded-md bg-slate-800/80 px-2.5 py-1.5 text-[11px] leading-4 text-slate-300 font-sans">
+                {q.details}
+              </pre>
+            )}
             {q.options.length > 0 && (
               <div className="flex flex-col gap-1">
                 {q.options.map((opt) => {

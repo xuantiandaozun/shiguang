@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "reply-reader",
+  "description": "Allow chat to open a standalone reply reader",
+  "windows": ["chat"],
+  "permissions": ["core:webview:allow-create-webview-window"]
+}

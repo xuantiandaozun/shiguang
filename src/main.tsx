@@ -5,6 +5,8 @@ import ChatPanel from "./windows/ChatPanel";
 import MainWindow from "./windows/MainWindow";
 import Reminder from "./windows/Reminder";
 import DelegationWindow from "./windows/DelegationWindow";
+import AgentRunWindow from "./windows/AgentRunWindow";
+import ReplyReader from "./windows/ReplyReader";
 import "./index.css";
 import "./theme.css";
 import "./buttons.css";
@@ -20,6 +22,8 @@ const views: Record<string, React.ReactNode> = {
   terminal: <React.Suspense fallback={<div className="h-screen bg-slate-950 p-4 text-slate-300">正在打开终端…</div>}><ServerTerminal /></React.Suspense>,
   reminder: <Reminder />,
   delegation: <DelegationWindow />,
+  "agent-run": <AgentRunWindow />,
+  "reply-reader": <ReplyReader />,
 };
 
 document.body.dataset.window = route;

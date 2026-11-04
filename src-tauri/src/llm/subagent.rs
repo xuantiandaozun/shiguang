@@ -235,12 +235,18 @@ async fn run_job(
     cancel: &CancellationToken,
     role: &str,
 ) -> Value {
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(TIMEOUT_SECS),
-        run_inner(app, task, context, cancel, role),
-    )
-    .await
-    {
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return json!({
+            "status": "cancelled", "summary": "子代理已被用户中断",
+            "findings": [], "evidence": [], "blockers": ["用户中断"],
+        }),
+        result = tokio::time::timeout(
+            std::time::Duration::from_secs(TIMEOUT_SECS),
+            run_inner(app, task, context, cancel, role),
+        ) => result,
+    };
+    match result {
         Ok(Ok(text)) => parse_report(&text),
         Ok(Err(e)) => json!({
             "status": "error",

@@ -81,6 +81,28 @@ pub fn show_delegation(app: &AppHandle, id: &str) -> tauri::Result<()> {
     Ok(())
 }
 
+/// 外派运行窗口：不抢焦点、不置顶，用户可随时打开查看或插话。
+pub fn show_agent_run(app: &AppHandle, id: &str) -> tauri::Result<()> {
+    let label = format!("agent-run-{id}");
+    if let Some(window) = app.get_webview_window(&label) {
+        window.show()?;
+        window.unminimize()?;
+        return Ok(());
+    }
+    let url = WebviewUrl::App(format!("/#/agent-run?id={id}").into());
+    WebviewWindowBuilder::new(app, label, url)
+        .title("拾光 · 外派任务")
+        .inner_size(460.0, 680.0)
+        .min_inner_size(360.0, 480.0)
+        .decorations(false)
+        .transparent(true)
+        .resizable(true)
+        .focused(false)
+        .center()
+        .build()?;
+    Ok(())
+}
+
 /// 提醒弹窗：定位到屏幕右下角（贴着工作区边缘），置顶展示
 pub fn show_reminder(app: &AppHandle) {
     let Some(win) = app.get_webview_window("reminder") else {

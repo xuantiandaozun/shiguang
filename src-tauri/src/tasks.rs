@@ -260,11 +260,14 @@ impl TaskManager {
                     }
                 };
                 if should_kill {
-                    use std::os::windows::process::CommandExt;
-                    let _ = std::process::Command::new("taskkill")
+                    // 不阻塞 Tokio 工作线程，否则多个命令同时中断可能拖住取消通知。
+                    let result = tokio::process::Command::new("taskkill")
                         .args(["/PID", &pid.to_string(), "/T", "/F"])
                         .creation_flags(CREATE_NO_WINDOW)
-                        .output();
+                        .output().await;
+                    if let Err(error) = result {
+                        log::warn!("中断命令进程树 {pid} 失败: {error}");
+                    }
                     if let Ok(guard) = tasks_cancel.lock() {
                         if let Some(entry) = guard.get(&id_cancel) {
                             emit_changed(&app_cancel, &entry.info);
@@ -566,7 +569,7 @@ fn validate_argv(argv: &[String]) -> Result<(String, Vec<String>)> {
 
 /// CreateProcess 不会套用 PATHEXT。`lark-cli` 这类 npm 全局命令实际是 `.cmd`，
 /// 不解析的话 GUI 进程里会直接 program not found，模型再包一层 cmd /c。
-fn resolve_program(program: &str) -> String {
+pub(crate) fn resolve_program(program: &str) -> String {
     let path = Path::new(program);
     if path.is_absolute() || program.contains('/') || program.contains('\\') {
         return program.to_string();
@@ -574,8 +577,12 @@ fn resolve_program(program: &str) -> String {
     if path.extension().is_some() {
         return search_path(program).unwrap_or_else(|| program.to_string());
     }
-    if let Some(found) = search_path(program) {
-        return found;
+    // Windows 上无扩展名文件无法直接执行。nvm/Node 目录里 `npm` 旁边就有一个给 Git Bash 用的
+    // 无扩展名 shell 脚本，先命中它会报 os error 193，所以只按 PATHEXT 查找。
+    if cfg!(not(windows)) {
+        if let Some(found) = search_path(program) {
+            return found;
+        }
     }
     for ext in pathext() {
         if let Some(found) = search_path(&format!("{program}{ext}")) {
@@ -971,6 +978,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let shim = dir.join("dh-fake-cli.cmd");
         std::fs::write(&shim, "@echo off\n").unwrap();
+        // 同目录下无扩展名的 shell 脚本（如 nvm 的 npm）不能被选中
+        let sh_script = dir.join("dh-fake-cli");
+        std::fs::write(&sh_script, "#!/bin/sh\n").unwrap();
         let old_path = std::env::var_os("PATH");
         let mut paths = vec![dir.clone()];
         if let Some(path) = old_path.as_ref() {
@@ -983,6 +993,7 @@ mod tests {
             None => std::env::remove_var("PATH"),
         }
         let _ = std::fs::remove_file(&shim);
+        let _ = std::fs::remove_file(&sh_script);
         let _ = std::fs::remove_dir(&dir);
         assert!(
             resolved

@@ -56,8 +56,9 @@ impl TokenUsage {
         if usage.as_object().map(|o| o.is_empty()).unwrap_or(true) {
             return Self::default();
         }
-        let prompt = json_i64(usage.get("prompt_tokens"));
-        let completion = json_i64(usage.get("completion_tokens"));
+        // OpenAI 兼容接口用 prompt/completion_tokens；TypeSafe 与 Anthropic 风格用 input/output_tokens。
+        let prompt = json_i64(usage.get("prompt_tokens").or_else(|| usage.get("input_tokens")));
+        let completion = json_i64(usage.get("completion_tokens").or_else(|| usage.get("output_tokens")));
         let mut total = json_i64(usage.get("total_tokens"));
         if total <= 0 {
             total = prompt + completion;
@@ -148,7 +149,13 @@ pub async fn stream_chat(
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
-        let text = resp.text().await.unwrap_or_default();
+        let text = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Ok(AssistantResp { interrupted: true, ..Default::default() });
+            }
+            result = resp.text() => result.unwrap_or_default(),
+        };
         let short: String = text.chars().take(300).collect();
         return Err(anyhow!("LLM API 返回 {}: {}", status, short));
     }
@@ -268,6 +275,54 @@ fn delta_content_text(delta: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // 本地模拟服务一直不结束响应，确认取消不依赖服务端返回或网络超时。
+    async fn assert_stalled_response_cancels(response: &'static [u8]) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::time::{timeout, Duration};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+            socket.write_all(response).await.unwrap();
+            let _ = ready_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let request = tokio::spawn(async move {
+            stream_chat(
+                &reqwest::Client::builder().no_proxy().build().unwrap(),
+                &LlmConfig::new(&format!("http://{address}"), "test", "test"),
+                &json!({}), &task_cancel, |_| {}, |_| {},
+            ).await
+        });
+        timeout(Duration::from_secs(5), ready_rx).await.unwrap().unwrap();
+        // 让客户端进入响应正文读取阶段，再触发取消。
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        cancel.cancel();
+        let result = timeout(Duration::from_secs(1), request).await;
+        server.abort();
+        assert!(result.unwrap().unwrap().unwrap().interrupted);
+    }
+
+    #[tokio::test]
+    async fn cancels_while_waiting_for_response_headers() {
+        assert_stalled_response_cancels(b"").await;
+    }
+
+    #[tokio::test]
+    async fn cancels_stalled_error_body() {
+        assert_stalled_response_cancels(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 100000\r\n\r\nerror").await;
+    }
+
+    #[tokio::test]
+    async fn cancels_stalled_event_stream() {
+        assert_stalled_response_cancels(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 100000\r\n\r\n").await;
+    }
 
     #[test]
     fn usage_parses_deepseek_cache_fields() {

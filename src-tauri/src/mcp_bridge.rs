@@ -66,6 +66,22 @@ async fn dispatch(app: &AppHandle, r: &Value) -> anyhow::Result<Value> {
         return crate::servers::dispatch(app, name, &r.get("arguments").cloned().unwrap_or_else(|| json!({}))).await;
     }
     let id = r.get("id").and_then(Value::as_str).unwrap_or("");
+    match r.get("action").and_then(Value::as_str).unwrap_or("") {
+        "agent_ask" => {
+            let kind = r.get("kind").and_then(Value::as_str).unwrap_or("ask");
+            return crate::agents::mcp_ask(app, id, kind, r.get("payload").unwrap_or(&Value::Null));
+        }
+        "agent_poll" => return crate::agents::mcp_poll(app, id, r.get("qid").and_then(Value::as_str).unwrap_or("")),
+        // 仅调试构建：脚本驱动外派全流程（scripts/test-agent-runs.mjs），发布版不存在。
+        #[cfg(debug_assertions)]
+        "debug_agent_tool" => {
+            let name = r.get("name").and_then(Value::as_str).unwrap_or("");
+            let args = r.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let cancel = tokio_util::sync::CancellationToken::new();
+            return crate::agents::execute(app, name, &args, &cancel, 0).await;
+        }
+        _ => {}
+    }
     let value = match r.get("action").and_then(Value::as_str).unwrap_or("") {
         "create" => json!(crate::delegation::create(app,
             r.get("title").and_then(Value::as_str).unwrap_or(""),

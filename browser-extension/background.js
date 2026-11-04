@@ -1,4 +1,7 @@
 // 拾光浏览器桥：连接桌面端本地 WebSocket 服务，执行浏览器操作命令。
+// 真实输入引擎（runtime.js）：点击/输入/按键/上传经 chrome.debugger 的 Input.* 发出，
+// 动作后等待页面安静并汇报效果；页面侧判定在 page-runtime.js。
+importScripts("runtime.js");
 const WS_URL = "ws://127.0.0.1:17893";
 let ws = null;
 let reconnectTimer = null;
@@ -68,11 +71,22 @@ const attachedTabs = new Set();
 const networkWatch = new Map();
 // 同一标签必须固定执行面，否则 snapshot 的 ref 和 click/evaluate 会落在不同世界。
 const tabExec = new Map();
+// 每个标签一个真实输入运行时（网络/导航/原生对话框状态随调试会话保存）。
+const runtimes = new Map();
+// 记录新开的标签，动作后告诉 AI「点击打开了新标签」。
+const createdTabs = [];
+chrome.tabs.onCreated.addListener((tab) => {
+  createdTabs.push({ id: tab.id, opener: tab.openerTabId, url: tab.pendingUrl || tab.url || "", at: Date.now() });
+  if (createdTabs.length > 50) createdTabs.shift();
+});
 chrome.debugger.onDetach.addListener((source) => {
   if (source && source.tabId) {
     attachedTabs.delete(source.tabId);
     tabExec.delete(source.tabId);
     networkWatch.delete(source.tabId);
+    const rt = runtimes.get(source.tabId);
+    if (rt) rt.reset();
+    runtimes.delete(source.tabId);
   }
 });
 
@@ -96,6 +110,8 @@ function safeRequestSummary(request) {
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const tabId = source && source.tabId;
+  const rt = tabId != null ? runtimes.get(tabId) : null;
+  if (rt) rt.onEvent(method, params);
   const watch = tabId != null ? networkWatch.get(tabId) : null;
   if (!watch) return;
   if (method === "Network.requestWillBeSent" && params && params.request) {
@@ -151,17 +167,72 @@ async function debuggerEval(tabId, expression) {
   return r.result && r.result.value !== undefined ? r.result.value : null;
 }
 
-// debugger / CDP 注入源：Readability + page-api（与桌面端 cdp.rs 同构）
+// debugger / CDP 注入源：Readability + page-api + 语义操作 + 运行时页面侧（与桌面端 cdp.rs 同构）
+const PAGE_FILES = ["readability.js", "page-api.js", "page-operations.js", "page-runtime.js"];
 let pageApiSrc = null;
+let pageApiStamp = "";
+function stampOf(text) {
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36) + "-" + text.length.toString(36);
+}
 async function getPageApiSrc() {
   if (!pageApiSrc) {
-    const [readability, pageApi] = await Promise.all([
-      fetch(chrome.runtime.getURL("readability.js")).then((r) => r.text()),
-      fetch(chrome.runtime.getURL("page-api.js")).then((r) => r.text()),
-    ]);
-    pageApiSrc = readability + "\n" + pageApi;
+    const parts = await Promise.all(PAGE_FILES.map((f) => fetch(chrome.runtime.getURL(f)).then((r) => r.text())));
+    pageApiSrc = parts.join("\n");
+    pageApiStamp = stampOf(pageApiSrc);
   }
   return pageApiSrc;
+}
+
+// 在主世界执行依赖 window.__dh 的表达式。页面已有同一份脚本时只需一次往返；
+// 缺失或版本不同才注入（清掉旧 __dh 保证升级生效，ref 表保留）。
+async function callPageApi(tabId, expr) {
+  const src = await getPageApiSrc();
+  const stamp = JSON.stringify(pageApiStamp);
+  const guarded = `(async()=>{if(!(window.__dhSrcStamp===${stamp}&&window.__dh&&window.__dh.rt))return{__dhMissing:true};return{v:await (${expr})};})()`;
+  let res = await debuggerEval(tabId, guarded);
+  if (res && res.__dhMissing) {
+    await debuggerEval(tabId, `window.__dh=undefined;window.__dhVer=undefined;\n${src}\n;window.__dhSrcStamp=${stamp};true`);
+    res = await debuggerEval(tabId, guarded);
+  }
+  if (!res || res.__dhMissing) throw new Error("页面脚本注入失败");
+  return res.v === undefined ? null : res.v;
+}
+
+function pageCallViaDebugger(tabId, method, arg) {
+  return callPageApi(tabId, `window.__dh.rt[${JSON.stringify(method)}](${JSON.stringify(arg ?? null)})`);
+}
+
+async function getRuntime(tabId) {
+  await ensureDebugger(tabId);
+  let rt = runtimes.get(tabId);
+  if (!rt) {
+    rt = new self.DhRuntime.TabRuntime({
+      send: (method, params) => chrome.debugger.sendCommand({ tabId }, method, params || {}),
+      page: (method, arg) => pageCallViaDebugger(tabId, method, arg),
+      newTabs: async (since) => createdTabs
+        .filter((t) => t.at >= since && t.opener === tabId)
+        .map(({ id, url }) => ({ id, url })),
+    });
+    runtimes.set(tabId, rt);
+  }
+  return rt;
+}
+
+// 真实输入引擎；返回 null 表示该标签只能走旧的页面内实现（强制 scripting 或调试器无法附着）。
+async function runEngine(tab, payload, channel) {
+  if (channel === "extension" || tabExec.get(tab.id) === "extension") return null;
+  let rt;
+  try {
+    rt = await getRuntime(tab.id);
+  } catch (e) {
+    if (isChannelError(e)) return null;
+    throw e;
+  }
+  tabExec.set(tab.id, "debugger");
+  const result = Array.isArray(payload.steps) ? await rt.run(payload.steps) : await rt.act(payload);
+  return { ...result, engine: "trusted-input" };
 }
 
 async function handleMessage(raw) {
@@ -295,25 +366,28 @@ const CALLS = {
   type: (ref, text, clear) => window.__dh.type(ref, text, clear),
   scroll: (dir, amount, ref) => window.__dh.scroll(dir, amount, ref),
   info: () => window.__dh.info(),
+  capabilities: () => window.__dh.capabilities(),
+  action: (args) => window.__dh.action(args),
+  probe: (args) => window.__dh.probe(args),
+  extract: (args) => window.__dh.extract(args),
 };
 
 async function runInTab(tabId, action, args) {
   await chrome.scripting.executeScript({
     target: { tabId },
-    files: ["readability.js", "page-api.js"],
+    files: PAGE_FILES,
   });
   const [r] = await chrome.scripting.executeScript({ target: { tabId }, func: CALLS[action], args });
   if (r && r.error) throw new Error(r.error.message || String(r.error));
   const res = r ? r.result : null;
-  if (res && typeof res === "object" && typeof res.error === "string") throw new Error(res.error);
+  if (res && typeof res === "object" && typeof res.error === "string" && !["capabilities", "action", "probe", "extract"].includes(action)) throw new Error(res.error);
   return res;
 }
 
 // debugger 通道：把 page-api.js 源码注入主世界后调用 window.__dh（与桌面端 cdp.rs 同构）
 async function runInTabViaDebugger(tabId, action, args) {
-  const src = await getPageApiSrc();
-  const res = await debuggerEval(tabId, `${src}\n;window.__dh.${action}(...${JSON.stringify(args)});`);
-  if (res && typeof res === "object" && typeof res.error === "string") throw new Error(res.error);
+  const res = await callPageApi(tabId, `window.__dh.${action}(...${JSON.stringify(args)})`);
+  if (res && typeof res === "object" && typeof res.error === "string" && !["capabilities", "action", "probe", "extract"].includes(action)) throw new Error(res.error);
   return res;
 }
 
@@ -349,9 +423,8 @@ async function runInTabAuto(tabId, action, args, channel) {
 
 async function evalViaDebugger(tabId, expression, ref, suppliedArgs) {
   if (ref != null) {
-    const src = await getPageApiSrc();
-    const wrapped = `${src}\n;(async()=>{const $el=window.__dh.ref(${JSON.stringify(ref)});if(!$el)throw new Error(${JSON.stringify(`元素 [${ref}] 不存在或已失效，请在当前通道重新获取快照`)});const $args=${JSON.stringify(suppliedArgs)};return await (${expression});})()`;
-    return debuggerEval(tabId, wrapped);
+    const wrapped = `(async()=>{const $el=window.__dh.ref(${JSON.stringify(ref)});if(!$el)throw new Error(${JSON.stringify(`元素 [${ref}] 不存在或已失效，请在当前通道重新获取快照`)});const $args=${JSON.stringify(suppliedArgs)};return await (${expression});})()`;
+    return callPageApi(tabId, wrapped);
   }
   if (suppliedArgs != null) {
     const wrapped = `(async()=>{const $args=${JSON.stringify(suppliedArgs)};return await (${expression});})()`;
@@ -366,7 +439,7 @@ async function evalInPage(tabId, expression, ref, suppliedArgs) {
   if (ref != null) {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ["readability.js", "page-api.js"],
+      files: PAGE_FILES,
     });
     const [r] = await chrome.scripting.executeScript({
       target: { tabId },
@@ -473,7 +546,8 @@ async function handle(action, p) {
     }
     case "click": {
       const t = await activeTab();
-      return runInTabAuto(t.id, "click", [p.ref], p.channel);
+      const r = await runEngine(t, { action: "click", target: { ref: p.ref } }, p.channel);
+      return r ? markDebugger(r) : runInTabAuto(t.id, "click", [p.ref], p.channel);
     }
     case "find": {
       const t = await activeTab();
@@ -494,7 +568,9 @@ async function handle(action, p) {
     }
     case "type": {
       const t = await activeTab();
-      return runInTabAuto(t.id, "type", [p.ref, p.text ?? "", p.clear !== false], p.channel);
+      const step = { action: "type", target: { ref: p.ref }, text: p.text ?? "", clear: p.clear !== false, ...(p.newline ? { newline: p.newline } : {}) };
+      const r = await runEngine(t, step, p.channel);
+      return r ? markDebugger(r) : runInTabAuto(t.id, "type", [p.ref, p.text ?? "", p.clear !== false], p.channel);
     }
     case "scroll": {
       const t = await activeTab();
@@ -516,6 +592,26 @@ async function handle(action, p) {
       const t = await activeTab();
       const dataUrl = await chrome.tabs.captureVisibleTab(t.windowId, { format: "png" });
       return { png_base64: String(dataUrl).split(",")[1] || "" };
+    }
+    case "page_operation": {
+      if (!["capabilities", "action", "probe", "extract", "capture"].includes(p.method)) throw new Error("未知页面操作方法");
+      const t = await activeTab();
+      const args = p.args || {};
+      if (p.method === "capture") {
+        // 按画面定位用的视口截图，坐标与引擎的真实鼠标同一参照系。
+        const rt = await getRuntime(t.id);
+        tabExec.set(t.id, "debugger");
+        return { result: await rt.capture(args), via: "debugger" };
+      }
+      if (p.method === "action" && (Array.isArray(args.steps) || (args.action && args.action !== "locate"))) {
+        const r = await runEngine(t, args, p.channel);
+        if (r) return { result: r, via: "debugger" };
+        if (Array.isArray(args.steps) || !["click", "fill", "select", "set_checked"].includes(args.action)) {
+          return { result: { error: "该动作需要真实输入引擎（扩展调试通道），当前标签页无法附着调试器", code: "engine_unavailable" } };
+        }
+      }
+      const result = await runInTabAuto(t.id, p.method, [args], p.channel);
+      return { result, ...(result?.via ? { via: result.via } : {}) };
     }
     case "evaluate": {
       const t = await activeTab();

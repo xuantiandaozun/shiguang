@@ -644,18 +644,34 @@ pub async fn send_chat_message(
     Ok(msg_id)
 }
 
+/// 阅读窗口通过系统保存对话框选定位置后导出 Markdown。
+#[tauri::command]
+pub async fn save_reply_markdown(window: tauri::WebviewWindow, path: String, content: String) -> Result<(), String> {
+    if !window.label().starts_with("reply-") {
+        return Err("仅支持在回复详情窗口保存".into());
+    }
+    let target = std::path::PathBuf::from(path);
+    if !target.is_absolute() || !target.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md")) {
+        return Err("请选择绝对路径并使用 .md 扩展名".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::write(target, content.as_bytes()).map_err(|e| format!("保存失败：{e}"))
+    }).await.map_err(|e| e.to_string())?
+}
+
 /// 中断当前回复：模型连接/流式输出、正在执行的工具、子代理以及本轮启动的
 /// 后台命令都会收到取消信号；命令会强制结束整棵进程树。
 #[tauri::command]
 pub fn stop_chat_message(state: State<AppState>) -> Result<(), String> {
     let token = state.chat_cancel.lock().map_err(|e| e.to_string())?.take();
+    // 先广播取消，避免确认框或子代理的锁延迟主请求和命令进程的中断。
+    if let Some(t) = &token {
+        t.cancel();
+    }
     state.ask_user.dismiss();
     state.subagents.cancel_all();
     match token {
-        Some(t) => {
-            t.cancel();
-            Ok(())
-        }
+        Some(_) => Ok(()),
         None => Err("当前没有进行中的回复".to_string()),
     }
 }
@@ -799,6 +815,84 @@ pub async fn reply_delegation(app: AppHandle, id: String, content: String) -> Re
 #[tauri::command]
 pub async fn cancel_delegation(app: AppHandle, id: String) -> Result<crate::db::DelegationTask, String> {
     crate::delegation::cancel(&app, &id).await.map_err(|e| e.to_string())
+}
+
+// ---------- workspaces & code agents ----------
+
+#[tauri::command]
+pub fn list_workspaces(state: State<'_, AppState>) -> Result<Vec<crate::db::WorkspaceRow>, String> {
+    state.db.workspace_list().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    name: String,
+    root: String,
+    data: serde_json::Value,
+) -> Result<crate::db::WorkspaceRow, String> {
+    if !std::path::Path::new(root.trim()).is_dir() {
+        return Err(format!("根目录不存在：{root}"));
+    }
+    let data = crate::workspaces::normalize_data(&data).map_err(|e| e.to_string())?;
+    let saved = state.db.workspace_save(id, &name, &root, &data).map_err(|e| e.to_string())?;
+    let _ = app.emit("workspaces-changed", saved.id);
+    Ok(saved)
+}
+
+#[tauri::command]
+pub fn delete_workspace(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    state.db.workspace_delete(id).map_err(|e| e.to_string())?;
+    let _ = app.emit("workspaces-changed", id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn detect_workspace(root: String) -> Result<serde_json::Value, String> {
+    crate::workspaces::detect(&root).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_code_agents(app: AppHandle) -> Result<Vec<crate::agents::AgentInfo>, String> {
+    Ok(crate::agents::detect(&app).await)
+}
+
+#[tauri::command]
+pub async fn set_code_agent(app: AppHandle, kind: String, enabled: bool, path: String) -> Result<Vec<crate::agents::AgentInfo>, String> {
+    crate::agents::set_config(&app.state::<AppState>().db, &kind, enabled, &path).map_err(|e| e.to_string())?;
+    Ok(crate::agents::detect(&app).await)
+}
+
+#[tauri::command]
+pub fn list_agent_runs(state: State<'_, AppState>) -> Result<Vec<crate::db::AgentRunRow>, String> {
+    state.db.agent_run_list(100).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_agent_run(app: AppHandle, id: String, after: Option<i64>) -> Result<serde_json::Value, String> {
+    crate::agents::run_view(&app, &id, after.unwrap_or(0)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn reply_agent_run(app: AppHandle, id: String, content: String) -> Result<serde_json::Value, String> {
+    crate::agents::reply(&app, &id, &content, "user").await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn stop_agent_run(app: AppHandle, id: String) -> Result<serde_json::Value, String> {
+    crate::agents::stop(&app, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn show_agent_run_window(app: AppHandle, id: String) -> Result<(), String> {
+    crate::windows::show_agent_run(&app, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn finish_agent_run_worktree(app: AppHandle, id: String, action: String) -> Result<serde_json::Value, String> {
+    crate::agents::finish_worktree(&app, &id, &action).await.map_err(|e| e.to_string())
 }
 
 // ---------- windows ----------

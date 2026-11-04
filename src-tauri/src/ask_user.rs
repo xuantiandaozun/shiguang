@@ -17,6 +17,7 @@ const MAX_HEADER_CHARS: usize = 40;
 const MAX_LABEL_CHARS: usize = 40;
 const MAX_DESC_CHARS: usize = 80;
 const MAX_CUSTOM_CHARS: usize = 500;
+const MAX_DETAILS_CHARS: usize = 1500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AskOption {
@@ -35,6 +36,9 @@ pub struct AskQuestion {
     pub options: Vec<AskOption>,
     #[serde(default)]
     pub multi_select: bool,
+    /// 多行预览（如将要保存的内容），卡片里原样显示
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -190,6 +194,11 @@ fn parse_question(item: &Value, seen: &mut HashSet<String>) -> Result<AskQuestio
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let options = parse_options(item)?;
+    let details = item
+        .get("details")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().chars().take(MAX_DETAILS_CHARS).collect::<String>())
+        .filter(|s| !s.is_empty());
     if options.is_empty() && multi_select {
         bail!("没有选项时不能设为多选");
     }
@@ -199,6 +208,7 @@ fn parse_question(item: &Value, seen: &mut HashSet<String>) -> Result<AskQuestio
         header,
         options,
         multi_select,
+        details,
     })
 }
 

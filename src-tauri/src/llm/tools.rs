@@ -3,7 +3,7 @@ use crate::organizer::{executor, rules, scanner};
 use anyhow::{anyhow, bail, Result};
 use chrono::TimeZone;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -19,6 +19,7 @@ pub fn core_tool_names() -> Vec<String> {
         "load_skill".to_string(),
         "ask_user".to_string(),
         "todo_write".to_string(),
+        "workspace_open".to_string(),
     ]
 }
 
@@ -39,6 +40,10 @@ fn tools_for_category(category: &str) -> &'static [&'static str] {
             "browser_navigate",
             "browser_snapshot",
             "browser_find",
+            "browser_capabilities",
+            "browser_action",
+            "browser_wait",
+            "browser_extract",
             "browser_network_observe",
             "browser_request",
             "browser_cookies",
@@ -73,6 +78,8 @@ fn tools_for_category(category: &str) -> &'static [&'static str] {
         "servers" => &["list_servers", "get_server", "create_server", "update_server", "delete_server", "test_server_connection", "ssh_exec", "sftp_list", "sftp_stat", "sftp_upload", "sftp_download", "list_remote_tasks", "get_remote_task", "wait_remote_task", "cancel_remote_task"],
         "system" => &["get_system_info"],
         "delegation" => &["run_subagent", "await_subagent", "reply_subagent"],
+        "workspaces" => crate::workspaces::TOOL_NAMES,
+        "agents" => crate::agents::TOOL_NAMES,
         "skills" => &[
             "list_skills",
             "load_skill",
@@ -103,6 +110,8 @@ fn category_for_tool(name: &str) -> &'static str {
         "system",
         "delegation",
         "skills",
+        "workspaces",
+        "agents",
         "workflows",
     ] {
         if tools_for_category(category).contains(&name) {
@@ -133,6 +142,9 @@ fn retired_tool(name: &str) -> bool {
 pub fn definitions() -> Value {
     let Value::Array(mut tools) = legacy_definitions() else { return json!([]); };
     tools.retain(|tool| !retired_tool(tool.pointer("/function/name").and_then(Value::as_str).unwrap_or("")));
+    tools.extend(crate::browser::operations::definitions());
+    tools.extend(crate::workspaces::definitions());
+    tools.extend(crate::agents::definitions());
     Value::Array(tools)
 }
 
@@ -157,9 +169,9 @@ fn builtin_definitions() -> Value {
                             "type": "array",
                             "items": {
                                 "type": "string",
-                                "enum": ["files", "browser", "web", "organize", "todos", "profile", "commands", "servers", "system", "delegation", "skills"]
+                                "enum": ["files", "browser", "web", "organize", "todos", "profile", "commands", "servers", "system", "delegation", "skills", "workspaces", "agents"]
                             },
-                            "description": "要检索的能力：files=本地文件/图片，browser=已打开的网页，web=公开网页搜索/抓取，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，servers=拾光已保存的SSH连接、服务器新增修改删除、远程命令和SFTP传输，system=硬件与进程，delegation=资料、文件和浏览器子代理，skills=管理技能"
+                            "description": "要检索的能力：files=本地文件/图片，browser=已打开的网页，web=公开网页搜索/抓取，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，servers=拾光已保存的SSH连接、服务器新增修改删除、远程命令和SFTP传输，system=硬件与进程，delegation=资料、文件和浏览器子代理，skills=管理技能，workspaces=登记的固定项目（路径、部署、规则），agents=把代码修改外派给 Claude Code / Codex"
                         }
                     },
                     "required": ["query", "categories"]
@@ -462,7 +474,7 @@ fn builtin_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "browser_click",
-                "description": "点击快照中编号对应的元素。返回 changed、焦点、展开状态和可见浮层数量的前后观察结果。若出现新浮层或控件展开，下一步重新 snapshot 再决定输入、点击或滚动，不要沿用旧编号猜选项；changed=false 或 covered_by 时根据返回提示调整。",
+                "description": "用真实鼠标点击快照/查找结果中编号对应的元素（扩展调试通道，isTrusted）。点击前自动滚动、等位置稳定并检查遮挡，被遮挡时不点并报告遮挡者；元素被重渲染时按指纹自动重定位。点击后等页面安静并返回 effect：URL/导航、打开或关闭的弹窗、提示文字、表单错误、发出的请求、新标签、原生对话框。出现新浮层时再局部 snapshot 选择其中的元素；changed=false 时先核对目标，不要原样重试。连续多步操作优先用 browser_action 的 steps。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -476,13 +488,14 @@ fn builtin_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "browser_type",
-                "description": "向编号控件输入文字。它会通用地解析真实编辑面：控件本身、可编辑后代、aria-controls/owns 关联控件、点击后获得焦点的编辑器或新浮层中的搜索框，适用于组合框、日期/标签选择器和富文本等框架组件。原生 select 支持精确或唯一模糊匹配，多个候选时拒绝猜测。返回 value/resolved_from/opened_control/match_mode 供核验。对自定义选择器，输入成功只代表搜索条件已写入，不代表选项已选中；随后必须重新 snapshot 观察候选并点击、再读回最终值。",
+                "description": "向编号控件输入文字：先用真实点击聚焦（容器会解析到其中的输入框/编辑器），再用真实键盘输入（扩展调试通道，isTrusted），React 受控输入、ProseMirror/Draft 等富文本编辑器都按真人输入处理，不需要再写 evaluate 补丁。输入后读回校验（忽略占位文字、编辑器的空白归一化），返回 verified、value 和 effect。富文本换行默认 Shift+Enter（聊天框回车可能直接发送），文章编辑器要分段时传 newline=enter。原生 select 按选项文字选择；自定义下拉输入只是写入搜索词，选项用 browser_action select 选择。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "ref": { "type": "integer", "description": "browser_snapshot 返回的元素编号" },
                         "text": { "type": "string", "description": "要输入的内容或搜索词；用户给的是模糊业务名称时可先输入缩小候选，选择动作由后续快照与点击完成" },
-                        "clear": { "type": "boolean", "description": "输入前是否清空原有内容，默认 true" }
+                        "clear": { "type": "boolean", "description": "输入前是否清空原有内容，默认 true" },
+                        "newline": { "type": "string", "enum": ["shift_enter", "enter", "insert"], "description": "富文本里的换行方式，默认 shift_enter；文章编辑器需要分段时用 enter" }
                     },
                     "required": ["ref", "text"]
                 }
@@ -1285,6 +1298,14 @@ pub fn registry_definitions(db: &Db, native_vision: bool) -> Value {
     if entries.is_empty() {
         return chat_definitions(native_vision);
     }
+    // 种子定义只在首次启动写入；用户没改过的内置工具（revision=1）应随版本升级，
+    // 否则新版的说明和参数永远到不了模型。改过的（revision>1）保持原样。
+    let current: HashMap<String, Value> = definitions()
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| Some((d.pointer("/function/name")?.as_str()?.to_string(), d.clone())))
+        .collect();
     Value::Array(
         entries
             .into_iter()
@@ -1292,6 +1313,11 @@ pub fn registry_definitions(db: &Db, native_vision: bool) -> Value {
             .filter(|entry| entry.name != "read_image" || crate::commands::load_settings(db).read_image_enabled)
             .map(|entry| {
                 let mut definition = entry.definition;
+                if entry.source == "builtin" && entry.revision <= 1 {
+                    if let Some(fresh) = current.get(&entry.name) {
+                        definition = fresh.clone();
+                    }
+                }
                 if entry.name == "discover_capabilities" && entry.executor_kind == "builtin" {
                     if let Some(categories) = definition.pointer_mut("/function/parameters/properties/categories/items/enum").and_then(Value::as_array_mut) {
                         if !categories.iter().any(|v| v.as_str() == Some("servers")) { categories.push(json!("servers")); }
@@ -1724,6 +1750,12 @@ pub async fn execute(
     }
     if crate::server_tools::definitions().iter().any(|t| t["name"].as_str() == Some(name)) {
         return crate::servers::dispatch(app, name, args).await;
+    }
+    if crate::workspaces::TOOL_NAMES.contains(&name) {
+        return crate::workspaces::execute(app, name, args, cancel, session_id).await;
+    }
+    if crate::agents::TOOL_NAMES.contains(&name) {
+        return crate::agents::execute(app, name, args, cancel, session_id).await;
     }
     match name {
         "discover_capabilities" => {
@@ -2201,6 +2233,7 @@ pub async fn execute(
         "save_browser_recipe" => save_browser_recipe(app, db, args),
         "run_browser_recipe" => run_browser_recipe(app, db, args).await,
         "browser_fast_loop" => crate::system_one::fast_browser_loop(app, args).await,
+        n if crate::browser::operations::TOOL_NAMES.contains(&n) => crate::browser::operations::execute(app, n, args, cancel).await,
         n if n.starts_with("browser_") => browser_tool(app, n, args).await,
         "propose_organization" => propose_organization(app, db, args),
         "add_todo" => {
@@ -2378,7 +2411,19 @@ pub async fn execute(
                     "命令执行功能未启用。请用户在主窗口「设置 → 后台任务与命令执行」中打开开关。"
                 );
             }
-            command_tool(app, n, args, cancel).await
+            // 会话绑定了工作区时，未给 workdir 的命令默认在工作区根目录执行。
+            let mut args = args.clone();
+            if matches!(n, "run_command" | "run_command_background")
+                && args.get("workdir").and_then(Value::as_str).map_or(true, |w| w.trim().is_empty())
+                && args.get("files").is_none()
+            {
+                if let Some(ws) = crate::workspaces::current(db, session_id) {
+                    if Path::new(&ws.root).is_dir() {
+                        args["workdir"] = json!(ws.root);
+                    }
+                }
+            }
+            command_tool(app, n, &args, cancel).await
         }
         "get_system_info" => {
             let category = args
@@ -3273,7 +3318,8 @@ mod capability_tests {
                 "recall_session",
                 "load_skill",
                 "ask_user",
-                "todo_write"
+                "todo_write",
+                "workspace_open"
             ]
         );
     }
@@ -3437,6 +3483,34 @@ mod capability_tests {
             .and_then(Value::as_str)
             .unwrap()
             .contains("HttpOnly"));
+    }
+
+    #[test]
+    fn browser_operations_are_added_to_legacy_registry_and_routed_inventory() {
+        let path = std::env::temp_dir().join(format!("shiguang-page-ops-{}.db", uuid::Uuid::new_v4()));
+        let db = Db::new(&path).unwrap();
+        // Simulate a pre-SDK registry with one existing user-maintained definition.
+        db.seed_tool_registry(&[crate::db::ToolRegistryEntry {
+            name: "browser_type".into(), category: "browser".into(), executor_kind: "builtin".into(),
+            executor_config: json!({}), definition: definitions_for(&["browser_type"])[0].clone(),
+            enabled: true, source: "builtin".into(), revision: 1, updated_at: crate::db::now_str(),
+        }]).unwrap();
+        seed_registry(&db).unwrap();
+        let routed = registry_definitions_for_categories(&db, &["browser".into()], false);
+        for name in crate::browser::operations::TOOL_NAMES {
+            assert!(routed.as_array().unwrap().iter().any(|t| t["function"]["name"] == *name), "missing {name}");
+        }
+        let mut entry = db.tool_registry_entry("browser_action").unwrap().unwrap();
+        entry.definition["function"]["description"] = json!("自定义操作描述");
+        db.put_tool_registry_entry(&entry).unwrap();
+        assert_eq!(seed_registry(&db).unwrap(), 0);
+        assert_eq!(db.tool_registry_entry("browser_action").unwrap().unwrap().definition["function"]["description"], "自定义操作描述");
+        entry.enabled = false;
+        db.put_tool_registry_entry(&entry).unwrap();
+        let routed = registry_definitions_for_categories(&db, &["browser".into()], false);
+        assert!(!routed.as_array().unwrap().iter().any(|t| t["function"]["name"] == "browser_action"));
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

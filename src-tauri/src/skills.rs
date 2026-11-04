@@ -724,6 +724,16 @@ fn xml_escape(text: &str) -> String {
 }
 
 /// 包一层模型可识别的技能正文标记；正文里若出现结束标签则转义，避免提前闭合。
+/// 技能正文开头（去掉 frontmatter），给技能推荐复核用。
+pub fn body_excerpt(raw: &str, max_chars: usize) -> String {
+    let raw = raw.trim_start_matches('\u{feff}');
+    let body = raw
+        .strip_prefix("---")
+        .and_then(|rest| rest.find("\n---").map(|end| &rest[end + 4..]))
+        .unwrap_or(raw);
+    body.trim().chars().take(max_chars).collect()
+}
+
 pub fn wrap_skill_content(name: &str, body: &str) -> String {
     let safe = body.replace("</skill_content>", "&lt;/skill_content>");
     format!(

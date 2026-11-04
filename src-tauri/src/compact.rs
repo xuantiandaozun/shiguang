@@ -204,14 +204,8 @@ pub async fn compact_if_needed(
     }
     let retain_bytes =
         if settings.system_one_context_assist && crate::system_one::configured(settings) {
-            match crate::system_one::context_retention_strategy(http, settings, messages).await {
+            match crate::system_one::context_retention_strategy(app, http, settings, messages).await {
                 Ok(answer) => {
-                    crate::llm::persist_usage(
-                        app,
-                        "system_one_context",
-                        &settings.system_one_model,
-                        &answer.usage,
-                    );
                     if answer.confidence < settings.system_one_min_confidence {
                         RETAIN_TAIL_BYTES
                     } else {
