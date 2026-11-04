@@ -1,0 +1,82 @@
+[
+  {
+    "name": "run_subagent",
+    "label": "子代理处理子任务",
+    "description": "按任务自动委托，无须询问是否使用。research=资料调研，files=指定范围文件分析，browser=浏览器操作与实测。给准确目标、对象/环境、必要上下文、允许/排除范围、证据与产出绝对路径、少量关键节点。浏览器节点回传暂停后用reply_subagent审核/纠偏；阶段内部自主执行，不实时监控，不同时操作同一浏览器。简单单步直接完成。子代理不得再委托。",
+    "parameters": {
+      "properties": {
+        "await": {
+          "description": "仅 run_in_background=true 时有效：true 则挂起直到结束。默认 false",
+          "type": "boolean"
+        },
+        "context": {
+          "description": "可选：子代理需要的背景信息（关键文件路径、目标格式、用户偏好等）",
+          "type": "string"
+        },
+        "role": {
+          "description": "默认auto；浏览器操作明确选browser",
+          "enum": [
+            "auto",
+            "research",
+            "files",
+            "browser"
+          ],
+          "type": "string"
+        },
+        "run_in_background": {
+          "description": "true 时立即返回 job_id，子代理在后台跑。默认 false（同步等待汇报）",
+          "type": "boolean"
+        },
+        "task": {
+          "description": "子任务描述：具体、自包含，写清要做什么、结论里要包含什么",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "reply_subagent",
+    "label": "审核或纠正子任务",
+    "description": "用原job_id回答浏览器子代理的问题、审核关键节点或纠偏。明确继续阶段和边界；不能代替用户回答waiting_user。暂停或错误可补充意见继续，勿另起任务。",
+    "parameters": {
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "job_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id",
+        "content"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "await_subagent",
+    "label": "等待子代理",
+    "description": "挂起当前对话，直到指定后台子代理结束，再带着结构化汇报继续。等待期间不消耗工具轮次。不要用它轮询仍在运行的任务。",
+    "parameters": {
+      "properties": {
+        "job_id": {
+          "description": "run_subagent 返回的 job_id",
+          "type": "string"
+        },
+        "timeout_secs": {
+          "description": "最长等待秒数，默认 300",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "type": "object"
+    }
+  }
+]

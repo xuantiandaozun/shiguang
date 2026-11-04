@@ -1,0 +1,26 @@
+{
+  "id": "files",
+  "name": "文件",
+  "version": "1.0.0",
+  "description": "本机文件读写、搜索（持久化索引）、图片理解与 OCR。",
+  "order": 10,
+  "tools": [
+    "tools.json"
+  ],
+  "categories": {
+    "files": {
+      "label": "文件",
+      "tools": [
+        "scan_desktop",
+        "search_files",
+        "read_file",
+        "get_file_info",
+        "create_file",
+        "clear_temp_files",
+        "edit_file",
+        "read_image",
+        "ocr_image"
+      ]
+    }
+  }
+}

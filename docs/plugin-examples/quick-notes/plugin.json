@@ -1,0 +1,19 @@
+{
+  "id": "quick-notes",
+  "name": "快速便签",
+  "version": "1.0.0",
+  "description": "示例插件：记几句话、查看、删除。演示脚本工具、声明式页面、代码页面、设置和结果卡片。",
+  "order": 300,
+  "permissions": ["script"],
+  "tools": ["tools.json"],
+  "categories": {
+    "notes": { "label": "便签", "description": "快速便签的记录、查询、删除" }
+  },
+  "settings": "settings.schema.json",
+  "ui": {
+    "tabs": [{ "id": "notes", "label": "便签", "icon": "todo", "order": 45, "view": "ui/view.json" }],
+    "windows": [{ "route": "quick-notes-board", "title": "便签墙", "width": 560, "height": 480, "entry": "ui/board.html" }],
+    "tool_cards": [{ "tool": "notes_add", "view": "ui/card.json" }],
+    "slash_commands": [{ "trigger": "便签", "description": "记一条便签", "prompt": "帮我记一条便签：" }]
+  }
+}

@@ -1,0 +1,41 @@
+/* 拾光插件界面的基础样式。颜色变量由宿主在初始化时注入，与主窗口保持一致。 */
+:root {
+  --page: #ffffff;
+  --surface: #ffffff;
+  --ink: #1f2329;
+  --muted: #646a73;
+  --accent: #e8a23a;
+  --accent-ink: #a36313;
+  --accent-soft: #fff3df;
+  --border: #e2e5e9;
+  --danger: #c0392b;
+  --radius: 10px;
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--page); color: var(--ink); }
+body { font: 13px/1.6 "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif; padding: 2px; }
+h1, h2, h3 { margin: 0 0 8px; font-weight: 600; }
+h1 { font-size: 16px; } h2 { font-size: 14px; } h3 { font-size: 13px; }
+p { margin: 0 0 8px; }
+.muted { color: var(--muted); }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 12px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+button, .btn {
+  font: inherit; padding: 6px 12px; border-radius: 8px; border: 1px solid #e4d2b5;
+  background: #fff8ec; color: #875318; cursor: pointer;
+}
+button:hover { background: var(--accent-soft); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { color: var(--danger); border-color: #f0c8c2; background: #fff6f5; }
+button:disabled { opacity: .5; cursor: default; }
+input, textarea, select {
+  font: inherit; padding: 6px 8px; border: 1px solid #e8dfd8; border-radius: 8px; background: #fff; color: var(--ink); width: 100%;
+}
+input[type=checkbox] { width: auto; accent-color: #c98428; }
+:is(button, input, textarea, select):focus-visible { outline: 2px solid #c98428; outline-offset: 2px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+code, pre { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }
+pre { background: #faf7f2; border: 1px solid var(--border); border-radius: 8px; padding: 8px; overflow: auto; }

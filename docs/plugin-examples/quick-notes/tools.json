@@ -1,0 +1,36 @@
+[
+  {
+    "name": "notes_add",
+    "label": "记便签",
+    "category": "notes",
+    "description": "记一条快速便签（几句话的备忘）。需要提醒时间的事用 add_todo，不要记在这里。",
+    "parameters": {
+      "type": "object",
+      "properties": { "text": { "type": "string", "description": "便签内容" } },
+      "required": ["text"],
+      "additionalProperties": false
+    },
+    "executor": { "kind": "script", "file": "notes.js", "function": "add" }
+  },
+  {
+    "name": "notes_list",
+    "label": "查看便签",
+    "category": "notes",
+    "description": "列出快速便签，最新的在前。",
+    "parameters": { "type": "object", "properties": {}, "additionalProperties": false },
+    "executor": { "kind": "script", "file": "notes.js", "function": "list" }
+  },
+  {
+    "name": "notes_delete",
+    "label": "删除便签",
+    "category": "notes",
+    "description": "按 id 删除一条快速便签。",
+    "parameters": {
+      "type": "object",
+      "properties": { "id": { "type": "string" } },
+      "required": ["id"],
+      "additionalProperties": false
+    },
+    "executor": { "kind": "script", "file": "notes.js", "function": "remove" }
+  }
+]

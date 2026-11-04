@@ -1,0 +1,25 @@
+{
+  "title": "快速便签",
+  "description": "也可以在聊天里说「记一条便签……」，或输入 /便签。",
+  "blocks": [
+    {
+      "type": "form",
+      "fields": [{ "key": "text", "label": "新便签", "type": "textarea", "rows": 2, "placeholder": "想记点什么" }],
+      "submit": { "label": "记下", "tool": "notes_add", "args": { "text": "{{form.text}}" } }
+    },
+    {
+      "type": "section",
+      "title": "全部便签",
+      "blocks": [
+        {
+          "type": "table",
+          "source": { "tool": "notes_list" },
+          "path": "items",
+          "empty": "还没有便签",
+          "columns": [{ "key": "at", "label": "时间" }, { "key": "text", "label": "内容" }],
+          "row_actions": [{ "label": "删除", "tool": "notes_delete", "args": { "id": "{{row.id}}" }, "confirm": "删除这条便签？" }]
+        }
+      ]
+    }
+  ]
+}

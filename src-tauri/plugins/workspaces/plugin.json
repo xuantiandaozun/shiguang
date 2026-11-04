@@ -1,0 +1,32 @@
+{
+  "id": "workspaces",
+  "name": "工作区",
+  "version": "1.0.0",
+  "description": "固定项目登记与会话绑定。",
+  "order": 70,
+  "tools": [
+    "tools.json"
+  ],
+  "categories": {
+    "workspaces": {
+      "label": "工作区",
+      "tools": [
+        "workspace_list",
+        "workspace_open",
+        "workspace_detect",
+        "workspace_save"
+      ]
+    }
+  },
+  "ui": {
+    "tabs": [
+      {
+        "id": "workspaces",
+        "label": "工作区",
+        "icon": "files",
+        "order": 30,
+        "component": "builtin:WorkspacesTab"
+      }
+    ]
+  }
+}

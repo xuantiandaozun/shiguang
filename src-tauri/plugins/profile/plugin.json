@@ -1,0 +1,20 @@
+{
+  "id": "profile",
+  "name": "个人信息",
+  "version": "1.0.0",
+  "description": "用户个人信息条目。",
+  "order": 45,
+  "tools": [
+    "tools.json"
+  ],
+  "categories": {
+    "profile": {
+      "label": "个人信息",
+      "tools": [
+        "list_profile",
+        "save_profile_entry",
+        "delete_profile_entry"
+      ]
+    }
+  }
+}

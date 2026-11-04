@@ -1,0 +1,291 @@
+[
+  {
+    "name": "scan_desktop",
+    "label": "扫描目录",
+    "description": "扫描一个小而明确的目录，返回文件和文件夹清单（名称/相对路径/类型/大小/修改时间/层级）。默认扫描用户桌面。整盘、跨目录、大量文件、空间占用、清理候选等批量任务必须优先使用 search_files 的持久化索引；只有用户明确拒绝维护索引并要求临时扫描时，才用本工具或命令遍历。",
+    "parameters": {
+      "properties": {
+        "depth": {
+          "description": "最大层数：1=只列顶层，3=深入两层子文件夹（默认），上限 6",
+          "type": "integer"
+        },
+        "path": {
+          "description": "要扫描的目录：绝对路径（如 D:\\docs）或相对桌面的文件夹名。留空则扫描桌面。",
+          "type": "string"
+        },
+        "recursive": {
+          "description": "是否深入读取子文件夹内容，默认 true",
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "type": "object"
+    }
+  },
+  {
+    "name": "search_files",
+    "label": "搜索本机文件",
+    "description": "本机持久化文件元数据索引（简化版 Everything），是整盘、跨目录、大量文件、空间占用、清理候选和批量筛选任务的首选入口。整盘空间分析默认采用最简原则：先获得用户对 UAC 的明确同意，再用 ntfs_index 从 MFT 快速建立路径和估算大小索引，然后 summarize(accuracy=fast) 汇总一级目录；结果必须明确称为估算。只有用户明确要求精确值，或要精查某个文件/目录时，才说明普通 index 会逐项读取大小/时间并在其同意后建立完整索引，再 summarize(accuracy=exact)。不要为了初步空间分析直接全盘递归，也不要把估算结果说成精确值。ntfs_sync 用于显式提权追赶，ntfs_probe 用于诊断；所有 ntfs_* 操作都需 user_confirmed=true 且会弹 UAC。索引不读取文件内容。",
+    "parameters": {
+      "properties": {
+        "accuracy": {
+          "description": "仅 summarize 使用，默认 fast：接受 MFT 估算大小并返回覆盖率；exact 只接受普通逐项扫描形成的完整索引",
+          "enum": [
+            "fast",
+            "exact"
+          ],
+          "type": "string"
+        },
+        "action": {
+          "description": "默认 search；summarize 汇总一级子项递归占用；所有 ntfs_* 动作必须先获得用户对 UAC 的明确同意",
+          "enum": [
+            "search",
+            "summarize",
+            "index",
+            "status",
+            "stop",
+            "ntfs_probe",
+            "ntfs_sync",
+            "ntfs_index"
+          ],
+          "type": "string"
+        },
+        "extensions": {
+          "description": "扩展名白名单，如 [\"pdf\",\"docx\"]",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "description": "只找文件或只找目录",
+          "enum": [
+            "file",
+            "directory"
+          ],
+          "type": "string"
+        },
+        "limit": {
+          "description": "返回上限；search 默认 100、最大 500，summarize 最大 100；truncated=true 表示还有更多结果",
+          "type": "integer"
+        },
+        "max_size_mb": {
+          "description": "最大文件大小 MB",
+          "type": "number"
+        },
+        "min_size_mb": {
+          "description": "最小文件大小 MB",
+          "type": "number"
+        },
+        "modified_after": {
+          "description": "修改时间下限，本地时间 YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS",
+          "type": "string"
+        },
+        "modified_before": {
+          "description": "修改时间上限，本地时间 YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS",
+          "type": "string"
+        },
+        "query": {
+          "description": "名称或完整路径包含的文字；支持 SQLite 通配符 % 和 _",
+          "type": "string"
+        },
+        "root": {
+          "description": "summarize 要汇总的单个绝对目录；必须来自用户指定或当前任务解析出的目标",
+          "type": "string"
+        },
+        "roots": {
+          "description": "status/coverage、index、search 使用的目标绝对目录；search 可限制范围。相对路径按桌面解析",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sort": {
+          "description": "默认 name_asc",
+          "enum": [
+            "name_asc",
+            "name_desc",
+            "size_asc",
+            "size_desc",
+            "modified_asc",
+            "modified_desc"
+          ],
+          "type": "string"
+        },
+        "user_confirmed": {
+          "description": "index 时表示用户同意维护完整索引；所有 ntfs_* 动作时表示用户已明确同意本次 UAC。需要触发相应操作时必填 true",
+          "type": "boolean"
+        },
+        "volume": {
+          "description": "ntfs_probe/ntfs_sync/ntfs_index 使用的规范盘符根路径，格式为“盘符:/”；必须从当前目标解析，不能使用固定默认盘符",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    }
+  },
+  {
+    "name": "read_file",
+    "label": "读取文件",
+    "description": "读取指定文件的内容。支持文本文件（txt/md/log/json/csv/代码等，自动识别 UTF-8/GBK 等编码）、Office 文档（docx/xlsx/pptx，提取纯文本）和 PDF（提取文本层；扫描件无文本层时会提示）。大文件默认只返回开头部分：需要更多内容时用 offset 续读；用户明确要求完整内容时才设 full=true。图片请改用 read_image；zip/exe 等二进制文件不能读内容，请改用 get_file_info。",
+    "parameters": {
+      "properties": {
+        "full": {
+          "description": "读取完整内容（仍有 100000 字符安全上限），默认 false",
+          "type": "boolean"
+        },
+        "max_chars": {
+          "description": "本次最多返回的字符数，默认 4000，上限 20000",
+          "type": "integer"
+        },
+        "offset": {
+          "description": "字符偏移量，从该位置继续读取，默认 0",
+          "type": "integer"
+        },
+        "path": {
+          "description": "文件路径：绝对路径（如 D:\\docs\\a.txt）或相对桌面；临时目录文件用 temp/文件名",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_file_info",
+    "label": "查询文件属性",
+    "description": "查询文件或文件夹的属性：类型/大小/创建时间/修改时间/访问时间/只读/隐藏等（即 Windows 属性对话框中的字段）。zip/exe/图片/音视频等无法读取内容的文件用它。",
+    "parameters": {
+      "properties": {
+        "path": {
+          "description": "文件或文件夹路径：绝对路径或相对桌面",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "create_file",
+    "label": "创建文件",
+    "description": "创建文本/代码文件（txt/md/log/json/csv/xml/yaml/html/css/js/ts/py/java/go/rs/sql/sh/bat/ps1 等文本类格式）；普通文本以 UTF-8 写入，新建 .ps1 自动带 Windows PowerShell 5.1 兼容的 UTF-8 BOM。父目录不存在时自动创建。相对路径默认写入应用临时目录（禁止把草稿/中间产物堆到桌面）；用户明确要求交付到桌面时用绝对路径或 desktop/文件名；也可写 temp/文件名。目标已存在时默认报错，overwrite=true 才会覆盖（覆盖前自动备份原文件）。给 CLI 的 JSON 入参加 run_command 的 files 或 stdin，不要先 create_file 再读；本工具只用于用户要留存的文本。一般 PowerShell 操作优先直接用 run_command 的 shell=powershell，无需创建中间脚本。不能创建 exe/docx/xlsx/pdf 等二进制或 Office 格式。要修改已有文件请用 edit_file。",
+    "parameters": {
+      "properties": {
+        "content": {
+          "description": "完整文件内容",
+          "type": "string"
+        },
+        "overwrite": {
+          "description": "文件已存在时是否覆盖（自动备份原文件），默认 false",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "文件路径：相对路径→临时目录；temp/x 或 临时/x→临时目录；desktop/x 或 桌面/x→桌面；绝对路径原样（如 D:\\\\docs\\\\a.py）",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "clear_temp_files",
+    "label": "清理临时文件",
+    "description": "清空应用临时目录内的全部文件与子目录（保留目录本身）。仅在本轮用过临时文件、任务收尾并已征得用户同意后调用；用户说先留着则不要调用。",
+    "parameters": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    }
+  },
+  {
+    "name": "edit_file",
+    "label": "编辑文件",
+    "description": "编辑已有的文本/代码文件（保持原文件编码，编辑前自动备份原文件）。三种模式：replace（默认）把 old_text 精确替换为 new_text——old_text 必须与文件内容完全一致（含缩进换行）且唯一匹配，多处匹配时需补充上下文或设 all=true 全部替换；append 在文件末尾追加 content；prepend 在文件开头插入 content。仅支持文本类格式，Office/PDF/二进制文件不支持。",
+    "parameters": {
+      "properties": {
+        "all": {
+          "description": "replace 模式：old_text 出现多处时是否全部替换，默认 false",
+          "type": "boolean"
+        },
+        "content": {
+          "description": "append / prepend 模式：要插入的内容",
+          "type": "string"
+        },
+        "mode": {
+          "description": "编辑模式，默认 replace",
+          "enum": [
+            "replace",
+            "append",
+            "prepend"
+          ],
+          "type": "string"
+        },
+        "new_text": {
+          "description": "replace 模式：替换后的内容",
+          "type": "string"
+        },
+        "old_text": {
+          "description": "replace 模式：要被替换的原文（必须与文件内容完全一致，含缩进换行）",
+          "type": "string"
+        },
+        "path": {
+          "description": "文件路径：绝对路径，或相对桌面；临时目录文件可用 temp/文件名",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "read_image",
+    "label": "看图理解",
+    "when": "setting:read_image_enabled",
+    "description": "打开本地图片以理解布局、含义或图表。聊天模型支持图片时直接交给它查看，否则调用独立视觉模型。纯提取文字可用本地 ocr_image。支持 png/jpg/jpeg/gif/webp/bmp。",
+    "parameters": {
+      "properties": {
+        "path": {
+          "description": "图片路径：绝对路径或相对桌面",
+          "type": "string"
+        },
+        "question": {
+          "description": "针对图片的具体问题，如「这个报错是什么意思」。留空则做全面描述",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "ocr_image",
+    "label": "OCR 提取文字",
+    "description": "本地 OCR 提取图片中的文字（百度 PaddleOCR PP-OCRv5 mobile，离线、免费、无需 API Key）。适合截图/扫描件/证件等「只要文字」的场景，比把整图交给模型更省 token。首次调用会自动下载约 15MB 模型。需要理解画面含义时：当前模型能看图请直接看图，否则用 read_image。",
+    "parameters": {
+      "properties": {
+        "path": {
+          "description": "图片路径：绝对路径或相对桌面",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
+  }
+]

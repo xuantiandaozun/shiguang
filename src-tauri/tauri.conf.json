@@ -63,18 +63,35 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' asset: http://asset.localhost data: blob: https: http:",
+        "font-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost",
+        "frame-src": "plugin: http://plugin.localhost",
+        "object-src": "'none'",
+        "base-uri": "'self'"
+      },
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": [
+          "**"
+        ]
       }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "createUpdaterArtifacts": true,
-    "externalBin": ["binaries/shiguang-index-helper", "binaries/shiguang-mcp"],
+    "externalBin": [
+      "binaries/shiguang-index-helper",
+      "binaries/shiguang-mcp"
+    ],
     "resources": {
       "resources/browser-extension.zip": "browser-extension.zip"
     },
@@ -87,7 +104,9 @@
     ],
     "windows": {
       "nsis": {
-        "languages": ["SimpChinese"],
+        "languages": [
+          "SimpChinese"
+        ],
         "displayLanguageSelector": false,
         "installerHooks": "./windows/hooks.nsh"
       }

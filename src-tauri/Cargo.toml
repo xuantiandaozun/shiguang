@@ -9,7 +9,7 @@ autobins = false
 
 [lib]
 name = "shiguang_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 # Speed up repeated local release builds; does not lower optimization level.
 [profile.release]
@@ -56,6 +56,7 @@ trash = "5"
 ssh2 = "0.9.6"
 sha2 = "0.10"
 sysinfo = "0.36.1"
+rquickjs = "0.9"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

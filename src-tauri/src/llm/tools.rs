@@ -9,124 +9,24 @@ use tauri::{AppHandle, Emitter, Manager};
 
 pub const DISCOVER_TOOL: &str = "discover_capabilities";
 
+
 /// 完整工具目录是基线；System One 路由可精简类别，但必须保留发现入口。
 /// discover_capabilities 检索 Skills、建议组合与索引策略，并补齐被路由省略的类别。
+/// 核心工具由内置插件的 core_tools 声明。
 pub fn core_tool_names() -> Vec<String> {
-    vec![
-        DISCOVER_TOOL.to_string(),
-        "get_tool_call_history".to_string(),
-        "recall_session".to_string(),
-        "load_skill".to_string(),
-        "ask_user".to_string(),
-        "todo_write".to_string(),
-        "workspace_open".to_string(),
-    ]
+    crate::plugins::snapshot().core_tools.clone()
 }
 
-fn tools_for_category(category: &str) -> &'static [&'static str] {
-    match category {
-        "files" => &[
-            "scan_desktop",
-            "search_files",
-            "read_file",
-            "get_file_info",
-            "create_file",
-            "clear_temp_files",
-            "edit_file",
-            "read_image",
-            "ocr_image",
-        ],
-        "browser" => &[
-            "browser_navigate",
-            "browser_snapshot",
-            "browser_find",
-            "browser_capabilities",
-            "browser_action",
-            "browser_wait",
-            "browser_extract",
-            "browser_network_observe",
-            "browser_request",
-            "browser_cookies",
-            "browser_read",
-            "browser_click",
-            "browser_type",
-            "browser_scroll",
-            "browser_tabs",
-            "browser_activate_tab",
-            "browser_screenshot",
-            "browser_evaluate",
-            "browser_status",
-            "browser_fast_loop",
-        ],
-        "web" => &["web_search", "web_fetch"],
-        "organize" => &[
-            "scan_desktop",
-            "propose_organization",
-            "undo_batch",
-        ],
-        "todos" => &["add_todo", "list_todos", "complete_todo", "snooze_todo"],
-        "profile" => &["list_profile", "save_profile_entry", "delete_profile_entry"],
-        "commands" => &[
-            "run_command",
-            "run_command_background",
-            "await_task",
-            "check_task",
-            "list_tasks",
-            "stop_task",
-            "lookup_cache",
-        ],
-        "servers" => &["list_servers", "get_server", "create_server", "update_server", "delete_server", "test_server_connection", "ssh_exec", "sftp_list", "sftp_stat", "sftp_upload", "sftp_download", "list_remote_tasks", "get_remote_task", "wait_remote_task", "cancel_remote_task"],
-        "system" => &["get_system_info"],
-        "delegation" => &["run_subagent", "await_subagent", "reply_subagent"],
-        "workspaces" => crate::workspaces::TOOL_NAMES,
-        "agents" => crate::agents::TOOL_NAMES,
-        "skills" => &[
-            "list_skills",
-            "load_skill",
-            "create_skill",
-            "skill_resource",
-            "run_skill_program",
-            "delete_skill",
-            "manage_skill",
-        ],
-
-        _ => &[],
-    }
-}
-
-fn category_for_tool(name: &str) -> &'static str {
-    if core_tool_names().iter().any(|item| item == name) {
-        return "core";
-    }
-    for category in [
-        "files",
-        "browser",
-        "web",
-        "organize",
-        "todos",
-        "profile",
-        "commands",
-        "servers",
-        "system",
-        "delegation",
-        "skills",
-        "workspaces",
-        "agents",
-        "workflows",
-    ] {
-        if tools_for_category(category).contains(&name) {
-            return category;
-        }
-    }
-    "other"
+fn tools_for_category(category: &str) -> Vec<String> {
+    crate::plugins::snapshot().tools_for_category(category)
 }
 
 fn activate_categories(categories: &[String]) -> Vec<String> {
     let mut names = core_tool_names();
     for category in categories {
         for name in tools_for_category(category) {
-            if !names.iter().any(|existing| existing == name) {
-                names.push((*name).to_string());
+            if !names.iter().any(|existing| existing == &name) {
+                names.push(name);
             }
         }
     }
@@ -134,1161 +34,123 @@ fn activate_categories(categories: &[String]) -> Vec<String> {
 }
 
 fn retired_tool(name: &str) -> bool {
-    matches!(name, "create_rule" | "toggle_rule" | "get_operation_history" |
-        "list_workflows" | "create_workflow" | "manage_workflow" |
-        "find_browser_recipes" | "save_browser_recipe" | "run_browser_recipe")
+    crate::plugins::snapshot().retired_message(name).is_some()
 }
 
+/// 全部工具定义（来自已启用插件的 tools/*.json），已下线的除外。
 pub fn definitions() -> Value {
-    let Value::Array(mut tools) = legacy_definitions() else { return json!([]); };
-    tools.retain(|tool| !retired_tool(tool.pointer("/function/name").and_then(Value::as_str).unwrap_or("")));
-    tools.extend(crate::browser::operations::definitions());
-    tools.extend(crate::workspaces::definitions());
-    tools.extend(crate::agents::definitions());
+    let snapshot = crate::plugins::snapshot();
+    let mut tools: Vec<Value> = snapshot
+        .tools
+        .iter()
+        .filter(|t| snapshot.retired_message(&t.name).is_none())
+        .map(|t| t.definition.clone())
+        .collect();
+    extend_discovery_categories(&snapshot, &mut tools);
     Value::Array(tools)
 }
 
-fn legacy_definitions() -> Value {
-    let mut definitions = builtin_definitions();
-    definitions.as_array_mut().unwrap().extend(crate::server_tools::definitions().into_iter().map(|t| json!({"type":"function","function":{"name":t["name"],"description":t["description"],"parameters":t["inputSchema"]}})));
-    definitions
-}
-
-fn builtin_definitions() -> Value {
-    json!([
-        {
-            "type": "function",
-            "function": {
-                "name": "discover_capabilities",
-                "description": "围绕当前目标检索 Skills、工具组合与批量文件索引策略。本轮工具列表可能按类别精简；没有看到所需工具时，通过本工具选择相关类别，下一轮自动补齐，不要据此断言没有该能力。文件导入服务器清单等跨领域任务一次选择 files、servers 及确实需要的其它类别。命中 Skill 时 load_skill。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "description": "用一句具体的话描述要完成的结果、涉及的对象和当前缺口，用于匹配 Skills" },
-                        "categories": {
-                            "type": "array",
-                            "items": {
-                                "type": "string",
-                                "enum": ["files", "browser", "web", "organize", "todos", "profile", "commands", "servers", "system", "delegation", "skills", "workspaces", "agents"]
-                            },
-                            "description": "要检索的能力：files=本地文件/图片，browser=已打开的网页，web=公开网页搜索/抓取，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，servers=拾光已保存的SSH连接、服务器新增修改删除、远程命令和SFTP传输，system=硬件与进程，delegation=资料、文件和浏览器子代理，skills=管理技能，workspaces=登记的固定项目（路径、部署、规则），agents=把代码修改外派给 Claude Code / Codex"
-                        }
-                    },
-                    "required": ["query", "categories"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_tool_call_history",
-                "description": "查询当前这次会话内已持久化的工具调用历史，用于复盘本会话过去操作、追踪“失败 → 调整 → 验证”过程、排障或总结可复用 Skill。不能查看其他会话。search 返回的 id 是工具调用 id；对话消息 id 不能拿来 get。被压缩从上下文拿掉的用户原话、定稿和中间草稿要用 recall_session，不要用本工具猜。不要用它代替对当前环境的实际验证。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["search", "get"], "description": "默认 search；get 按 id 返回单次调用的完整参数和结果" },
-                        "id": { "type": "integer", "description": "action=get 时必填，来自本会话 search 结果" },
-                        "query": { "type": "string", "description": "搜索工具名、参数、结果、用户消息和最终回复中包含的文字；多个词按空格分开，命中任一即可" },
-                        "tool_name": { "type": "string", "description": "精确限定工具名" },
-                        "status": { "type": "string", "enum": ["running", "done", "error"], "description": "按最终调用状态过滤" },
-                        "before_id": { "type": "integer", "description": "分页：只返回小于该 id 的更早记录" },
-                        "limit": { "type": "integer", "description": "search 返回数，默认 20，最大 50" },
-                        "include_history_queries": { "type": "boolean", "description": "是否也返回历史查询工具自身的调用，默认 false" }
-                    },
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "recall_session",
-                "description": "查回当前这次会话里的对话原文。上下文压缩后，检查点没写进去的用户原话、已保存的助手回复、定稿和只出现在工具轮里的中间草稿都还在，不会被删掉。需要原样使用这些内容时先 search 再 get，不要凭摘要重写，也不要改用 get_tool_call_history（那是工具调用 id，不是消息 id）。不能查看其他会话。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["search", "get"], "description": "默认 search。search 按关键词找消息和中间草稿；get 按 message_id 返回全文" },
-                        "query": { "type": "string", "description": "search 用的关键词。多个词按空格分开，命中任一即可。用摘要里记下的检索词、专有名称或用户原话中的短句" },
-                        "id": { "type": "integer", "description": "action=get 时必填，必须是 search 结果里的 message_id，不是工具调用 id" },
-                        "offset": { "type": "integer", "description": "action=get 时的字符偏移，正文超过单次返回长度时用返回的 next_offset 续读" },
-                        "before_id": { "type": "integer", "description": "search 分页：只返回 id 小于该 message_id 的更早消息" },
-                        "limit": { "type": "integer", "description": "search 返回条数，默认 8，最大 20" }
-                    },
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "scan_desktop",
-                "description": "扫描一个小而明确的目录，返回文件和文件夹清单（名称/相对路径/类型/大小/修改时间/层级）。默认扫描用户桌面。整盘、跨目录、大量文件、空间占用、清理候选等批量任务必须优先使用 search_files 的持久化索引；只有用户明确拒绝维护索引并要求临时扫描时，才用本工具或命令遍历。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "要扫描的目录：绝对路径（如 D:\\docs）或相对桌面的文件夹名。留空则扫描桌面。" },
-                        "recursive": { "type": "boolean", "description": "是否深入读取子文件夹内容，默认 true" },
-                        "depth": { "type": "integer", "description": "最大层数：1=只列顶层，3=深入两层子文件夹（默认），上限 6" }
-                    },
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "search_files",
-                "description": "本机持久化文件元数据索引（简化版 Everything），是整盘、跨目录、大量文件、空间占用、清理候选和批量筛选任务的首选入口。整盘空间分析默认采用最简原则：先获得用户对 UAC 的明确同意，再用 ntfs_index 从 MFT 快速建立路径和估算大小索引，然后 summarize(accuracy=fast) 汇总一级目录；结果必须明确称为估算。只有用户明确要求精确值，或要精查某个文件/目录时，才说明普通 index 会逐项读取大小/时间并在其同意后建立完整索引，再 summarize(accuracy=exact)。不要为了初步空间分析直接全盘递归，也不要把估算结果说成精确值。ntfs_sync 用于显式提权追赶，ntfs_probe 用于诊断；所有 ntfs_* 操作都需 user_confirmed=true 且会弹 UAC。索引不读取文件内容。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["search", "summarize", "index", "status", "stop", "ntfs_probe", "ntfs_sync", "ntfs_index"], "description": "默认 search；summarize 汇总一级子项递归占用；所有 ntfs_* 动作必须先获得用户对 UAC 的明确同意" },
-                        "roots": { "type": "array", "items": { "type": "string" }, "description": "status/coverage、index、search 使用的目标绝对目录；search 可限制范围。相对路径按桌面解析" },
-                        "root": { "type": "string", "description": "summarize 要汇总的单个绝对目录；必须来自用户指定或当前任务解析出的目标" },
-                        "volume": { "type": "string", "description": "ntfs_probe/ntfs_sync/ntfs_index 使用的规范盘符根路径，格式为“盘符:/”；必须从当前目标解析，不能使用固定默认盘符" },
-                        "query": { "type": "string", "description": "名称或完整路径包含的文字；支持 SQLite 通配符 % 和 _" },
-                        "extensions": { "type": "array", "items": { "type": "string" }, "description": "扩展名白名单，如 [\"pdf\",\"docx\"]" },
-                        "kind": { "type": "string", "enum": ["file", "directory"], "description": "只找文件或只找目录" },
-                        "min_size_mb": { "type": "number", "description": "最小文件大小 MB" },
-                        "max_size_mb": { "type": "number", "description": "最大文件大小 MB" },
-                        "modified_after": { "type": "string", "description": "修改时间下限，本地时间 YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS" },
-                        "modified_before": { "type": "string", "description": "修改时间上限，本地时间 YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS" },
-                        "sort": { "type": "string", "enum": ["name_asc", "name_desc", "size_asc", "size_desc", "modified_asc", "modified_desc"], "description": "默认 name_asc" },
-                        "accuracy": { "type": "string", "enum": ["fast", "exact"], "description": "仅 summarize 使用，默认 fast：接受 MFT 估算大小并返回覆盖率；exact 只接受普通逐项扫描形成的完整索引" },
-                        "limit": { "type": "integer", "description": "返回上限；search 默认 100、最大 500，summarize 最大 100；truncated=true 表示还有更多结果" },
-                        "user_confirmed": { "type": "boolean", "description": "index 时表示用户同意维护完整索引；所有 ntfs_* 动作时表示用户已明确同意本次 UAC。需要触发相应操作时必填 true" }
-                    },
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "读取指定文件的内容。支持文本文件（txt/md/log/json/csv/代码等，自动识别 UTF-8/GBK 等编码）、Office 文档（docx/xlsx/pptx，提取纯文本）和 PDF（提取文本层；扫描件无文本层时会提示）。大文件默认只返回开头部分：需要更多内容时用 offset 续读；用户明确要求完整内容时才设 full=true。图片请改用 read_image；zip/exe 等二进制文件不能读内容，请改用 get_file_info。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "文件路径：绝对路径（如 D:\\docs\\a.txt）或相对桌面；临时目录文件用 temp/文件名" },
-                        "offset": { "type": "integer", "description": "字符偏移量，从该位置继续读取，默认 0" },
-                        "max_chars": { "type": "integer", "description": "本次最多返回的字符数，默认 4000，上限 20000" },
-                        "full": { "type": "boolean", "description": "读取完整内容（仍有 100000 字符安全上限），默认 false" }
-                    },
-                    "required": ["path"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_file_info",
-                "description": "查询文件或文件夹的属性：类型/大小/创建时间/修改时间/访问时间/只读/隐藏等（即 Windows 属性对话框中的字段）。zip/exe/图片/音视频等无法读取内容的文件用它。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "文件或文件夹路径：绝对路径或相对桌面" }
-                    },
-                    "required": ["path"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "create_file",
-                "description": "创建文本/代码文件（txt/md/log/json/csv/xml/yaml/html/css/js/ts/py/java/go/rs/sql/sh/bat/ps1 等文本类格式）；普通文本以 UTF-8 写入，新建 .ps1 自动带 Windows PowerShell 5.1 兼容的 UTF-8 BOM。父目录不存在时自动创建。相对路径默认写入应用临时目录（禁止把草稿/中间产物堆到桌面）；用户明确要求交付到桌面时用绝对路径或 desktop/文件名；也可写 temp/文件名。目标已存在时默认报错，overwrite=true 才会覆盖（覆盖前自动备份原文件）。给 CLI 的 JSON 入参加 run_command 的 files 或 stdin，不要先 create_file 再读；本工具只用于用户要留存的文本。一般 PowerShell 操作优先直接用 run_command 的 shell=powershell，无需创建中间脚本。不能创建 exe/docx/xlsx/pdf 等二进制或 Office 格式。要修改已有文件请用 edit_file。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "文件路径：相对路径→临时目录；temp/x 或 临时/x→临时目录；desktop/x 或 桌面/x→桌面；绝对路径原样（如 D:\\\\docs\\\\a.py）" },
-                        "content": { "type": "string", "description": "完整文件内容" },
-                        "overwrite": { "type": "boolean", "description": "文件已存在时是否覆盖（自动备份原文件），默认 false" }
-                    },
-                    "required": ["path", "content"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "clear_temp_files",
-                "description": "清空应用临时目录内的全部文件与子目录（保留目录本身）。仅在本轮用过临时文件、任务收尾并已征得用户同意后调用；用户说先留着则不要调用。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "edit_file",
-                "description": "编辑已有的文本/代码文件（保持原文件编码，编辑前自动备份原文件）。三种模式：replace（默认）把 old_text 精确替换为 new_text——old_text 必须与文件内容完全一致（含缩进换行）且唯一匹配，多处匹配时需补充上下文或设 all=true 全部替换；append 在文件末尾追加 content；prepend 在文件开头插入 content。仅支持文本类格式，Office/PDF/二进制文件不支持。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "文件路径：绝对路径，或相对桌面；临时目录文件可用 temp/文件名" },
-                        "mode": { "type": "string", "enum": ["replace", "append", "prepend"], "description": "编辑模式，默认 replace" },
-                        "old_text": { "type": "string", "description": "replace 模式：要被替换的原文（必须与文件内容完全一致，含缩进换行）" },
-                        "new_text": { "type": "string", "description": "replace 模式：替换后的内容" },
-                        "content": { "type": "string", "description": "append / prepend 模式：要插入的内容" },
-                        "all": { "type": "boolean", "description": "replace 模式：old_text 出现多处时是否全部替换，默认 false" }
-                    },
-                    "required": ["path"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "read_image",
-                "description": "打开本地图片以理解布局、含义或图表。聊天模型支持图片时直接交给它查看，否则调用独立视觉模型。纯提取文字可用本地 ocr_image。支持 png/jpg/jpeg/gif/webp/bmp。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "图片路径：绝对路径或相对桌面" },
-                        "question": { "type": "string", "description": "针对图片的具体问题，如「这个报错是什么意思」。留空则做全面描述" }
-                    },
-                    "required": ["path"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "ocr_image",
-                "description": "本地 OCR 提取图片中的文字（百度 PaddleOCR PP-OCRv5 mobile，离线、免费、无需 API Key）。适合截图/扫描件/证件等「只要文字」的场景，比把整图交给模型更省 token。首次调用会自动下载约 15MB 模型。需要理解画面含义时：当前模型能看图请直接看图，否则用 read_image。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "图片路径：绝对路径或相对桌面" }
-                    },
-                    "required": ["path"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browser_navigate",
-                "description": "在浏览器中打开网址。默认在当前标签页打开，new_tab=true 时开新标签。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": { "type": "string", "description": "完整网址，如 https://www.example.com" },
-                        "new_tab": { "type": "boolean", "description": "是否在新标签页打开，默认 false" }
-                    },
-                    "required": ["url"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browser_snapshot",
-                "description": "观察当前页面的交互结构与状态。只输出可见的交互元素、表单和弹层，不含网页 CSS/脚本；默认紧凑 4000 字符，当前可见 dialog/listbox/menu/tree/grid 浮层优先。先用 browser_find 查找文字明确的按钮/字段；只有候选不明确、复杂表单或新浮层时再 snapshot，并优先用 scope 聚焦。导航、刷新、切换通道或出现新浮层后 ref 必须重取；单纯输入同页普通字段后，可复用仍在页面上的既有 ref 完成同一表单，再用局部快照统一核验。正文阅读用 browser_read。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "max_chars": { "type": "integer", "description": "快照最大字符数，默认 4000；仅复杂页面按需增大" },
-                        "scope": { "description": "可选：聚焦局部。传上次快照中容器元素的编号（数字），或 CSS 选择器（字符串，如 .msg-form、dialog）。只遍历该元素子树，编号从 1 重排" }
-                    },
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browser_find",
-                "description": "按可见文字、标签、placeholder、aria 或 title 查找少量可操作候选，并直接返回可供 click/type 使用的 ref。找“提交”“标题”“搜索”等明确目标时优先用它，避免全页快照消耗 token；候选不唯一或找不到时再用局部 snapshot 判断，不要猜。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "description": "要匹配的可见文字或字段语义，如“发布”“标题”“收件人”" },
-                        "limit": { "type": "integer", "description": "最多候选数，默认 12，最大 30" }
-                    },
-                    "required": ["query"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browser_network_observe",
-                "description": "观察当前浏览器标签页发出的网络请求，用于理解已登录网站的真实接口。start 后让用户或你用正常页面操作完成一次真实动作，再用 list 查看脱敏接口目录，最后 stop。只记录方法、同源 URL 路径、参数字段名、请求体字段名、状态码和 MIME；绝不记录 Cookie、Authorization、token、请求值或响应正文。仅扩展 debugger 通道可用。",
-                "parameters": { "type": "object", "properties": {
-                    "action": { "type": "string", "enum": ["start", "list", "stop"], "description": "start 开始当前标签观察；list 查看；stop 停止并清除内存记录" }
-                }, "required": ["action"] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browser_request",
-                "description": "从当前页面主世界调用同源 HTTP 接口，自动携带当前浏览器会话的 Cookie/CSRF 上下文；仅在已通过网络观察或页面证据确认接口用途后使用。禁止跨域、手工 Authorization/Cookie/token。GET 查询可直接执行；POST/PUT/PATCH/DELETE 涉及提交、发布或删除时仍按权限策略确认，并必须核验响应。",
-                "parameters": { "type": "object", "properties": {
-                    "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
-                    "url": { "type": "string", "description": "当前站点同源的相对路径或完整 URL" },
-                    "body": { "description": "非 GET 请求的 JSON 请求体；不得包含密码、token 或 Cookie" },
-                    "headers": { "type": "object", "description": "可选的非认证请求头；仅允许 Content-Type、Accept、X-Requested-With" },
-                    "max_chars": { "type": "integer", "description": "返回正文预览上限，默认 6000，最大 20000" }
-                }, "required": ["method", "url"] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browser_cookies",
-                "description": "通过拾光浏览器扩展读取页面 JavaScript 无法访问的 Cookie（包括 HttpOnly）。仅在用户明确要求读取或导出其当前浏览器 Cookie 时使用；必须用 domains 或 urls 限定站点，优先再用 names 缩小范围。该能力只走当前 Chrome Profile 中已安装的扩展，不会回退到独立 CDP。output=return 会把 Cookie 返回给当前任务；post 只允许发送到 127.0.0.1/localhost；download 保存为本地文件。Cookie 属于敏感凭据，不要在回复中复述、写入日志或保存为浏览器配方。",
-                "parameters": { "type": "object", "properties": {
-                    "domains": { "type": "array", "items": { "type": "string" }, "description": "Cookie 域名列表，如 taobao.com；与 urls 至少提供一项" },
-                    "urls": { "type": "array", "items": { "type": "string" }, "description": "完整 URL 列表；与 domains 至少提供一项" },
-                    "names": { "type": "array", "items": { "type": "string" }, "description": "可选 Cookie 名称白名单，如 cookie2、sgcookie；不传则返回目标站点的全部 Cookie" },
-                    "output": { "type": "string", "enum": ["return", "post", "download"], "description": "默认 return" },
-                    "post_url": { "type": "string", "description": "output=post 时必填，只允许 http://127.0.0.1 或 http://localhost" },
-                    "format": { "type": "string", "enum": ["json", "netscape-lite"], "description": "默认 netscape-lite；return 始终返回结构化 Cookie" },
-                    "filename": { "type": "string", "description": "output=download 时的下载文件名" },
-                    "save_as": { "type": "boolean", "description": "下载时是否显示另存为，默认 true" }
-                }, "required": [] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browser_read",
-                "description": "用 Readability 抽取当前页可读正文（剥离导航/广告/侧栏），默认只返回 6000 字符。长文用 offset 分段读取，不要一次拉取整篇；适合总结文章、摘录新闻/博客/文档页。不返回可点击编号——要操作页面请用 browser_snapshot。应用页、登录页、信息流等非文章结构可能提取失败，此时改用 snapshot 或截图。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "max_chars": { "type": "integer", "description": "本段正文最大字符数，默认 6000，上限 100000" },
-                        "offset": { "type": "integer", "description": "从正文第几个字符开始读取，默认 0；长文按返回结果的 offset/returned_chars 继续" }
-                    },
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browser_click",
-                "description": "用真实鼠标点击快照/查找结果中编号对应的元素（扩展调试通道，isTrusted）。点击前自动滚动、等位置稳定并检查遮挡，被遮挡时不点并报告遮挡者；元素被重渲染时按指纹自动重定位。点击后等页面安静并返回 effect：URL/导航、打开或关闭的弹窗、提示文字、表单错误、发出的请求、新标签、原生对话框。出现新浮层时再局部 snapshot 选择其中的元素；changed=false 时先核对目标，不要原样重试。连续多步操作优先用 browser_action 的 steps。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "ref": { "type": "integer", "description": "browser_snapshot 返回的元素编号" }
-                    },
-                    "required": ["ref"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browser_type",
-                "description": "向编号控件输入文字：先用真实点击聚焦（容器会解析到其中的输入框/编辑器），再用真实键盘输入（扩展调试通道，isTrusted），React 受控输入、ProseMirror/Draft 等富文本编辑器都按真人输入处理，不需要再写 evaluate 补丁。输入后读回校验（忽略占位文字、编辑器的空白归一化），返回 verified、value 和 effect。富文本换行默认 Shift+Enter（聊天框回车可能直接发送），文章编辑器要分段时传 newline=enter。原生 select 按选项文字选择；自定义下拉输入只是写入搜索词，选项用 browser_action select 选择。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "ref": { "type": "integer", "description": "browser_snapshot 返回的元素编号" },
-                        "text": { "type": "string", "description": "要输入的内容或搜索词；用户给的是模糊业务名称时可先输入缩小候选，选择动作由后续快照与点击完成" },
-                        "clear": { "type": "boolean", "description": "输入前是否清空原有内容，默认 true" },
-                        "newline": { "type": "string", "enum": ["shift_enter", "enter", "insert"], "description": "富文本里的换行方式，默认 shift_enter；文章编辑器需要分段时用 enter" }
-                    },
-                    "required": ["ref", "text"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browser_scroll",
-                "description": "滚动当前交互区域。给 ref 时依次寻找元素最近滚动祖先、aria-controls/owns 关联区域及其浮层滚动容器；不传 ref 时优先当前可见浮层，再选页面主要滚动容器，适用于 portal/虚拟列表。返回容器、前后位置和 moved；滚动后必须重新 snapshot，因为可见内容和编号会变化。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "direction": { "type": "string", "enum": ["up", "down", "left", "right"], "description": "默认 down" },
-                        "amount": { "type": "integer", "description": "滚动像素，默认 600" },
-                        "ref": { "type": "integer", "description": "可选：快照中某个元素的编号，滚动它所在的滚动容器（填表/操作内嵌列表时用）" }
-                    },
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browser_tabs",
-                "description": "列出浏览器所有标签页（id/标题/网址/是否当前操作页）。",
-                "parameters": { "type": "object", "properties": {}, "required": [] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browser_activate_tab",
-                "description": "切换到指定标签页进行后续操作。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "integer", "description": "browser_tabs 返回的 id" }
-                    },
-                    "required": ["id"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browser_screenshot",
-                "description": "截取当前页面保存为 PNG 并返回路径。只要文字用 ocr_image 更省 token；理解画面时若当前模型能看图请直接看图，否则用 read_image。",
-                "parameters": { "type": "object", "properties": {}, "required": [] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browser_evaluate",
-                "description": "在当前页面执行 AI 动态生成的 JavaScript 并返回结构化结果，是 click/type/scroll 在复杂组件、虚拟列表、画布或页面语义不足时的通用补充能力，不绑定特定网站。优先先 snapshot 观察真实状态；先用只读脚本检查 DOM/ARIA/滚动尺寸/候选，再生成最小改动脚本，派发页面需要的事件，并在返回值中报告执行前后状态以便核验。可传 ref，表达式中用 `$el` 引用该快照元素。结构化参数放在 args，表达式中用 `$args` 读取，不要把长文本、路径、base64 拼进 expression；args 不依赖 ref。复杂逻辑写成 `async` IIFE。复用 ref 时必须沿用 snapshot 返回的通道：extension-debugger 对应 debugger，cdp 对应 cdp；页面导航、刷新或切换通道后须重新 snapshot。默认走扩展 debugger 主世界；无法附着时降级到 scripting 隔离世界。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "expression": { "type": "string", "description": "JS 表达式或 IIFE，返回可 JSON 序列化的值。例：`({role:$el?.getAttribute('role'), expanded:$el?.getAttribute('aria-expanded')})`；复杂操作用 `(async()=>{ /* inspect/action/verify */ return {...}; })()`" },
-                        "ref": { "type": "integer", "description": "可选：browser_snapshot 的元素编号；传入后表达式可直接使用 `$el`，避免编造脆弱 CSS 选择器" },
-                        "args": { "description": "可选：传给动态脚本的 JSON 值。表达式通过 `$args` 使用（不传 ref 时同样可用），避免手工拼接和转义用户文本" },
-                        "channel": {
-                            "type": "string",
-                            "enum": ["auto", "extension", "debugger", "cdp"],
-                            "description": "执行通道，默认 auto（扩展 debugger 主世界优先，失败再降 scripting，再不行独立 CDP）。extension=仅扩展 scripting（不降级）；debugger=扩展内嵌调试通道（同标签主世界，绕过 CSP，会显示调试提示条）；cdp=独立 CDP 调试实例（9222/9223，可能无登录态）"
-                        }
-                    },
-                    "required": ["expression"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browser_status",
-                "description": "查看浏览器连接通道状态（扩展桥 / CDP 调试实例 / 未连接）。浏览器工具异常时用它诊断。",
-                "parameters": { "type": "object", "properties": {}, "required": [] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "browser_fast_loop",
-                "description": "让 Jev 在一次主模型规划后连续执行多个低风险浏览器步骤。适合导航、查找、打开普通控件和填写用户已明确给出的非敏感文本；它会逐步重新观察页面并由 Jev 选择动作。复杂或低置信度状态会返回给你补充候选后再次调用，不要改成由主模型逐步点击。提交、发布、发送、删除、支付等敏感动作不会进入快速候选，仍须使用普通浏览器工具并遵守确认策略。",
-                "parameters": { "type": "object", "properties": {
-                    "goal": { "type": "string", "description": "本次浏览器任务的明确完成目标" },
-                    "inputs": { "type": "object", "description": "可选：字段语义到用户明确输入值的映射，如 {\"搜索\":\"关键词\"}。不得包含密码、Cookie、Token；不要自行编造值" },
-                    "max_steps": { "type": "integer", "description": "最多连续步骤，默认 8，范围 1-15" }
-                }, "required": ["goal"] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "find_browser_recipes",
-                "description": "查找已验证的浏览器操作经验/配方。完成浏览器任务前，已知当前页面 URL 且目标重复时可先查；结果仅作加速参考，执行前仍须用 browser_find 或紧凑快照核对当前页面。",
-                "parameters": { "type": "object", "properties": {
-                    "url": { "type": "string", "description": "当前页面 URL" },
-                    "goal": { "type": "string", "description": "当前任务目标关键词" }
-                }, "required": ["url"] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "save_browser_recipe",
-                "description": "在浏览器任务已实际完成且成功结果已核验后，保存可复用的声明式操作配方。只记录稳定的站点特征和 find/click/type/verify 动作，不记录账号、密码、cookie、用户正文或任意 JavaScript。不要在未验证、失败或一次性任务后保存。",
-                "parameters": { "type": "object", "properties": {
-                    "id": { "type": "integer", "description": "更新已有配方时填写；新建则省略" },
-                    "name": { "type": "string" }, "site_pattern": { "type": "string", "description": "稳定域名或 URL 片段，如 docs.example.com" },
-                    "goal": { "type": "string", "description": "适用目标" },
-                    "actions": { "type": "array", "description": "动作仅允许 find_click、find_type；find_type 的 value 可写 {{变量名}}。", "items": { "type": "object" } },
-                    "verification": { "type": "object", "description": "可选，url_contains 或 find_query；至少有一个才适合自动运行" }
-                }, "required": ["name", "site_pattern", "goal", "actions"] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "run_browser_recipe",
-                "description": "预检并执行已验证的浏览器配方。只在用户要求执行该流程且当前页面已知时使用；敏感的发送、发布、删除等动作仍遵循权限策略。页面不匹配、候选不唯一或验证失败时立即停止并返回，由 AI 使用正常浏览器工具接管，不会盲目重试。",
-                "parameters": { "type": "object", "properties": {
-                    "id": { "type": "integer" }, "variables": { "type": "object", "description": "填充 {{变量名}} 所需值；不得包含密码、cookie 或 token" }
-                }, "required": ["id"] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "propose_organization",
-                "description": "生成桌面整理方案并交给用户在界面上确认。方案只是提议，用户确认后系统才会移动/删除文件。分类的 action 为 delete 时文件会被移入回收站（可恢复），同样需要用户确认后才会执行。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "summary": { "type": "string", "description": "方案一句话概述" },
-                        "categories": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "name": { "type": "string", "description": "分类名，如 图片、文档；删除分类建议命名为「移入回收站」" },
-                                    "action": {
-                                        "type": "string",
-                                        "enum": ["move", "delete"],
-                                        "description": "move=移动到分类文件夹（默认）；delete=移入回收站。仅当用户明确要求删除或文件明显无用时才用 delete"
-                                    },
-                                    "files": {
-                                        "type": "array",
-                                        "items": { "type": "string" },
-                                        "description": "该分类下的文件名（与 scan_desktop 返回的 name 一致）"
-                                    }
-                                },
-                                "required": ["name", "files"]
-                            }
-                        }
-                    },
-                    "required": ["categories"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "add_todo",
-                "description": "新建用户的提醒待办（到点通知或弹窗）。当前这次任务的步骤进度请用 todo_write，不要写到这里。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "title": { "type": "string", "description": "待办标题" },
-                        "note": { "type": "string", "description": "备注，可选" },
-                        "due_at": { "type": "string", "description": "截止时间，本地时间格式 YYYY-MM-DD HH:MM:SS，可选" },
-                        "repeat_rule": { "type": "string", "enum": ["none", "daily", "weekly"], "description": "重复规则，默认 none" },
-                        "priority": { "type": "integer", "enum": [0, 1, 2], "description": "0 低 1 中 2 高，默认 1" },
-                        "remind_mode": { "type": "string", "enum": ["notify", "popup", "popup_input"], "description": "提醒方式，默认 notify（仅系统通知）。popup=弹窗提醒（用户明确要弹窗/强提醒时用）；popup_input=弹窗带输入框，用户填的内容会作为聊天消息发回给你处理——适合「提醒我写日报/周报，到时让我填内容」这类需要用户提交材料的提醒" }
-                    },
-                    "required": ["title"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_todos",
-                "description": "查询用户的提醒待办列表。当前这次任务的步骤进度请用 todo_write，不要用本工具。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "filter": { "type": "string", "enum": ["pending", "done", "all"], "description": "默认 pending" }
-                    },
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "complete_todo",
-                "description": "把待办标记为完成。",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "id": { "type": "integer", "description": "待办 id" } },
-                    "required": ["id"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "snooze_todo",
-                "description": "把待办提醒延后若干分钟。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "integer" },
-                        "minutes": { "type": "integer", "description": "延后分钟数，默认 10" }
-                    },
-                    "required": ["id"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_operation_history",
-                "description": "查询桌面整理的操作批次历史（用于回答或撤销）。",
-                "parameters": { "type": "object", "properties": {}, "required": [] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "undo_batch",
-                "description": "撤销某个整理批次，把该批次移动的文件移回原位置。",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "batch_id": { "type": "string" } },
-                    "required": ["batch_id"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "create_rule",
-                "description": "创建自动整理规则：桌面新文件命中规则时自动移动到目标分类文件夹。当用户表达“以后这类文件都……”时使用。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "规则名" },
-                        "match_type": { "type": "string", "enum": ["ext", "keyword", "regex"], "description": "匹配方式" },
-                        "pattern": { "type": "string", "description": "匹配模式：ext 用逗号分隔扩展名如 pdf,docx；keyword 用逗号分隔关键词；regex 写正则" },
-                        "target_name": { "type": "string", "description": "目标分类名（建在整理根目录下），如 图片" }
-                    },
-                    "required": ["name", "match_type", "pattern", "target_name"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "toggle_rule",
-                "description": "启用或停用某条自动整理规则。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "integer" },
-                        "enabled": { "type": "boolean" }
-                    },
-                    "required": ["id", "enabled"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_profile",
-                "description": "查看用户个人信息：固定字段（姓名/性别/出生年月/手机/邮箱/城市）+ AI 维护的自由条目（工作经历/自媒体号/项目描述等）。任务需要本人信息但对话中没有提供时调用。",
-                "parameters": { "type": "object", "properties": {}, "required": [] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "save_profile_entry",
-                "description": "保存/更新用户个人信息的自由条目（按 label 查重覆盖）。用户在聊天中透露了可长期复用的个人信息时主动保存：工作经历、技能、学历、自媒体账号、开发项目、作品链接、常用署名等。label 用简短名词（如「工作经历」「B站账号」），content 写具体内容（200字以内）。姓名/性别/出生年月等固定字段由用户在设置页维护，不要用本工具保存。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "label": { "type": "string", "description": "条目名，如 工作经历 / 自媒体账号 / 项目经历" },
-                        "content": { "type": "string", "description": "具体内容，保留长期有效信息，丢弃一次性细节" }
-                    },
-                    "required": ["label", "content"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "delete_profile_entry",
-                "description": "按 id 删除一条个人信息自由条目（先用 list_profile 获取 id）。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "integer" }
-                    },
-                    "required": ["id"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "run_subagent",
-                "description": "按任务自动委托，无须询问是否使用。research=资料调研，files=指定范围文件分析，browser=浏览器操作与实测。给准确目标、对象/环境、必要上下文、允许/排除范围、证据与产出绝对路径、少量关键节点。浏览器节点回传暂停后用reply_subagent审核/纠偏；阶段内部自主执行，不实时监控，不同时操作同一浏览器。简单单步直接完成。子代理不得再委托。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "role": {"type":"string","enum":["auto","research","files","browser"],"description":"默认auto；浏览器操作明确选browser"},
-                        "task": { "type": "string", "description": "子任务描述：具体、自包含，写清要做什么、结论里要包含什么" },
-                        "context": { "type": "string", "description": "可选：子代理需要的背景信息（关键文件路径、目标格式、用户偏好等）" },
-                        "run_in_background": { "type": "boolean", "description": "true 时立即返回 job_id，子代理在后台跑。默认 false（同步等待汇报）" },
-                        "await": { "type": "boolean", "description": "仅 run_in_background=true 时有效：true 则挂起直到结束。默认 false" }
-                    },
-                    "required": ["task"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "reply_subagent",
-                "description": "用原job_id回答浏览器子代理的问题、审核关键节点或纠偏。明确继续阶段和边界；不能代替用户回答waiting_user。暂停或错误可补充意见继续，勿另起任务。",
-                "parameters":{"type":"object","properties":{"job_id":{"type":"string"},"content":{"type":"string"}},"required":["job_id","content"]}
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "await_subagent",
-                "description": "挂起当前对话，直到指定后台子代理结束，再带着结构化汇报继续。等待期间不消耗工具轮次。不要用它轮询仍在运行的任务。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "job_id": { "type": "string", "description": "run_subagent 返回的 job_id" },
-                        "timeout_secs": { "type": "integer", "description": "最长等待秒数，默认 300" }
-                    },
-                    "required": ["job_id"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "lookup_cache",
-                "description": "本地缓存外部 CLI/API 的稳定对照数据（id↔名称、字段定义、选项列表、资源目录），避免每次任务都把大段实时输出灌进对话。不绑定某一家 CLI。读对照表用 get；没有或过期再调用外部命令，把提炼后的短表 put 回来。当天日程、最新一条记录等会变的数据不要缓存；密钥/token 不要写入。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["get", "put", "list", "delete"], "description": "get 读取；put 写入提炼后的对照表；list 只返回目录不含正文；delete 删除" },
-                        "key": { "type": "string", "description": "稳定键名，建议 来源.对象.用途，如 lark.base.T1O7.projects、aliyun.ecs.regions" },
-                        "value": { "type": "string", "description": "action=put 时必填。只放提炼后的对照表（JSON/短文本），不要放 CLI 原始大段输出" },
-                        "source": { "type": "string", "description": "可选来源标签，如 lark-cli、aliyun；put 时写入，list 时可过滤" },
-                        "summary": { "type": "string", "description": "put 时的一句话摘要，会出现在缓存目录里" },
-                        "ttl_secs": { "type": "integer", "description": "put 时的有效期秒数，默认 7 天；0 表示直到手动删除" }
-                    },
-                    "required": ["action"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "run_command",
-                "description": "同步执行一条 Windows 命令并等待结束（默认 60 秒超时）。调用外部程序时优先用 argv：每个参数独立一项，JSON/空格/中文不必转义；系统直启进程，按 PATHEXT 解析 exe/cmd，不会命中同名 .ps1。JSON 入参放 stdin 或 files（工作目录文件，argv 里写 @文件名）；不要拼进命令字符串，也不必先 create_file。stdout 若是 JSON 会自动解析：小结果在 json 字段，大结果给 json_summary（必要时 json_file），不要再重定向到文件后 read_file；只要子集时用 json_pointer。只有 cmd 内建命令或 PowerShell 语法（$变量、管道、对象）才用 command+shell。PowerShell 走 EncodedCommand，动态值放 script_args（脚本里 $DHArgs），不要再包 powershell -Command。PowerShell 管道无匹配时是 $null，取 .Count 前用 @()。失败时按 guidance 修正，不能声称成功。预计超过几十秒的命令、安装、构建或自己写的脚本，改用 run_command_background 并 await=true，不要用 check_task 轮询。破坏性操作须征得同意。整盘、跨目录或大量文件扫描优先 search_files。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "argv": { "type": "array", "items": { "type": "string" }, "description": "推荐。外部程序+参数，每项一个参数，例如 [\"git\", \"status\", \"-sb\"]。第一项只放程序名，不要把整条命令塞进一项" },
-                        "command": { "type": "string", "description": "cmd 内建命令或 PowerShell 脚本正文。有 argv 时忽略。PowerShell 模式直接写 `$dirs=...`，不要再包 powershell -Command" },
-                        "stdin": { "type": "string", "description": "写入子进程标准输入的文本（UTF-8）。JSON/长文本优先放这里，不要拼进命令行" },
-                        "files": { "type": "object", "description": "在工作目录先写入若干文件再执行。键为文件名（仅字母数字 . - _），值为字符串或 JSON 对象/数组（自动序列化）。适合要求 @file 的 CLI 入参；未指定 workdir 时自动用应用临时目录。不要为此单独 create_file" },
-                        "json_pointer": { "type": "string", "description": "可选。RFC 6901 指针，例如 /data/items。仅当 stdout 为 JSON 时生效，用来只取子集" },
-                        "shell": { "type": "string", "enum": ["auto", "cmd", "powershell"], "description": "仅 command 使用，默认 auto。cmd 内建选 cmd；`$变量`/管道/对象/多行脚本选 powershell。有 argv 时忽略" },
-                        "powershell_strict": { "type": "boolean", "description": "PowerShell 是否启用严格变量检查和错误即停，默认 true。管道无匹配时是 $null，取 .Count 前用 @()；不要为了 Count 关闭严格模式" },
-                        "success_exit_codes": { "type": "array", "items": { "type": "integer" }, "description": "被视为成功的退出码，默认 [0]；仅按目标程序文档扩展，例如某些同步/差异工具" },
-                        "script_args": { "description": "PowerShell 的结构化 JSON 参数；脚本中通过 `$DHArgs` 读取。用户提供的路径、关键词、文本等动态数据优先放这里，不要拼入脚本字符串" },
-                        "environment": { "type": "object", "additionalProperties": { "type": "string" }, "description": "可选环境变量键值；适合向 CLI 安全传递配置，避免把动态值拼进命令。不得包含敏感信息，除非当前任务确实需要" },
-                        "workdir": { "type": "string", "description": "工作目录（绝对路径）。默认桌面；有 files 时默认改为应用临时目录。命令会写中间文件时必须设为系统提示词中的临时目录" },
-                        "timeout_secs": { "type": "integer", "description": "超时秒数，默认 60，上限 600；超时自动终止" },
-                        "tail_chars": { "type": "integer", "description": "非 JSON 输出时返回的末尾字符数，默认 2000，上限 8000。stdout 为 JSON 时忽略，改走自动解析" }
-                    },
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "run_command_background",
-                "description": "在后台执行 Windows 命令或 PowerShell 脚本（构建、下载、批量处理、启动服务、自己写的脚本等耗时任务），立即返回 task_id。argv / stdin / command / shell 的选择规则与 run_command 相同：外部程序用 argv，结构化正文用 stdin，脚本才用 command。预计会跑很久时必须 await=true：当前对话会挂起、不消耗工具轮次去轮询，任务结束后带着结果自动继续。不要用 check_task 反复查询。破坏性命令必须先向用户说明并征得同意。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "argv": { "type": "array", "items": { "type": "string" }, "description": "推荐。外部程序+参数，每项一个参数；第一项只放程序名" },
-                        "command": { "type": "string", "description": "cmd 内建命令或 PowerShell 脚本正文；有 argv 时忽略" },
-                        "stdin": { "type": "string", "description": "写入子进程标准输入的文本（UTF-8）" },
-                        "files": { "type": "object", "description": "在工作目录先写入若干文件再执行；规则与 run_command 相同" },
-                        "shell": { "type": "string", "enum": ["auto", "cmd", "powershell"], "description": "仅 command 使用，默认 auto；cmd 内建选 cmd，PowerShell 语法和 `$变量` 选 powershell" },
-                        "powershell_strict": { "type": "boolean", "description": "PowerShell 严格模式，默认 true。管道无匹配时取 .Count 前用 @()；不要为了 Count 关闭严格模式" },
-                        "success_exit_codes": { "type": "array", "items": { "type": "integer" }, "description": "成功退出码，默认 [0]；只依据目标程序的退出码语义扩展" },
-                        "script_args": { "description": "PowerShell 结构化 JSON 参数，脚本中通过 `$DHArgs` 读取；避免拼接动态文本" },
-                        "environment": { "type": "object", "additionalProperties": { "type": "string" }, "description": "传给子进程的环境变量键值" },
-                        "label": { "type": "string", "description": "任务备注名（如「构建前端」），方便用户识别" },
-                        "workdir": { "type": "string", "description": "工作目录（绝对路径）。默认桌面；有 files 时默认改为应用临时目录。命令会写中间文件时必须设为系统提示词中的临时目录" },
-                        "await": { "type": "boolean", "description": "true：启动后挂起当前对话直到任务结束，完成后自动继续。长时间命令和自己写的脚本都应设为 true。不要用 check_task 轮询" },
-                        "timeout_secs": { "type": "integer", "description": "仅 await=true 时生效：最长等待秒数，默认 7200（2 小时），上限 86400。超时不杀进程，可再 await_task" }
-                    },
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "await_task",
-                "description": "挂起当前对话，直到指定后台任务结束，再带着输出继续。等待期间不消耗工具调用轮次。长时间命令、安装、构建、自己写的脚本在 run_command_background 之后应立刻调用本工具（或直接给 background 设 await=true）。不要用 check_task 反复查询。用户中断对话会停止该任务。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task_id": { "type": "string", "description": "run_command_background 返回的 task_id" },
-                        "timeout_secs": { "type": "integer", "description": "最长等待秒数，默认 7200（2 小时），上限 86400。超时不杀进程" },
-                        "json_pointer": { "type": "string", "description": "可选。任务结束后若 stdout 为 JSON，按 RFC 6901 取子集" },
-                        "tail_chars": { "type": "integer", "description": "非 JSON 输出时返回末尾字符数，默认 2000，上限 8000" }
-                    },
-                    "required": ["task_id"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "check_task",
-                "description": "查看已结束任务的输出片段，或确认当前状态。不要用它轮询尚未结束的长时间任务，那会很快耗尽工具轮次；应改用 await_task，或给 run_command_background 设 await=true，任务结束后对话会自动继续。stdout 若是 JSON 会自动解析；可用 json_pointer 取子集。非 JSON 时默认返回末尾 tail_chars 字符。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task_id": { "type": "string", "description": "run_command_background 返回的 task_id" },
-                        "tail_chars": { "type": "integer", "description": "非 JSON 输出时返回末尾字符数，默认 2000，上限 8000" },
-                        "pattern": { "type": "string", "description": "可选：只取包含该关键字的行（如 error、失败、完成）；与 json_pointer 同时出现时以 json_pointer 为准" },
-                        "json_pointer": { "type": "string", "description": "可选。从该任务 stdout 的 JSON 里取子集（RFC 6901），不必重跑 CLI" }
-                    },
-                    "required": ["task_id"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_tasks",
-                "description": "列出所有后台任务（id/状态/命令/起止时间/日志路径，不含输出内容）。",
-                "parameters": { "type": "object", "properties": {}, "required": [] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "stop_task",
-                "description": "停止一个正在运行的后台任务（结束整棵进程树）。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task_id": { "type": "string", "description": "要停止的任务 id" }
-                    },
-                    "required": ["task_id"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_system_info",
-                "description": "查询本机硬件与运行状态，返回结构化 JSON：操作系统、CPU、内存、磁盘、GPU、电池、进程占用。也可用 run_command 自行执行 systeminfo / Get-CimInstance 等命令达到同样目的；本工具只是省去拼命令和解析输出。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "category": {
-                            "type": "string",
-                            "enum": ["overview", "cpu", "memory", "disk", "gpu", "battery", "process"],
-                            "description": "overview=整机概览（默认）；cpu/memory/disk/gpu/battery=单项；process=进程列表"
-                        },
-                        "sort_by": {
-                            "type": "string",
-                            "enum": ["memory", "cpu"],
-                            "description": "仅 process：排序字段，默认 memory"
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "仅 process：返回前 N 个，默认 15，上限 50"
-                        }
-                    },
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_skills",
-                "description": "列出已安装 Skills（含 scope=internal|external、启用状态）。目录通常已在系统提示之后的 Skills 消息里；需核对全量、含未启用项、或确认某技能是否存在时调用。",
-                "parameters": { "type": "object", "properties": {}, "required": [] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "load_skill",
-                "description": "加载某个 Skill 的完整 SKILL.md。目录描述与当前目标相符时先调用再执行。对话里已有该技能的 <skill_content> 时不要再调用。内部技能只读；不要凭摘要猜步骤。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "技能名（与目录中的 name 一致）" }
-                    },
-                    "required": ["name"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "ask_user",
-                "description": "仅在缺少无法安全获取的关键输入、存在实质歧义或需要新增授权时调用。只读检查、常规下一步、实现细节及已授权的同范围操作不要提问；相关问题合并一次询问，专用方案卡已确认的操作不重复确认。会在聊天里弹出选项卡片并等待回答；在收到结果前不要继续执行有副作用的操作。问题用用户能听懂的话说清影响、是否可撤销、同意后会发生什么。选项写具体后果，不要只写「是/否」；若有建议，把该项放第一并在 label 末尾加「（建议）」。一次只问当前必须决定的事，最多 4 题。用户关掉卡片会返回 dismissed：继续等下一条消息，不要当成同意，也不要立刻再弹同一问题。整理方案仍用 propose_organization 的方案卡片，不要用本工具替代。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "questions": {
-                            "type": "array",
-                            "description": "要问的问题，1–4 个",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "id": { "type": "string", "description": "稳定 id，会随答案原样返回" },
-                                    "question": { "type": "string", "description": "问题正文" },
-                                    "header": { "type": "string", "description": "可选短标题，如「允许系统确认」" },
-                                    "options": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "label": { "type": "string", "description": "选项按钮上的短句" },
-                                                "description": { "type": "string", "description": "选项的补充说明，可空" }
-                                            },
-                                            "required": ["label"]
-                                        }
-                                    },
-                                    "multi_select": { "type": "boolean", "description": "是否可多选，默认 false。无选项时不要设为 true" }
-                                },
-                                "required": ["id", "question"]
-                            }
-                        }
-                    },
-                    "required": ["questions"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "todo_write",
-                "description": "更新当前这次回复里正在做的步骤进度，会在聊天窗显示进度条。每次传入完整列表（整表替换）。用于多步任务让你和用户都看清做到哪；不是提醒待办——用户要事后提醒才用 add_todo。条目 content 简短、互不重复；同一时刻最多一项 in_progress；完成一项就标 completed 并立刻更新。两三步以内的简单问答不必调用。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "todos": {
-                            "type": "array",
-                            "description": "完整进度列表，1–12 项",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "content": { "type": "string", "description": "一步要做的事，最多 80 字" },
-                                    "status": {
-                                        "type": "string",
-                                        "enum": ["pending", "in_progress", "completed"],
-                                        "description": "pending 未开始，in_progress 正在做，completed 已完成"
-                                    }
-                                },
-                                "required": ["content", "status"]
-                            }
-                        }
-                    },
-                    "required": ["todos"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "web_search",
-                "description": "搜索公开网页，返回标题和链接。需要某条结果的全文时再 web_fetch。用户已经打开的标签页用 browser_*，不要用本工具去操作浏览器。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "description": "搜索词，尽量具体" }
-                    },
-                    "required": ["query"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "web_fetch",
-                "description": "抓取一个 http/https 公开网页的正文。不要抓本机或带账号密码的网址。用户已经打开的页面用 browser_read / browser_snapshot。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": { "type": "string", "description": "完整 http/https 网址" }
-                    },
-                    "required": ["url"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "create_skill",
-                "description": "创建或覆盖一条【外部】Skill。内部技能禁止覆盖。完整完成用户目标后，用它沉淀可复用路径（description 写触发场景，body 写步骤与坑点，丢弃一次性文案/数字/时间）；中途失败不要调用。用户要求新建/改外部技能时也用它。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "技能标识名，建议小写英文+连字符，如 git-auto-commit-zh" },
-                        "description": { "type": "string", "description": "触发场景描述：什么时候该用这个技能（会进目录摘要，写清楚触发词）" },
-                        "body": { "type": "string", "description": "技能正文 Markdown：步骤、约束、示例等" }
-                    },
-                    "required": ["name", "description", "body"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "skill_resource",
-                "description": "管理【外部】Skill 私有目录中的资源文件。路径始终相对于该技能目录，不能访问目录之外；SKILL.md 必须用 create_skill 修改。list 列出资源，read 读取 UTF-8 文本，write 新建或覆盖代码、模板、配置等文本文件。用户要求技能保存持久文件或修改自己的代码/资源时使用。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["list", "read", "write"] },
-                        "name": { "type": "string", "description": "外部技能名" },
-                        "path": { "type": "string", "description": "read/write 使用的技能内相对路径，如 scripts/main.py" },
-                        "content": { "type": "string", "description": "write 写入的完整 UTF-8 文本，最大 1 MB" }
-                    },
-                    "required": ["action", "name"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "run_skill_program",
-                "description": "执行【外部】Skill 私有目录中的程序，工作目录固定为该技能目录。程序可自行读写技能资源、创建 SQLite 等持久数据。必须先通过 skill_resource 写入或确认入口文件；需启用设置中的命令执行功能。入口路径不能越出技能目录。注意：这是普通本机进程，工作目录隔离不等于操作系统沙箱，程序主动使用绝对路径时仍继承当前用户权限。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "外部技能名" },
-                        "entry": { "type": "string", "description": "技能内入口文件，如 scripts/main.py" },
-                        "runtime": { "type": "string", "enum": ["python", "node", "powershell", "direct"], "description": "入口运行方式；direct 用于技能内 exe/cmd/bat" },
-                        "args": { "type": "array", "items": { "type": "string" }, "description": "传给程序的参数，每项独立，不需要命令行转义" },
-                        "stdin": { "type": "string", "description": "可选标准输入" },
-                        "timeout_secs": { "type": "integer", "description": "超时秒数，默认 60，范围 1–300" }
-                    },
-                    "required": ["name", "entry", "runtime"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "delete_skill",
-                "description": "删除一条【外部】Skill（不可恢复）。内部技能禁止删除。仅用户明确要求时调用。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "要删除的技能名" }
-                    },
-                    "required": ["name"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_workflows",
-                "description": "列出用户保存的可执行工作流（固定流程，可手动或定时运行）。它不同于 Skill：Skill 是给 AI 的方法说明，不会直接执行；工作流保存一次具体工作的执行指令与计划。",
-                "parameters": { "type": "object", "properties": {}, "required": [] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "create_workflow",
-                "description": "新建或更新可执行工作流。用户要求把固定流程封装、设为定时任务时使用。prompt 写完整、可执行的固定指令；不要把通用方法论做成工作流，应改用 Skill。schedule_rule=manual/once/daily/weekly；非 manual 必须给 next_run_at（本地 YYYY-MM-DD HH:MM:SS）。",
-                "parameters": { "type": "object", "properties": {
-                    "id": { "type": "integer", "description": "更新已有工作流时填写；新建则省略" },
-                    "name": { "type": "string", "description": "用户可辨识的名称，最多 60 字" },
-                    "description": { "type": "string", "description": "该流程产出什么、何时适用" },
-                    "prompt": { "type": "string", "description": "每次运行时发给 AI 的完整固定执行指令" },
-                    "schedule_rule": { "type": "string", "enum": ["manual", "once", "daily", "weekly"] },
-                    "next_run_at": { "type": "string", "description": "定时计划的首次/下次执行时间，YYYY-MM-DD HH:MM:SS" },
-                    "enabled": { "type": "boolean", "description": "是否允许定时触发，默认 true" }
-                }, "required": ["name", "description", "prompt", "schedule_rule"] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "manage_workflow",
-                "description": "管理可执行工作流：run 手动启动，delete 删除（仅在用户明确要求时），enable/disable 控制定时触发。",
-                "parameters": { "type": "object", "properties": {
-                    "action": { "type": "string", "enum": ["run", "delete", "enable", "disable"] },
-                    "id": { "type": "integer" }
-                }, "required": ["action", "id"] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "manage_skill",
-                "description": "管理 Skill：enable/disable（内外部均可）、scan/sync 从本机 Claude/Codex/Cursor 导入为外部技能。不能用 sync 覆盖内部技能。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "enum": ["enable", "disable", "scan", "sync"],
-                            "description": "enable/disable 需 name；scan 扫描外部候选；sync 导入到本地"
-                        },
-                        "name": { "type": "string", "description": "enable/disable 时的技能名" },
-                        "source": {
-                            "type": "string",
-                            "enum": ["claude", "codex", "cursor", "cursor-builtin"],
-                            "description": "sync/scan 可选：只处理该来源；留空则全部"
-                        },
-                        "names": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "sync 可选：只同步这些技能名；留空则同步该来源下全部"
-                        },
-                        "overwrite": {
-                            "type": "boolean",
-                            "description": "sync 时若本地已有同名技能是否覆盖，默认 false（跳过）"
-                        }
-                    },
-                    "required": ["action"]
-                }
+/// discover_capabilities 的类别枚举写在 core 插件里；其它插件新增的类别在这里补进去，
+/// 内置类别集合不变时定义逐字节不变。
+fn extend_discovery_categories(snapshot: &crate::plugins::Snapshot, tools: &mut [Value]) {
+    for tool in tools.iter_mut() {
+        if tool.pointer("/function/name").and_then(Value::as_str) != Some(DISCOVER_TOOL) {
+            continue;
+        }
+        let known: Vec<String> = tool
+            .pointer("/function/parameters/properties/categories/items/enum")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_default();
+        let extra: Vec<&crate::plugins::Category> = snapshot
+            .categories
+            .iter()
+            .filter(|c| !c.tools.is_empty() && !known.contains(&c.id))
+            .collect();
+        if extra.is_empty() {
+            continue;
+        }
+        if let Some(items) = tool
+            .pointer_mut("/function/parameters/properties/categories/items/enum")
+            .and_then(Value::as_array_mut)
+        {
+            for category in &extra {
+                items.push(json!(category.id));
             }
         }
-    ])
+        if let Some(description) = tool.pointer_mut("/function/parameters/properties/categories/description") {
+            if let Some(text) = description.as_str() {
+                let mut text = text.to_string();
+                for category in &extra {
+                    let summary = if category.description.is_empty() { &category.label } else { &category.description };
+                    text.push_str(&format!("；{}={}", category.id, summary));
+                }
+                *description = json!(text);
+            }
+        }
+    }
 }
 
-/// 首次启动时把代码中的基础定义写入运行时注册表。INSERT OR IGNORE 保证后续可直接
-/// 修改数据库里的描述、Schema、启停状态和执行映射，重启或升级不会把它们覆盖。
+/// 工具是否满足插件声明的 when 条件（如 setting:read_image_enabled）。
+fn tool_condition_met(db: &Db, name: &str) -> bool {
+    let snapshot = crate::plugins::snapshot();
+    let Some(when) = snapshot.tool(name).and_then(|t| t.when.clone()) else { return true };
+    match when.as_str() {
+        "setting:read_image_enabled" => crate::commands::load_settings(db).read_image_enabled,
+        other => {
+            if let Some(key) = other.strip_prefix("setting:") {
+                db.get_setting(key).ok().flatten().is_some_and(|v| v == "true")
+            } else {
+                true
+            }
+        }
+    }
+}
+
+/// 把插件提供的工具写入运行时注册表。INSERT OR IGNORE 保证后续可直接修改数据库里的
+/// 描述、Schema、启停状态，重启、升级或插件重载都不会把它们覆盖。
+/// 内置插件的工具 source=builtin；用户插件的工具 source=plugin:<id>。
 pub fn seed_registry(db: &Db) -> Result<usize> {
     let now = crate::db::now_str();
-    let entries = definitions()
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|definition| {
-            let name = definition.pointer("/function/name")?.as_str()?.to_string();
-            let is_cookie_bridge = name == "browser_cookies";
-            Some(crate::db::ToolRegistryEntry {
-                category: category_for_tool(&name).to_string(),
-                executor_kind: if is_cookie_bridge {
-                    "browser_action".to_string()
-                } else {
-                    "builtin".to_string()
-                },
-                executor_config: if is_cookie_bridge {
-                    json!({ "action": "cookies", "extension_only": true })
-                } else {
-                    json!({})
-                },
-                name,
-                definition,
+    let snapshot = crate::plugins::snapshot();
+    let entries = snapshot
+        .tools
+        .iter()
+        .filter(|tool| snapshot.retired_message(&tool.name).is_none())
+        .map(|tool| {
+            let builtin = snapshot.plugin(&tool.plugin).is_some_and(|p| p.builtin);
+            let browser = tool.executor_kind() == "browser_action";
+            crate::db::ToolRegistryEntry {
+                category: snapshot.category_for_tool(&tool.name),
+                // 注册表只记录白名单内的执行器；插件执行器（script/mcp/...）以插件文件为准。
+                executor_kind: if browser { "browser_action" } else { "builtin" }.to_string(),
+                executor_config: if browser { tool.executor.clone() } else { json!({}) },
+                name: tool.name.clone(),
+                definition: tool.definition.clone(),
                 enabled: true,
-                source: "builtin".to_string(),
+                source: if builtin { "builtin".to_string() } else { format!("plugin:{}", tool.plugin) },
                 revision: 1,
                 updated_at: now.clone(),
-            })
+            }
         })
         .collect::<Vec<_>>();
     db.seed_tool_registry(&entries)
+}
+
+/// 注册表条目是否来自插件（而非手工加入）。来自插件的条目在插件停用/删除后不再提供。
+fn plugin_sourced(entry: &crate::db::ToolRegistryEntry) -> bool {
+    entry.source == "builtin" || entry.source.starts_with("plugin:")
+}
+
+/// 未被手工改过的条目，类别跟随插件；改过的保留数据库里的值。
+fn effective_category(entry: &crate::db::ToolRegistryEntry) -> String {
+    if plugin_sourced(entry) && entry.revision <= 1 {
+        let snapshot = crate::plugins::snapshot();
+        if snapshot.tool(&entry.name).is_some() {
+            return snapshot.category_for_tool(&entry.name);
+        }
+    }
+    entry.category.clone()
 }
 
 pub fn registry_definitions(db: &Db, native_vision: bool) -> Value {
@@ -1310,7 +172,8 @@ pub fn registry_definitions(db: &Db, native_vision: bool) -> Value {
         entries
             .into_iter()
             .filter(|entry| entry.definition.is_object() && !retired_tool(&entry.name))
-            .filter(|entry| entry.name != "read_image" || crate::commands::load_settings(db).read_image_enabled)
+            .filter(|entry| !plugin_sourced(entry) || current.contains_key(&entry.name))
+            .filter(|entry| tool_condition_met(db, &entry.name))
             .map(|entry| {
                 let mut definition = entry.definition;
                 if entry.source == "builtin" && entry.revision <= 1 {
@@ -1348,8 +211,23 @@ pub fn registry_definitions(db: &Db, native_vision: bool) -> Value {
                 }
                 definition
             })
-            .collect(),
+            .collect::<Vec<_>>(),
     )
+    .pipe_discovery()
+}
+
+trait PipeDiscovery {
+    fn pipe_discovery(self) -> Value;
+}
+
+impl PipeDiscovery for Value {
+    /// 被手工改过的发现工具也要能看到插件新增的类别。
+    fn pipe_discovery(mut self) -> Value {
+        if let Some(items) = self.as_array_mut() {
+            extend_discovery_categories(&crate::plugins::snapshot(), items);
+        }
+        self
+    }
 }
 
 pub fn registry_definitions_for(db: &Db, names: &[String], native_vision: bool) -> Value {
@@ -1381,7 +259,10 @@ pub fn registry_definitions_for_categories(
     }
     let core = core_tool_names();
     let selected: HashSet<String> = entries.into_iter()
-        .filter(|entry| entry.category == "core" || core.contains(&entry.name) || categories.contains(&entry.category))
+        .filter(|entry| {
+            let category = effective_category(entry);
+            category == "core" || core.contains(&entry.name) || categories.contains(&category)
+        })
         .map(|entry| entry.name)
         .collect();
     // Apply the same compatibility upgrades as the full inventory before filtering.
@@ -1716,6 +597,7 @@ fn query_current_session_tool_history(db: &Db, session_id: i64, args: &Value) ->
     }
 }
 
+/// 工具执行入口：插件钩子（before_tool / after_tool）包在外层，内部按执行器分派。
 pub async fn execute(
     app: &AppHandle,
     name: &str,
@@ -1723,7 +605,27 @@ pub async fn execute(
     cancel: &tokio_util::sync::CancellationToken,
     session_id: i64,
 ) -> Result<Value> {
-    if retired_tool(name) { bail!("该能力已下线。整理偏好请更新 desktop-organize 外部 Skill，通用流程请使用 Skill。"); }
+    if let Some(message) = crate::plugins::snapshot().retired_message(name) {
+        bail!("{message}");
+    }
+    if !crate::plugins::hooks::any_hooks() {
+        return execute_inner(app, name, args, cancel, session_id).await;
+    }
+    let args = match crate::plugins::hooks::before_tool(app, name, args, session_id).await {
+        crate::plugins::hooks::Before::Allow(args) => args,
+        crate::plugins::hooks::Before::Block(reason) => bail!("{reason}"),
+    };
+    let result = Box::pin(execute_inner(app, name, &args, cancel, session_id)).await?;
+    Ok(crate::plugins::hooks::after_tool(app, name, &args, result, session_id).await)
+}
+
+async fn execute_inner(
+    app: &AppHandle,
+    name: &str,
+    args: &Value,
+    cancel: &tokio_util::sync::CancellationToken,
+    session_id: i64,
+) -> Result<Value> {
     let state = app.state::<crate::AppState>();
     let db = &state.db;
     if let Some(entry) = db.tool_registry_entry(name)? {
@@ -1748,8 +650,18 @@ pub async fn execute(
             bail!("工具 {name} 的执行器 {} 尚未受支持", entry.executor_kind);
         }
     }
-    if crate::server_tools::definitions().iter().any(|t| t["name"].as_str() == Some(name)) {
-        return crate::servers::dispatch(app, name, args).await;
+    let spec = crate::plugins::snapshot().tool(name).cloned();
+    if let Some(spec) = &spec {
+        // 插件执行器（alias / command / http / mcp / script / browser_action）。
+        if let Some(result) = crate::plugins::executors::execute(app, spec, args, cancel, session_id).await {
+            return result;
+        }
+        if spec.plugin == "servers" {
+            return crate::servers::dispatch(app, name, args).await;
+        }
+    }
+    if crate::plugins::authoring::TOOL_NAMES.contains(&name) {
+        return crate::plugins::authoring::execute(app, name, args, cancel).await;
     }
     if crate::workspaces::TOOL_NAMES.contains(&name) {
         return crate::workspaces::execute(app, name, args, cancel, session_id).await;
@@ -3304,24 +2216,24 @@ mod capability_tests {
     #[test]
     fn core_exposes_discovery_history_and_skill_loading() {
         let definitions = definitions_for(&core_tool_names());
-        let names: Vec<_> = definitions
+        let mut names: Vec<_> = definitions
             .as_array()
             .unwrap()
             .iter()
             .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
             .collect();
-        assert_eq!(
-            names,
-            vec![
-                "discover_capabilities",
-                "get_tool_call_history",
-                "recall_session",
-                "load_skill",
-                "ask_user",
-                "todo_write",
-                "workspace_open"
-            ]
-        );
+        names.sort();
+        let mut expected = vec![
+            "discover_capabilities",
+            "get_tool_call_history",
+            "recall_session",
+            "load_skill",
+            "ask_user",
+            "todo_write",
+            "workspace_open",
+        ];
+        expected.sort();
+        assert_eq!(names, expected);
     }
 
     #[test]
@@ -4841,3 +3753,4 @@ async fn browser_tool(app: &AppHandle, name: &str, args: &Value) -> Result<Value
     }
     state.browser.call(action, args.clone()).await
 }
+

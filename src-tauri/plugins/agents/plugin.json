@@ -1,0 +1,31 @@
+{
+  "id": "agents",
+  "name": "编码智能体",
+  "version": "1.0.0",
+  "description": "把代码修改外派给 Claude Code / Codex。",
+  "order": 75,
+  "tools": [
+    "tools.json"
+  ],
+  "categories": {
+    "agents": {
+      "label": "外派",
+      "tools": [
+        "delegate_to_agent",
+        "await_agent",
+        "agent_reply",
+        "stop_agent",
+        "list_agents",
+        "finish_agent_worktree"
+      ]
+    }
+  },
+  "ui": {
+    "windows": [
+      {
+        "route": "agent-run",
+        "component": "builtin:AgentRunWindow"
+      }
+    ]
+  }
+}

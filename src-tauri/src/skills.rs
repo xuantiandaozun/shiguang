@@ -1,7 +1,7 @@
 //! Agent Skills：可复用工作流说明书（兼容 Claude / Codex / Cursor 的 SKILL.md）。
 //!
 //! ## 两类技能
-//! - **internal（内部）**：编译期嵌入（`builtin_skills`），只读；只能改代码重新打包更新。
+//! - **internal（内部）**：内置插件的 skills 目录（`builtin_skills`），运行时只读；改文件即生效。
 //!   用户可启用/禁用，AI/UI 不能创建、覆盖、删除。
 //! - **external（外部）**：`app_data/skills/<name>/`，AI 与用户可自由创建/修改/删除/从
 //!   Claude·Codex·Cursor 同步；也承接由旧「工作流经验」迁移来的条目。
@@ -61,16 +61,15 @@ impl SkillStore {
     pub fn new(app_dir: &Path) -> Self {
         let dir = app_dir.join("skills");
         let _ = fs::create_dir_all(&dir);
-        // Seed once without overwriting user/AI edits on subsequent launches.
-        let seed_dir = dir.join("desktop-organize");
-        let seed_path = seed_dir.join("SKILL.md");
-        if !seed_path.exists() {
-            if let Err(error) = (|| -> std::io::Result<()> {
-                fs::create_dir_all(&seed_dir)?;
-                use std::io::Write;
-                let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&seed_path)?;
-                file.write_all(include_str!("../default-skills/desktop-organize/SKILL.md").as_bytes())
-            })() { log::warn!("初始化桌面整理外部技能失败: {error}"); }
+        // 插件的默认 Skills 首次释放到用户目录，之后不覆盖用户/AI 的修改。
+        for (name, source) in crate::plugins::snapshot().default_skills() {
+            let seed_dir = dir.join(&name);
+            if seed_dir.join("SKILL.md").exists() {
+                continue;
+            }
+            if let Err(error) = copy_dir_recursive(&source, &seed_dir) {
+                log::warn!("初始化默认技能 {name} 失败: {error}");
+            }
         }
         let meta_path = dir.join(".meta.json");
         let meta = load_meta(&meta_path);
@@ -96,14 +95,14 @@ impl SkillStore {
         let mut names: HashSet<String> = HashSet::new();
 
         // 内部技能优先
-        for (name, content) in builtin_skills::ALL {
+        for (name, content) in builtin_skills::all() {
             let fake_path = PathBuf::from(format!("{}/SKILL.md", name));
-            let Ok(parsed) = parse_frontmatter(content, &fake_path) else {
+            let Ok(parsed) = parse_frontmatter(&content, &fake_path) else {
                 continue;
             };
             let enabled = meta
                 .as_ref()
-                .and_then(|m| m.enabled.get(*name).copied())
+                .and_then(|m| m.enabled.get(name.as_str()).copied())
                 .unwrap_or(true);
             names.insert(name.to_string());
             out.push(SkillInfo {
@@ -241,7 +240,7 @@ impl SkillStore {
     pub fn read_raw(&self, name: &str) -> Result<String> {
         let name = sanitize_name(name)?;
         if let Some(content) = builtin_skills::get(&name) {
-            return Ok(clamp_content(content, "builtin"));
+            return Ok(clamp_content(&content, "builtin"));
         }
         let path = self.dir.join(&name).join("SKILL.md");
         if !path.is_file() {
@@ -965,16 +964,16 @@ mod tests {
 
     #[test]
     fn builtin_desktop_organize_parses() {
-        let content = include_str!("../default-skills/desktop-organize/SKILL.md");
-        let parsed = parse_frontmatter(content, Path::new("desktop-organize/SKILL.md")).unwrap();
+        let content = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins/organize/default-skills/desktop-organize/SKILL.md")).unwrap();
+        let parsed = parse_frontmatter(&content, Path::new("desktop-organize/SKILL.md")).unwrap();
         assert_eq!(parsed.name, "desktop-organize");
         assert!(!parsed.description.is_empty());
     }
 
     #[test]
     fn builtin_windows_cli_parses() {
-        let content = builtin_skills::get("windows-cli").expect("embedded");
-        let parsed = parse_frontmatter(content, Path::new("windows-cli/SKILL.md")).unwrap();
+        let content = builtin_skills::get("windows-cli").expect("plugin skill");
+        let parsed = parse_frontmatter(&content, Path::new("windows-cli/SKILL.md")).unwrap();
         assert_eq!(parsed.name, "windows-cli");
         assert!(parsed.description.contains("argv"));
         assert!(parsed.description.contains("PowerShell"));

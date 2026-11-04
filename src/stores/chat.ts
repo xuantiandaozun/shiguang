@@ -11,6 +11,8 @@ export interface UiMessage {
   reasoning?: string;
   toolName?: string;
   toolFailed?: boolean;
+  /** 工具结果（仅本次会话内存中，用于插件声明的结果卡片） */
+  toolResult?: unknown;
   plan?: Plan;
   ask?: AskUserPrompt;
   askSettled?: boolean;
@@ -33,7 +35,7 @@ interface ChatState {
   appendToken: (d: string) => void;
   appendReasoning: (d: string) => void;
   finishStreaming: (content?: string) => void;
-  completeTool: (toolName: string, error?: string) => void;
+  completeTool: (toolName: string, error?: string, result?: unknown) => void;
   setStreaming: (b: boolean) => void;
   setPendingPlan: (p: Plan | null) => void;
   setPendingAsk: (p: AskUserPrompt | null) => void;
@@ -111,7 +113,7 @@ export const useChatStore = create<ChatState>()((set) => ({
         streaming: false,
       };
     }),
-  completeTool: (toolName, error) =>
+  completeTool: (toolName, error, result) =>
     set((s) => {
       const msgs = s.messages.map((m) => ({ ...m }));
       for (let i = msgs.length - 1; i >= 0; i--) {
@@ -119,6 +121,7 @@ export const useChatStore = create<ChatState>()((set) => ({
           msgs[i].streaming = false;
           msgs[i].toolFailed = Boolean(error);
           msgs[i].content = error ?? "";
+          if (!error && result !== undefined) msgs[i].toolResult = result;
           break;
         }
       }

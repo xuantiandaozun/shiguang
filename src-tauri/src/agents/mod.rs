@@ -1012,55 +1012,7 @@ async fn stop_process(app: &AppHandle, id: &str) {
 
 pub const TOOL_NAMES: &[&str] = &["delegate_to_agent", "await_agent", "agent_reply", "stop_agent", "list_agents", "finish_agent_worktree"];
 
-pub fn definitions() -> Vec<Value> {
-    vec![
-        json!({"type":"function","function":{
-            "name":"delegate_to_agent",
-            "description":"把工作区里的代码修改外派给 Claude Code 或 Codex（用户自己的订阅）。适合多文件改动、需要读懂项目再动手的任务；查数据、浏览器、跑 CLI、一两行小改仍自己做。task 写清目标、范围、背景和不要做的事；acceptance 写可核对的验收标准。智能体不能提交/推送，过程中会通过你回问（status=asking），你回答后它继续。默认挂起等到它提问或本轮结束。",
-            "parameters":{"type":"object","properties":{
-                "task":{"type":"string","description":"任务说明：要改什么、为什么、范围、已知事实"},
-                "acceptance":{"type":"string","description":"验收标准，如「npm run build 通过；响应头没有 Set-Cookie」"},
-                "workspace":{"description":"工作区名称/别名/id；省略时用当前会话绑定的工作区"},
-                "root":{"type":"string","description":"没有登记工作区时直接给项目根目录"},
-                "agent":{"type":"string","enum":["auto","claude_code","codex"],"description":"默认 auto：工作区默认 → Claude Code → Codex"},
-                "mode":{"type":"string","enum":["plan","edit","full"],"description":"plan 只出方案不改文件；edit 改文件跑命令（默认）；full 跳过智能体自身的确认"},
-                "isolation":{"type":"string","enum":["none","worktree"],"description":"worktree：在独立 git worktree 里改，结束后 finish_agent_worktree 合回或丢弃"},
-                "allow_dirty":{"type":"boolean","description":"项目有未提交改动时，用户同意后才设为 true"},
-                "title":{"type":"string","description":"运行窗口标题（可选）"},
-                "await":{"type":"boolean","description":"默认 true；false 则立即返回 run_id"},
-                "timeout_secs":{"type":"integer","description":"最长等待秒数，默认 1200"}
-            },"required":["task"]}
-        }}),
-        json!({"type":"function","function":{
-            "name":"await_agent",
-            "description":"挂起等待外派任务的下一个提问/关键节点，或本轮结束。不要轮询。",
-            "parameters":{"type":"object","properties":{"run_id":{"type":"string"},"timeout_secs":{"type":"integer"}},"required":["run_id"]}
-        }}),
-        json!({"type":"function","function":{
-            "name":"agent_reply",
-            "description":"回复外派智能体：status=asking 时作为对它问题的回答；本轮已结束（idle/error/cancelled）时作为同一会话的追问或纠偏。不能替用户批准 push、删除、扩大范围。默认发送后继续等待。",
-            "parameters":{"type":"object","properties":{
-                "run_id":{"type":"string"}, "content":{"type":"string"},
-                "await":{"type":"boolean","description":"默认 true"}, "timeout_secs":{"type":"integer"}
-            },"required":["run_id","content"]}
-        }}),
-        json!({"type":"function","function":{
-            "name":"stop_agent",
-            "description":"中断外派任务（结束智能体进程）。之后仍可 agent_reply 续接原会话。",
-            "parameters":{"type":"object","properties":{"run_id":{"type":"string"}},"required":["run_id"]}
-        }}),
-        json!({"type":"function","function":{
-            "name":"list_agents",
-            "description":"列出可用的编码智能体（是否安装、版本）和最近的外派任务。",
-            "parameters":{"type":"object","properties":{}}
-        }}),
-        json!({"type":"function","function":{
-            "name":"finish_agent_worktree",
-            "description":"处理隔离 worktree 里的改动：apply 合回原项目（未提交），discard 丢弃。apply 前先给用户看改动并征得同意。",
-            "parameters":{"type":"object","properties":{"run_id":{"type":"string"},"action":{"type":"string","enum":["apply","discard"]}},"required":["run_id","action"]}
-        }}),
-    ]
-}
+// 工具定义在 plugins/<插件>/tools.json。
 
 fn timeout_arg(args: &Value) -> u64 {
     args.get("timeout_secs").and_then(Value::as_u64).unwrap_or(DEFAULT_AWAIT_SECS)

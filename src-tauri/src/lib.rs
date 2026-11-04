@@ -1,4 +1,4 @@
-// tools.rs 的 json! 工具定义较大，默认 128 递归上限不够
+// 部分模块仍有较深的 json! 结构（如设置、外派），保留较高的宏递归上限。
 #![recursion_limit = "256"]
 
 pub mod agents;
@@ -20,6 +20,7 @@ pub mod ntfs_helper;
 pub mod ntfs_usn;
 pub mod ocr;
 pub mod organizer;
+pub mod plugins;
 pub mod reader;
 pub mod repeat_guard;
 pub mod retention;
@@ -135,6 +136,9 @@ pub fn run() {
             let db = db::Db::new(&app_dir.join("deskhelper.db"))?;
             db.recover_delegations()?;
             db.recover_agent_runs()?;
+            // 插件：内置插件（程序目录/plugins）+ 用户插件（app_data/plugins），启停覆盖存在设置表。
+            let safe_mode = plugins::boot::begin(&app_dir);
+            plugins::host().configure(app_dir.join("plugins"), plugins::settings::load_overrides(&db), safe_mode);
             if let Err(e) = llm::tools::seed_registry(&db) {
                 log::warn!("初始化动态工具注册表失败，将使用代码内置定义: {e}");
             }
@@ -162,6 +166,26 @@ pub fn run() {
                 delegations: delegation::DelegationHub::default(),
                 agents: agents::AgentHub::default(),
             });
+            {
+                // 插件变化：补齐注册表、同步 MCP 服务、通知前端刷新界面。
+                let handle = app.handle().clone();
+                plugins::host().on_change(move |snapshot| {
+                    if let Some(state) = handle.try_state::<AppState>() {
+                        if let Err(e) = llm::tools::seed_registry(&state.db) {
+                            log::warn!("插件重载后更新工具注册表失败: {e}");
+                        }
+                    }
+                    plugins::mcp::sync(snapshot);
+                    let _ = tauri::Emitter::emit(&handle, "plugins-changed", snapshot.generation);
+                });
+                plugins::mcp::sync(&plugins::snapshot());
+                let dirs = plugins::host().dirs();
+                let roots: Vec<_> = [dirs.builtin, dirs.user].into_iter().flatten().collect();
+                if let Some(watcher) = plugins::watch::spawn(roots) {
+                    // 监听器需要在整个进程生命周期内存活。
+                    std::mem::forget(watcher);
+                }
+            }
             mcp_bridge::spawn(app.handle().clone(), &app_dir);
             // 每次进程启动开空白会话（已有空会话则复用），与聊天窗欢迎态一致。
             {
@@ -190,7 +214,21 @@ pub fn run() {
             log::info!("拾光已启动，数据目录: {:?}", app_dir);
             Ok(())
         })
+        .register_uri_scheme_protocol("plugin", |_ctx, request| plugins::protocol::handle(request))
         .invoke_handler(tauri::generate_handler![
+            plugins::ipc::list_plugins,
+            plugins::ipc::reload_plugins,
+            plugins::ipc::set_plugin_enabled,
+            plugins::ipc::get_plugin_settings,
+            plugins::ipc::save_plugin_settings,
+            plugins::ipc::plugin_versions,
+            plugins::ipc::rollback_plugin,
+            plugins::ipc::read_plugin_view,
+            plugins::ipc::open_plugins_dir,
+            plugins::ipc::set_plugin_safe_mode,
+            plugins::ipc::plugins_boot_ok,
+            plugins::ipc::plugin_call_tool,
+            plugins::ipc::open_plugin_window,
             servers::server_action,
             servers::server_terminal,
             servers::reveal_server_secret,
@@ -278,6 +316,11 @@ pub fn run() {
             commands::get_browser_extension_info,
             commands::open_browser_extension_dir,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running shiguang");
+        .build(tauri::generate_context!())
+        .expect("error while building shiguang")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                plugins::mcp::stop_all();
+            }
+        });
 }

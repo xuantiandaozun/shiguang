@@ -1,0 +1,38 @@
+[
+  {
+    "name": "get_system_info",
+    "label": "查询本机信息",
+    "description": "查询本机硬件与运行状态，返回结构化 JSON：操作系统、CPU、内存、磁盘、GPU、电池、进程占用。也可用 run_command 自行执行 systeminfo / Get-CimInstance 等命令达到同样目的；本工具只是省去拼命令和解析输出。",
+    "parameters": {
+      "properties": {
+        "category": {
+          "description": "overview=整机概览（默认）；cpu/memory/disk/gpu/battery=单项；process=进程列表",
+          "enum": [
+            "overview",
+            "cpu",
+            "memory",
+            "disk",
+            "gpu",
+            "battery",
+            "process"
+          ],
+          "type": "string"
+        },
+        "limit": {
+          "description": "仅 process：返回前 N 个，默认 15，上限 50",
+          "type": "integer"
+        },
+        "sort_by": {
+          "description": "仅 process：排序字段，默认 memory",
+          "enum": [
+            "memory",
+            "cpu"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    }
+  }
+]

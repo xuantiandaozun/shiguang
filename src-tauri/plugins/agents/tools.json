@@ -1,0 +1,167 @@
+[
+  {
+    "name": "delegate_to_agent",
+    "label": "外派编码任务",
+    "description": "把工作区里的代码修改外派给 Claude Code 或 Codex（用户自己的订阅）。适合多文件改动、需要读懂项目再动手的任务；查数据、浏览器、跑 CLI、一两行小改仍自己做。task 写清目标、范围、背景和不要做的事；acceptance 写可核对的验收标准。智能体不能提交/推送，过程中会通过你回问（status=asking），你回答后它继续。默认挂起等到它提问或本轮结束。",
+    "parameters": {
+      "properties": {
+        "acceptance": {
+          "description": "验收标准，如「npm run build 通过；响应头没有 Set-Cookie」",
+          "type": "string"
+        },
+        "agent": {
+          "description": "默认 auto：工作区默认 → Claude Code → Codex",
+          "enum": [
+            "auto",
+            "claude_code",
+            "codex"
+          ],
+          "type": "string"
+        },
+        "allow_dirty": {
+          "description": "项目有未提交改动时，用户同意后才设为 true",
+          "type": "boolean"
+        },
+        "await": {
+          "description": "默认 true；false 则立即返回 run_id",
+          "type": "boolean"
+        },
+        "isolation": {
+          "description": "worktree：在独立 git worktree 里改，结束后 finish_agent_worktree 合回或丢弃",
+          "enum": [
+            "none",
+            "worktree"
+          ],
+          "type": "string"
+        },
+        "mode": {
+          "description": "plan 只出方案不改文件；edit 改文件跑命令（默认）；full 跳过智能体自身的确认",
+          "enum": [
+            "plan",
+            "edit",
+            "full"
+          ],
+          "type": "string"
+        },
+        "root": {
+          "description": "没有登记工作区时直接给项目根目录",
+          "type": "string"
+        },
+        "task": {
+          "description": "任务说明：要改什么、为什么、范围、已知事实",
+          "type": "string"
+        },
+        "timeout_secs": {
+          "description": "最长等待秒数，默认 1200",
+          "type": "integer"
+        },
+        "title": {
+          "description": "运行窗口标题（可选）",
+          "type": "string"
+        },
+        "workspace": {
+          "description": "工作区名称/别名/id；省略时用当前会话绑定的工作区"
+        }
+      },
+      "required": [
+        "task"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "await_agent",
+    "label": "等待外派结果",
+    "description": "挂起等待外派任务的下一个提问/关键节点，或本轮结束。不要轮询。",
+    "parameters": {
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "timeout_secs": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "run_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "agent_reply",
+    "label": "回复外派智能体",
+    "description": "回复外派智能体：status=asking 时作为对它问题的回答；本轮已结束（idle/error/cancelled）时作为同一会话的追问或纠偏。不能替用户批准 push、删除、扩大范围。默认发送后继续等待。",
+    "parameters": {
+      "properties": {
+        "await": {
+          "description": "默认 true",
+          "type": "boolean"
+        },
+        "content": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "timeout_secs": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "run_id",
+        "content"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "stop_agent",
+    "label": "中断外派",
+    "description": "中断外派任务（结束智能体进程）。之后仍可 agent_reply 续接原会话。",
+    "parameters": {
+      "properties": {
+        "run_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_agents",
+    "label": "查看编码智能体",
+    "description": "列出可用的编码智能体（是否安装、版本）和最近的外派任务。",
+    "parameters": {
+      "properties": {},
+      "type": "object"
+    }
+  },
+  {
+    "name": "finish_agent_worktree",
+    "label": "处理隔离改动",
+    "description": "处理隔离 worktree 里的改动：apply 合回原项目（未提交），discard 丢弃。apply 前先给用户看改动并征得同意。",
+    "parameters": {
+      "properties": {
+        "action": {
+          "enum": [
+            "apply",
+            "discard"
+          ],
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "action"
+      ],
+      "type": "object"
+    }
+  }
+]

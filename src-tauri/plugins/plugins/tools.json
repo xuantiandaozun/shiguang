@@ -1,0 +1,91 @@
+[
+  {
+    "name": "plugin_list",
+    "label": "查看插件",
+    "description": "列出全部插件（内置只读 / 用户可改）、各自的工具、界面挂载点、启用状态和加载错误。新增或修改功能前先看有没有现成插件。",
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "plugin_read",
+    "label": "读取插件文件",
+    "description": "不给 path 时列出插件目录里的文件；给 path 时读取该文件。内置插件可读不可改，可作为写法参考。写插件前先读 core 插件的 PLUGIN_GUIDE.md（规范、执行器、UI SDK、声明式视图）。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "plugin_id": {"type": "string"},
+        "path": {"type": "string", "description": "插件内相对路径，用 /"}
+      },
+      "required": ["plugin_id"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "plugin_write",
+    "label": "编写插件",
+    "description": "新增或修改一个用户插件：files 里给出要写入的文件（相对路径 → 完整内容；null 表示删除），未列出的文件保持不变。会先校验（清单、工具、脚本语法、界面入口），通过后弹确认卡片，用户可选择先预览界面再决定；确认后自动保存旧版本快照再生效。内置插件只读，要扩展内置功能请新建插件。不要用文件工具直接写插件目录。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "plugin_id": {"type": "string", "description": "小写字母、数字、- 和 _"},
+        "summary": {"type": "string", "description": "给用户看的一句话：这次改了什么、为什么"},
+        "files": {
+          "type": "object",
+          "description": "{相对路径: 文件全文 | null}。新插件至少包含 plugin.json",
+          "additionalProperties": {"type": ["string", "null"]}
+        }
+      },
+      "required": ["plugin_id", "summary", "files"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "plugin_rollback",
+    "label": "回滚插件",
+    "description": "不给 version 时列出用户插件的历史版本；给 version 时（确认后）回滚，当前版本会先存进历史。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "plugin_id": {"type": "string"},
+        "version": {"type": "string"}
+      },
+      "required": ["plugin_id"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "plugin_delete",
+    "label": "删除插件",
+    "description": "删除用户插件（确认后），删除前存进历史，可用 plugin_rollback 恢复。",
+    "parameters": {
+      "type": "object",
+      "properties": {"plugin_id": {"type": "string"}},
+      "required": ["plugin_id"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "plugin_enable",
+    "label": "启停插件",
+    "description": "启用或停用插件（内置插件也可停用，core 除外）。停用后它的工具、Skills、界面都不再出现。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "plugin_id": {"type": "string"},
+        "enabled": {"type": "boolean"}
+      },
+      "required": ["plugin_id", "enabled"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "plugin_preview",
+    "label": "预览插件界面",
+    "description": "在主窗口打开插件的界面页，供用户查看。",
+    "parameters": {
+      "type": "object",
+      "properties": {"plugin_id": {"type": "string"}},
+      "required": ["plugin_id"],
+      "additionalProperties": false
+    }
+  }
+]

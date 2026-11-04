@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="/__sdk/theme.css">
+  <script src="/__sdk/sdk.js"></script>
+  <style>
+    .board { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+    .note { background: #fff8ec; border: 1px solid #f0dfc0; border-radius: 10px; padding: 10px; min-height: 80px; }
+    .note small { display: block; color: var(--muted); margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div class="row" style="justify-content: space-between; margin-bottom: 10px">
+    <h1>便签墙</h1>
+    <button id="refresh">刷新</button>
+  </div>
+  <div id="board" class="board"><span class="muted">加载中…</span></div>
+  <script>
+    async function render() {
+      const { items } = await shiguang.callTool("notes_list", {});
+      const board = document.getElementById("board");
+      board.innerHTML = "";
+      if (!items.length) board.innerHTML = '<span class="muted">还没有便签</span>';
+      for (const n of items) {
+        const el = document.createElement("div");
+        el.className = "note";
+        el.textContent = n.text;
+        const at = document.createElement("small");
+        at.textContent = n.at;
+        el.appendChild(at);
+        board.appendChild(el);
+      }
+    }
+    shiguang.ready().then(render);
+    document.getElementById("refresh").onclick = render;
+  </script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+{
+  "id": "usage",
+  "name": "用量",
+  "version": "1.0.0",
+  "description": "模型用量统计。",
+  "order": 90,
+  "ui": {
+    "tabs": [
+      {
+        "id": "usage",
+        "label": "用量",
+        "icon": "usage",
+        "order": 50,
+        "component": "builtin:UsageTab"
+      }
+    ]
+  }
+}

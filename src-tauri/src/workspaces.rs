@@ -369,46 +369,7 @@ mod tests {
 
 pub const TOOL_NAMES: &[&str] = &["workspace_list", "workspace_open", "workspace_detect", "workspace_save"];
 
-pub fn definitions() -> Vec<Value> {
-    let field_props = json!({
-        "aliases": {"type":"array","items":{"type":"string"},"description":"用户可能的叫法：中文名、英文名、域名、仓库名"},
-        "summary": {"type":"string","description":"一句话：是什么项目、技术栈、内容从哪来"},
-        "deploy": {"type":"string","description":"怎么上线、有什么后果，如「push main 即 Vercel 自动部署」"},
-        "verify_commands": {"type":"array","items":{"type":"string"},"description":"验证命令，如 npm run build"},
-        "tools": {"type":"string","description":"配套 CLI 及其路径、配置文件路径（只写路径，不写密钥内容）"},
-        "links": {"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"url":{"type":"string"}},"required":["url"]}},
-        "rules": {"type":"array","items":{"type":"string"},"description":"必须遵守的规则，如「push 前先问我」"},
-        "notes": {"type":"array","items":{"type":"string"},"description":"整表替换经验；只想追加用 append_notes"},
-        "append_notes": {"type":"array","items":{"type":"string"},"description":"追加经验（任务中确认过的、下次还用得上的事实）"},
-        "default_agent": {"type":"string","enum":["claude_code","codex"],"description":"默认外派给谁"},
-        "agent_mode": {"type":"string","enum":["plan","edit","full"],"description":"默认外派权限：plan 只出方案；edit 可改文件跑命令（默认）；full 跳过确认"}
-    });
-    let mut save_props = field_props.as_object().cloned().unwrap_or_default();
-    save_props.insert("name".into(), json!({"type":"string","description":"工作区名称；已存在则更新"}));
-    save_props.insert("root".into(), json!({"type":"string","description":"项目根目录绝对路径（新建必填）"}));
-    vec![
-        json!({"type":"function","function":{
-            "name":"workspace_list",
-            "description":"列出已登记的工作区（固定项目），含当前会话绑定的是哪个。",
-            "parameters":{"type":"object","properties":{}}
-        }}),
-        json!({"type":"function","function":{
-            "name":"workspace_open",
-            "description":"把工作区绑定到当前会话并读取详情：登记的部署/验证/工具/规则/经验，加上现读的 git 分支、未提交改动、最近提交和项目说明开头。绑定后未给 workdir 的命令默认在其根目录执行。",
-            "parameters":{"type":"object","properties":{"workspace":{"description":"名称、别名或 id"}},"required":["workspace"]}
-        }}),
-        json!({"type":"function","function":{
-            "name":"workspace_detect",
-            "description":"从项目文件夹推断工作区草稿（名称、技术栈、验证命令、部署线索、git 远端、说明文件）。只读不保存。",
-            "parameters":{"type":"object","properties":{"root":{"type":"string"}},"required":["root"]}
-        }}),
-        json!({"type":"function","function":{
-            "name":"workspace_save",
-            "description":"新建或更新工作区。会弹确认卡片，用户同意才写入。适合在完成一个固定项目的任务后，把用户给过的路径、部署方式、配套工具、规则整理进去，下次说名字就能直接用。只写仓库里读不到的信息，不写密钥内容。更新时只传要改的字段。",
-            "parameters":{"type":"object","properties":save_props,"required":["name"]}
-        }}),
-    ]
-}
+// 工具定义在 plugins/<插件>/tools.json。
 
 fn preview(name: &str, root: &str, data: &Value, appended: &[String]) -> String {
     let mut lines = vec![format!("名称：{name}"), format!("根目录：{root}")];

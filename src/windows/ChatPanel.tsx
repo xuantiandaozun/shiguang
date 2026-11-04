@@ -19,6 +19,8 @@ import type { UiMessage } from "../stores/chat";
 import Markdown from "../components/Markdown";
 import ReplyActions from "../components/ReplyActions";
 import ChatSlashMenu from "../components/ChatSlashMenu";
+import { startPluginRegistry, usePluginSlashCommands, usePluginToolCards, useToolLabels } from "../plugins/registry";
+import PluginMount from "../plugins/PluginMount";
 import appIcon from "../assets/brand-mark.svg";
 import {
   buildSlashCommands,
@@ -137,6 +139,7 @@ function uint8ToBase64(bytes: Uint8Array): string {
 }
 
 export default function ChatPanel() {
+  useEffect(() => startPluginRegistry(), []);
   const {
     messages,
     streaming,
@@ -172,7 +175,8 @@ export default function ChatPanel() {
 
   const slashQuery = input.startsWith("/") ? input.slice(1).split(/\s/)[0] ?? "" : null;
   const slashOpen = slashQuery !== null && !streaming;
-  const slashCommands = buildSlashCommands(workflows);
+  const pluginSlashCommands = usePluginSlashCommands();
+  const slashCommands = buildSlashCommands(workflows, pluginSlashCommands);
   const filteredSlash = slashOpen ? filterSlashCommands(slashCommands, slashQuery) : [];
 
   useEffect(() => {
@@ -349,6 +353,7 @@ export default function ChatPanel() {
             : p.status === "error"
               ? toolFailureSummary(p.result)
               : undefined,
+          p.status === "done" ? p.result : undefined,
         );
       }
     });
@@ -436,9 +441,13 @@ export default function ChatPanel() {
       await runWorkflowFromChat(cmd.label, cmd.workflowId);
       return;
     }
+    if (cmd.kind === "prompt") {
+      setInput(cmd.prompt ?? "");
+      return;
+    }
     if (cmd.id === "help") {
       const lines = slashCommands
-        .filter((c) => c.kind === "workflow")
+        .filter((c) => c.kind === "workflow" || c.kind === "prompt")
         .map((c) => `· /${c.trigger}${c.description ? ` — ${c.description}` : ""}`);
       addMessage({
         role: "system",
@@ -817,83 +826,7 @@ export default function ChatPanel() {
   );
 }
 
-/** 工具调用提示的友好文案（原始工具名 → 用户可读的进行式描述） */
-const TOOL_LABELS: Record<string, string> = {
-  list_servers: "查看服务器", get_server: "读取连接", create_server: "新增服务器", update_server: "修改服务器", delete_server: "删除连接", test_server_connection: "测试连接", ssh_exec: "执行远程命令", sftp_list: "浏览远程目录", sftp_stat: "查看远程文件", sftp_upload: "上传文件", sftp_download: "下载文件", list_remote_tasks: "查看远程任务", get_remote_task: "读取远程结果", wait_remote_task: "等待远程任务", cancel_remote_task: "取消远程任务",
-  discover_capabilities: "发现所需能力",
-  workspace_list: "查看工作区", workspace_open: "打开工作区", workspace_detect: "识别项目", workspace_save: "保存工作区",
-  delegate_to_agent: "外派编码任务", await_agent: "等待外派结果", agent_reply: "回复外派智能体", stop_agent: "中断外派", list_agents: "查看编码智能体", finish_agent_worktree: "处理隔离改动",
-  get_tool_call_history: "查询工具调用历史",
-  recall_session: "查回对话原文",
-  scan_desktop: "扫描目录",
-  search_files: "搜索本机文件",
-  read_file: "读取文件",
-  get_file_info: "查询文件属性",
-  create_file: "创建文件",
-  clear_temp_files: "清理临时文件",
-  edit_file: "编辑文件",
-  read_image: "看图理解",
-  ocr_image: "OCR 提取文字",
-  propose_organization: "生成整理方案",
-  add_todo: "新建待办",
-  list_todos: "查询待办",
-  complete_todo: "完成待办",
-  snooze_todo: "延后提醒",
-  get_operation_history: "查询整理历史",
-  undo_batch: "撤销整理批次",
-  create_rule: "创建整理规则",
-  toggle_rule: "切换规则状态",
-  list_profile: "查询个人信息",
-  save_profile_entry: "保存个人信息",
-  delete_profile_entry: "删除个人信息",
-  browser_navigate: "打开网页",
-  browser_snapshot: "读取页面快照",
-  browser_find: "查找页面控件",
-  browser_network_observe: "观察网页接口",
-  browser_request: "调用网页接口",
-  browser_cookies: "读取浏览器 Cookie",
-  browser_read: "提取页面正文",
-  browser_click: "点击页面元素",
-  browser_type: "输入文字",
-  browser_scroll: "滚动页面",
-  browser_tabs: "查询标签页",
-  browser_activate_tab: "切换标签页",
-  browser_screenshot: "页面截图",
-  browser_capabilities: "识别网页操作能力",
-  browser_action: "操作网页控件",
-  browser_wait: "等待页面条件",
-  browser_extract: "提取网页数据",
-  browser_evaluate: "执行页面脚本",
-  browser_status: "诊断浏览器连接",
-  find_browser_recipes: "查找浏览器经验",
-  save_browser_recipe: "保存浏览器配方",
-  run_browser_recipe: "运行浏览器配方",
-  run_subagent: "子代理处理子任务",
-  await_subagent: "等待子代理",
-  reply_subagent: "审核或纠正子任务",
-  web_search: "搜索网页",
-  web_fetch: "抓取网页",
-  run_command: "执行命令",
-  run_command_background: "后台执行命令",
-  await_task: "等待任务结束",
-  check_task: "查询后台任务",
-  list_tasks: "列出后台任务",
-  stop_task: "停止后台任务",
-  lookup_cache: "读写参考缓存",
-  get_system_info: "查询本机信息",
-  list_skills: "列出 Skills",
-  load_skill: "加载 Skill",
-  create_skill: "创建 Skill",
-  skill_resource: "管理 Skill 文件",
-  run_skill_program: "运行 Skill 程序",
-  delete_skill: "删除 Skill",
-  manage_skill: "管理 Skill",
-  list_workflows: "查看工作流",
-  create_workflow: "创建工作流",
-  manage_workflow: "管理工作流",
-  ask_user: "等你确认",
-  todo_write: "更新进度",
-};
+// 工具调用提示的友好文案来自插件（tools.json 的 label 与 ui.tool_labels）。
 
 function toolFailureSummary(result: unknown): string {
   if (!result || typeof result !== "object") return "执行遇到问题，AI 正在根据结果尝试修正";
@@ -934,12 +867,14 @@ function MessageBubble({
   onSkipAsk: () => void;
   onRecall: (m: UiMessage) => void;
 }) {
+  const toolLabels = useToolLabels();
+  const toolCards = usePluginToolCards();
   if (m.role === "system") {
     return <div className="text-center text-[11px] text-slate-500 px-4 leading-5">{m.content}</div>;
   }
   if (m.role === "tool") {
-    const label = TOOL_LABELS[m.toolName ?? ""] ?? m.toolName;
-    return (
+    const label = toolLabels[m.toolName ?? ""] ?? m.toolName;
+    const status = (
       <div
         className={`flex items-start gap-2 text-[11px] ${m.toolFailed ? "text-rose-400" : "text-slate-400"}`}
       >
@@ -962,6 +897,17 @@ function MessageBubble({
             {label}
           </>
         )}
+      </div>
+    );
+    // 插件声明了该工具的结果卡片（ui.tool_cards）时，在状态行下方渲染。
+    const card = !m.streaming && !m.toolFailed && m.toolResult !== undefined ? toolCards.find((c) => c.tool === m.toolName) : undefined;
+    if (!card) return status;
+    return (
+      <div className="space-y-1.5">
+        {status}
+        <div className="rounded-lg border border-slate-700 overflow-hidden">
+          <PluginMount item={card} slot="tool_card" params={{ tool: m.toolName, result: m.toolResult }} />
+        </div>
       </div>
     );
   }

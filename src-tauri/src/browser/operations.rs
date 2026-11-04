@@ -7,84 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 pub const TOOL_NAMES: &[&str] = &["browser_capabilities", "browser_action", "browser_wait", "browser_extract"];
 
-pub fn definitions() -> Vec<Value> {
-    let target = json!({
-        "type":"object", "description":"定位条件全部 AND，文字精确匹配；ref 必须来自当前页。按可见文字或 aria 名称定位用 name（没有 text/aria 字段）；按 id 用 css。css 可用于非交互文本区域。scope 必须唯一，不跨 iframe/Shadow DOM。至少给出一个条件，不支持的字段会报错。",
-        "properties": {
-            "ref":{"type":"integer"}, "css":{"type":"string"},
-            "role":{"type":"string"}, "name":{"type":"string"},
-            "label":{"type":"string"}, "placeholder":{"type":"string"},
-            "scope":{"description":"唯一 CSS 选择器或当前元素 ref"},
-            "visual":{"type":"string","description":"按画面定位：用一句话描述目标外观和位置（如「右上角红色的发布按钮」「输入框右侧的相机图标」）。截取当前可见区域后由 Jev 找出位置，再用真实鼠标操作；目标须在屏幕上，不在时先滚动。只在页面结构里找不到目标时用（纯图标按钮、画布、无文字控件）；单独使用，不与其它条件组合。需要启用智能加速。"}
-        }
-    });
-    let expect = json!({
-        "type":"object", "description":"这一步之后应出现的结果；未满足则视为失败并停止后续步骤。",
-        "properties": {
-            "text":{"type":"string","description":"页面上应出现的文字（包含匹配）"},
-            "gone_text":{"type":"string","description":"应消失的文字，如关闭的弹窗标题"},
-            "url_contains":{"type":"string"},
-            "timeout_ms":{"type":"integer","minimum":0,"maximum":15000,"description":"默认 5000"}
-        }
-    });
-    let step_props = json!({
-        "action":{"type":"string","enum":["click","double_click","hover","fill","press","select","set_checked","upload","dialog","locate"]},
-        "target":target.clone(),
-        "text":{"type":"string","description":"fill 的内容；select 的精确选项文字；dialog 的 prompt 输入"},
-        "clear":{"type":"boolean","description":"fill 前清空原内容，默认 true"},
-        "newline":{"type":"string","enum":["shift_enter","enter","insert"],"description":"富文本里换行的方式。默认 shift_enter（聊天框回车可能直接发送）；文章编辑器需要分段时用 enter"},
-        "key":{"type":"string","description":"press 的按键：Enter、Escape、Tab、ArrowDown、Backspace、Control+A、Shift+Enter 等；给 target 时先聚焦它"},
-        "checked":{"type":"boolean"},
-        "files":{"type":"array","items":{"type":"string"},"description":"upload 的本机文件路径（绝对路径；相对路径按应用 temp 目录解析）"},
-        "accept":{"type":"boolean","description":"dialog：true 确认，false 取消"},
-        "option_scope":{"type":"string","description":"select 时选项不唯一，用 CSS 限定浮层"},
-        "expect":expect,
-        "settle_ms":{"type":"integer","minimum":0,"maximum":10000,"description":"动作后最长等待页面安静的毫秒数，默认 3000"}
-    });
-    let single_props = step_props.clone();
-    vec![
-        json!({"type":"function","function":{
-            "name":"browser_capabilities",
-            "description":"查看当前页面可用的通用操作、控件特征和限制。跨 React/Vue 等框架优先使用 browser_action/browser_wait/browser_extract，避免重复编写 DOM 查询、事件派发和固定休眠。检测不代表所有组件已适配。",
-            "parameters":{"type":"object","properties":{},"required":[]}
-        }}),
-        json!({"type":"function","function":{
-            "name":"browser_action",
-            "description":"在当前标签页执行真实鼠标键盘操作（扩展调试通道发出 isTrusted 输入，React/Vue/富文本编辑器都按真人操作处理）。动作：click/double_click/hover；fill 输入；press 按键；select 精确选择原生或 ARIA 下拉的选项；set_checked 幂等勾选；upload 通过文件选择框上传本机文件；dialog 处理 alert/confirm；locate 只返回候选。target 按 ref 或 role/name/label/placeholder/css 唯一定位，执行前自动滚动、等位置稳定、检查禁用与遮挡，歧义/遮挡/禁用时不执行。每个动作后自动等页面安静并返回 effect：URL/导航、打开或关闭的弹窗、提示文字、表单错误、发出的请求、新标签、原生对话框——据此判断下一步，不必每步重拍快照。连续操作用 steps 一次提交（最多 20 步），遇到第一个失败或 expect 未满足即停，并说明停在哪一步；给关键步骤写 expect。发布/提交/删除仍需授权，effect 不等于业务成功。",
-            "parameters":{"type":"object","properties":{
-                "action":single_props["action"].clone(), "target":single_props["target"].clone(),
-                "text":single_props["text"].clone(), "clear":single_props["clear"].clone(),
-                "newline":single_props["newline"].clone(), "key":single_props["key"].clone(),
-                "checked":single_props["checked"].clone(), "files":single_props["files"].clone(),
-                "accept":single_props["accept"].clone(), "option_scope":single_props["option_scope"].clone(),
-                "expect":single_props["expect"].clone(), "settle_ms":single_props["settle_ms"].clone(),
-                "steps":{"type":"array","maxItems":20,"description":"多步顺序执行，每项字段同单步（action 必填）。给了 steps 就不要再给顶层 action",
-                    "items":{"type":"object","properties":step_props,"required":["action"]}}
-            },"required":[]}
-        }}),
-        json!({"type":"function","function":{
-            "name":"browser_wait",
-            "description":"等待具体页面条件，替代 setTimeout 和重复脚本；可取消，默认 5 秒，最多 15 秒，不执行点击。visible/hidden/enabled/text/value；text 为包含，value 为精确相等。目标歧义立即报错。等待超时不能证明先前提交未生效，先核验不要重复提交。",
-            "parameters":{"type":"object","properties":{
-                "target":target, "condition":{"type":"string","enum":["visible","hidden","enabled","text","value"]},
-                "text":{"type":"string"}, "timeout_ms":{"type":"integer","minimum":0,"maximum":15000}
-            },"required":["target","condition"]}
-        }}),
-        json!({"type":"function","function":{
-            "name":"browser_extract",
-            "description":"有界结构化读取当前已渲染的表格、列表卡片或指定字段，替代重复写 DOM 提取脚本。table 需唯一表格（可用 scope）；list 需 row_selector 与 fields；fields 读取唯一 scope 内一组字段。缺失字段返回 null；不自动分页/滚动，不保证币种或业务真实性。文章正文用 browser_read。",
-            "parameters":{"type":"object","properties":{
-                "kind":{"type":"string","enum":["table","list","fields"]},
-                "scope":{"description":"唯一 CSS 选择器或当前 ref，默认 document"},
-                "row_selector":{"type":"string"}, "limit":{"type":"integer","minimum":1,"maximum":100},
-                "fields":{"type":"array","maxItems":12,"items":{"type":"object","properties":{
-                    "name":{"type":"string"}, "selector":{"type":"string","description":"相对当前行的 CSS；:scope 表示行本身"},
-                    "attribute":{"type":"string","enum":["href","title","aria-label","datetime"]}
-                },"required":["name","selector"]}}
-            },"required":["kind"]}
-        }})
-    ]
-}
+// 工具定义在 plugins/<插件>/tools.json。
 
 fn evaluation(method: &str, args: &Value) -> Value {
     // Never interpolate model-provided strings into executable JS.
@@ -520,10 +443,11 @@ mod tests {
     }
     #[test]
     fn all_operations_have_structured_contracts() {
-        let defs = definitions();
+        let snapshot = crate::plugins::snapshot();
         for name in TOOL_NAMES {
-            assert!(defs.iter().any(|d| d["function"]["name"] == *name));
+            let tool = snapshot.tool(name).expect("browser 插件应声明该工具");
+            assert_eq!(tool.plugin, "browser");
+            assert!(tool.definition.pointer("/function/parameters/properties").is_some());
         }
-        assert_eq!(defs.len(), TOOL_NAMES.len());
     }
 }

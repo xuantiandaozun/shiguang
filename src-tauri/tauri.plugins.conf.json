@@ -1,0 +1,12 @@
+{
+  "bundle": {
+    "resources": {
+      "resources/browser-extension.zip": "browser-extension.zip",
+      "plugins": "plugins",
+      "../browser-extension/readability.js": "plugins/browser/assets/readability.js",
+      "../browser-extension/page-api.js": "plugins/browser/assets/page-api.js",
+      "../browser-extension/page-operations.js": "plugins/browser/assets/page-operations.js",
+      "../browser-extension/page-runtime.js": "plugins/browser/assets/page-runtime.js"
+    }
+  }
+}

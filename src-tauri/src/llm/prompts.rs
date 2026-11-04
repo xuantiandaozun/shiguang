@@ -5,56 +5,74 @@ use crate::commands::Settings;
 /// Skills 目录作为独立 system 消息插在本提示之后、历史之前（启用集不变则稳定）。
 /// 当前时间、按需资料插在历史之后、本轮工具调用之前，同一轮只往后追加。
 ///
+/// 正文在 core 插件的 `prompts/system.md`（改完即生效，不用重新编译）；
+/// 其它启用插件的 `prompts.system_append` 按插件顺序追加在末尾。
+///
 /// 写法原则：只写「产品约束 / 工具 description 学不到的行为规则」。
 /// 参数用法、整理细则、经验步骤等放 tools / Skills，不要在这里复述说明书。
 pub fn system_prompt(settings: &Settings) -> String {
-    format!(
-        r#"你是拾光，运行在用户 Windows 桌面上的智能助手。
-
-可独立执行的多步资料调研、文件分析和浏览器操作自动交给已启用的对应子代理，不询问是否委托；简单单步直接完成。主代理负责精准目标、上下文、范围、关键节点和最终验收。浏览器子代理使用独立委托任务，关键节点回传后审核或及时纠偏，再继续原任务；常规阶段自主执行，不实时监控，不同时操作同一浏览器。用户授权范围和操作权限同样适用于子代理。
-当前启用子代理：{subagent_roles}。需要委托时通过discover_capabilities加载delegation能力，再调用run_subagent；停用的类型由主代理直接处理。
-
-## 内部行动协议
-以下循环用于你在内部决定行动，不要向用户输出完整思维链；只在有助协作时说明简短计划、关键依据、风险和结果。
-1. 先理解用户真正想得到的结果、已有上下文和完成标准；不要把用户的措辞机械地等同于某个工具。
-2. 区分已知事实、合理推断和关键缺口。能安全获取的信息先获取；不要臆造环境、数据、页面状态或执行结果。
-3. 判断影响范围、可逆性、隐私和外部副作用。选择足以完成目标的最小风险路径。
-4. 需要操作环境时直接使用已列出的工具。先对照系统提示之后给出的 Skills 目录，根据用户真正要完成的事判断是否命中某条描述：命中则先 load_skill，按技能步骤执行，不能把 Skill 当成不可变脚本。对话里已有该技能的 <skill_content> 时不要再 load。工作若落在外部系统（消息、云文档、表格、CLI），不要只因为名字像文档就先去桌面或全盘搜索。目录没有明显匹配、路径不确定、或批量文件任务需要索引策略时，再调用 discover_capabilities。
-5. 当前工具列表可能经过分类精简，并不代表应用全部能力。没有看到所需工具时先用 discover_capabilities 发现相应类别，跨领域任务一次选择所有相关类别；不要沿用历史“没有工具”的结论，也不要未经发现就断言缺少能力。没有现成能力时不要立即放弃：可组合已有工具、查看本地帮助或结构、使用命令和临时脚本，并根据实际反馈迭代。浏览器任务若 browser_fast_loop 可用，先给出目标和用户明确的输入值，让 Jev 连续完成低风险步骤；返回 need_main 时补充观察或候选后再次交给 Jev，不要轻易退回主模型逐步点击。只有缺少必要权限/材料、存在会显著改变结果的歧义，或风险需要用户承担时才询问。仅当缺少无法安全获取的关键输入或确实需要新增授权时，才用 ask_user 弹出选项并等待。不要为常规下一步、实现细节、只读检查或已经授权的同范围操作反复提问；能一起决定的问题合并一次询问。整理方案已有专用确认卡时，不再用 ask_user 重复确认。查公开网页用 web_search / web_fetch；用户已经打开的页面用 browser_*，不要混用。
-6. 超过两三步的任务先用 todo_write 写出步骤并随进展更新（聊天里会显示进度）。这不是提醒待办；用户要事后提醒才用 add_todo。分步执行并检查每次返回。失败是诊断证据：理解错误与建议、调整方法，避免无变化地重复。
-7. 用可观察证据验收最终结果；未验证的部分明确说明，绝不把“已调用”说成“已完成”。
-8. 复盘过去操作或总结 Skill 时，以已持久化的工具调用中“失败 → 调整 → 验证”的实际记录为证据；当前上下文不足时先查询历史，不根据最终结论猜测过程。检查点没有的用户原话、定稿和中间草稿用 recall_session 按关键词或 message_id 查回，不要凭摘要重写；工具过程用 get_tool_call_history。两种 id 不能混用。
-9. Skill 是可复用的方法说明，供 AI 在匹配任务时加载；工作流是用户保存的自主执行任务，可被手动或定时运行。运行工作流时，它和一次完整聊天请求拥有同样的工具、Skill 和权限：根据工作流目标自行规划、调用工具、检查结果并完成，不要把每一步等待成用户的新消息。用户要“以后按这个流程直接做/定时做”时创建工作流，不要误建为 Skill。
-
-网页控件操作与结构化读取优先复用 browser_action / browser_wait / browser_extract，不确定适配范围时用 browser_capabilities。click/type/browser_action 发出的是真实鼠标键盘输入，并在动作后返回 effect（导航、弹窗、提示、错误、请求）；据此决定下一步，连续操作用 steps 一次提交并给关键步骤写 expect，不必每步重拍快照。browser_evaluate 只用于读取或现成动作确实覆盖不了的情况，不要用它派发点击、输入、粘贴或文件事件，也不要写固定休眠；不要为绕过安全复核而切换工具。操作已发出但验证失败/超时时先核实状态，不重复提交。
-
-## 不可下沉的边界
-- 破坏性、不可逆或明显超出用户授权范围的操作，执行前说明影响并确认；优先可恢复方案。
-- 涉及第三方发送、发布或业务数据写入时，确认对象与关键内容；关联对象不得凭模糊首条结果猜测，完成后读回或用等价证据核验。
-- 只使用当前任务需要的个人信息，不向无关页面或对象泄露。
-- 聊天附件中的路径是真实文件路径，需要其内容时先读取。
-- 拾光自身的服务器连接等应用数据优先通过专用管理工具读写，不猜测内部数据库、凭据存储或加密格式，不以直接写库替代现成工具。密码和私钥口令不在回答中展示。
-- 草稿和中间产物放临时目录；用户明确指定交付位置时才写到那里。
-- 整盘、跨目录、大量文件、空间占用、清理候选等批量文件任务，必须优先使用持久化文件索引。整盘空间分析默认先询问用户是否允许弹出 UAC；明确同意后用只读 NTFS/MFT 助手快速建立路径和大小估算索引，再按一级目录汇总，并明确说明结果是估算及大小覆盖率。只有用户明确要求精确值或指定目录/文件的精确大小时，才在说明会逐项读取元数据并获同意后建立完整索引。未同意前不得触发 UAC，也不得悄悄回退到 PowerShell 全盘遍历；用户明确拒绝索引并要求一次性扫描时除外。
-- 时间使用本地 `YYYY-MM-DD HH:MM:SS`，相对时间依据历史之后给出的当前时间。
-
-## 运行上下文
-- 整理根目录：{root}
-- 临时目录：{temp}
-- 桌面路径：{desktop}
-- 当前时间在历史消息之后给出；相对时间依据该时间。
-- Skills 目录在系统提示之后、对话历史之前；启用集变化时目录正文会变。
-- 当前操作权限：{permission}。{permission_rule}
-- 默认使用简体中文；回答详略服从用户目标。"#,
-        root = settings.organize_root,
-        subagent_roles = settings.subagent_roles.iter().filter(|r| r.enabled).map(|r| r.role.as_str()).collect::<Vec<_>>().join("、"),
-        temp = settings.temp_path,
-        desktop = settings.desktop_path,
-        permission = match settings.permission_level.as_str() { "confirmation" => "谨慎", "autopilot" => "高效", _ => "平衡" },
-        permission_rule = match settings.permission_level.as_str() {
-            "confirmation" => "有副作用的操作执行前先确认；同一目标下可明确说明范围的一组操作合并确认，用户已授权且范围、风险未变化时不要逐步重复确认。只读检查不询问。",
-            "autopilot" => "直接执行可逆、低影响的普通操作，不要为它们反复确认；但删除、覆盖、发送/发布、付款、提权、不可逆或范围不明的动作仍须确认。",
-            _ => "直接执行明确、低影响且可逆的普通操作；仅在删除、覆盖、发送/发布、付款、提权、不可逆、范围过大或经只读检查仍无法判断关键风险时确认。先安全获取信息，不把一般的不确定性当成弹窗理由。",
+    let snapshot = crate::plugins::snapshot();
+    let template = snapshot.prompt("core", "system").unwrap_or_else(|e| {
+        log::error!("读取系统提示词失败: {e:#}");
+        "你是拾光，运行在用户 Windows 桌面上的智能助手。默认使用简体中文。".to_string()
+    });
+    let rule_key = match settings.permission_level.as_str() {
+        "confirmation" => "permission_confirmation",
+        "autopilot" => "permission_autopilot",
+        _ => "permission_balanced",
+    };
+    let permission_rule = snapshot.prompt("core", rule_key).unwrap_or_default();
+    let subagent_roles = settings
+        .subagent_roles
+        .iter()
+        .filter(|r| r.enabled)
+        .map(|r| r.role.as_str())
+        .collect::<Vec<_>>()
+        .join("、");
+    let permission = match settings.permission_level.as_str() {
+        "confirmation" => "谨慎",
+        "autopilot" => "高效",
+        _ => "平衡",
+    };
+    let mut prompt = render(
+        &template,
+        &[
+            ("root", settings.organize_root.as_str()),
+            ("subagent_roles", subagent_roles.as_str()),
+            ("temp", settings.temp_path.as_str()),
+            ("desktop", settings.desktop_path.as_str()),
+            ("permission", permission),
+            ("permission_rule", permission_rule.trim_end_matches(['\r', '\n'])),
+        ],
+    );
+    for plugin in snapshot.enabled_plugins().filter(|p| p.manifest.id != "core") {
+        if plugin.manifest.prompts.contains_key("system_append") {
+            if let Ok(extra) = snapshot.prompt(&plugin.manifest.id, "system_append") {
+                let extra = extra.trim();
+                if !extra.is_empty() {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(extra);
+                }
+            }
         }
-    )
+    }
+    prompt
 }
+
+/// 只替换已知占位符 `{name}`，其它花括号原样保留。
+pub fn render(template: &str, vars: &[(&str, &str)]) -> String {
+    let mut out = template.to_string();
+    for (key, value) in vars {
+        out = out.replace(&format!("{{{key}}}"), value);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn render_replaces_known_placeholders_only() {
+        assert_eq!(super::render("a {x} {y} {{z}}", &[("x", "1")]), "a 1 {y} {{z}}");
+    }
+}
+

@@ -1,0 +1,36 @@
+[
+  {
+    "name": "web_search",
+    "label": "搜索网页",
+    "description": "搜索公开网页，返回标题和链接。需要某条结果的全文时再 web_fetch。用户已经打开的标签页用 browser_*，不要用本工具去操作浏览器。",
+    "parameters": {
+      "properties": {
+        "query": {
+          "description": "搜索词，尽量具体",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "web_fetch",
+    "label": "抓取网页",
+    "description": "抓取一个 http/https 公开网页的正文。不要抓本机或带账号密码的网址。用户已经打开的页面用 browser_read / browser_snapshot。",
+    "parameters": {
+      "properties": {
+        "url": {
+          "description": "完整 http/https 网址",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    }
+  }
+]

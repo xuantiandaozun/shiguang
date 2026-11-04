@@ -1,0 +1,6 @@
+{
+  "blocks": [
+    { "type": "text", "text": "已记下：{{params.result.note.text}}" },
+    { "type": "text", "muted": true, "text": "共 {{params.result.count}} 条" }
+  ]
+}

@@ -15,9 +15,10 @@
     "pack:extension": "node scripts/pack-browser-extension.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build --no-bundle",
-    "tauri:bundle": "tauri build",
-    "release:local": "tauri build --config src-tauri/tauri.local-bundle.conf.json"
+    "tauri:build": "tauri build --no-bundle && node scripts/sync-plugins.mjs src-tauri/target/release",
+    "tauri:bundle": "tauri build --config src-tauri/tauri.plugins.conf.json",
+    "release:local": "tauri build --config src-tauri/tauri.local-bundle.conf.json --config src-tauri/tauri.plugins.conf.json",
+    "plugins:sync": "node scripts/sync-plugins.mjs src-tauri/target/release"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

@@ -1,19 +1,15 @@
-//! 编译期嵌入的内部 Skills。
-//! 只能通过改仓库里的 markdown + 重新打包更新；运行时只读。
-//! 新增内部技能：在 `builtin-skills/<name>/SKILL.md` 加文件，并在 `ALL` 里登记一行。
+//! 内部 Skills：由内置插件的 `skills/<name>/SKILL.md` 提供，运行时只读，改文件即生效。
+//! 新增内部技能：在对应内置插件的 skills 目录加一个子目录（plugin.json 声明 "skills": "skills"）。
 
-/// (文件夹名/技能名, 完整 SKILL.md 文本)
-pub static ALL: &[(&str, &str)] = &[
-    (
-        "windows-cli",
-        include_str!("../builtin-skills/windows-cli/SKILL.md"),
-    ),
-];
-
-pub fn get(name: &str) -> Option<&'static str> {
-    ALL.iter().find(|(n, _)| *n == name).map(|(_, c)| *c)
+/// (技能名, 完整 SKILL.md 文本)，按插件顺序。
+pub fn all() -> Vec<(String, String)> {
+    crate::plugins::snapshot().internal_skills()
 }
 
-pub fn names() -> impl Iterator<Item = &'static str> {
-    ALL.iter().map(|(n, _)| *n)
+pub fn get(name: &str) -> Option<String> {
+    all().into_iter().find(|(n, _)| n == name).map(|(_, c)| c)
+}
+
+pub fn names() -> Vec<String> {
+    all().into_iter().map(|(n, _)| n).collect()
 }

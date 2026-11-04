@@ -1,0 +1,40 @@
+{
+  "id": "todos",
+  "name": "待办提醒",
+  "version": "1.0.0",
+  "description": "待办事项与准点提醒。",
+  "order": 50,
+  "tools": [
+    "tools.json"
+  ],
+  "categories": {
+    "todos": {
+      "label": "待办",
+      "tools": [
+        "add_todo",
+        "list_todos",
+        "complete_todo",
+        "snooze_todo"
+      ]
+    }
+  },
+  "ui": {
+    "tabs": [
+      {
+        "id": "todos",
+        "label": "待办事项",
+        "icon": "todo",
+        "order": 10,
+        "group": "tasks",
+        "group_label": "待办提醒",
+        "component": "builtin:TodosTab"
+      }
+    ],
+    "windows": [
+      {
+        "route": "reminder",
+        "component": "builtin:Reminder"
+      }
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "id": "organize",
+  "name": "桌面整理",
+  "version": "1.0.0",
+  "description": "整理方案生成、执行与撤销；desktop-organize 默认 Skill。",
+  "order": 40,
+  "tools": [
+    "tools.json"
+  ],
+  "default_skills": "default-skills",
+  "categories": {
+    "organize": {
+      "label": "整理",
+      "tools": [
+        "scan_desktop",
+        "propose_organization",
+        "undo_batch"
+      ]
+    }
+  }
+}

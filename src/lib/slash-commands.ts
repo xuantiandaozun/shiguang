@@ -1,6 +1,7 @@
-import type { AutomationWorkflow } from "./ipc";
+import type { AutomationWorkflow, PluginSlashCommand } from "./ipc";
 
-export type SlashCommandKind = "workflow" | "meta";
+/** workflow=运行工作流；meta=内置命令（help）；prompt=插件提供，把预设文字填进输入框 */
+export type SlashCommandKind = "workflow" | "meta" | "prompt";
 
 export type SlashCommand = {
   id: string;
@@ -10,9 +11,14 @@ export type SlashCommand = {
   description?: string;
   kind: SlashCommandKind;
   workflowId?: number;
+  /** kind=prompt 时填入输入框的文字 */
+  prompt?: string;
 };
 
-export function buildSlashCommands(workflows: AutomationWorkflow[]): SlashCommand[] {
+export function buildSlashCommands(
+  workflows: AutomationWorkflow[],
+  pluginCommands: Array<PluginSlashCommand & { plugin: string }> = []
+): SlashCommand[] {
   const items: SlashCommand[] = [];
   for (const w of workflows) {
     const name = w.name?.trim();
@@ -26,13 +32,29 @@ export function buildSlashCommands(workflows: AutomationWorkflow[]): SlashComman
       workflowId: w.id,
     });
   }
-  items.push({
-    id: "help",
-    trigger: "help",
-    label: "help",
-    description: "查看可用 / 快捷命令",
-    kind: "meta",
-  });
+  // 插件命令：prompt 类型；core 插件声明的 help 等内置命令为 meta。
+  for (const c of pluginCommands) {
+    const kind: SlashCommandKind = c.kind === "meta" ? "meta" : "prompt";
+    if (kind === "meta" && c.trigger !== "help") continue;
+    if (items.some((i) => i.trigger.toLowerCase() === c.trigger.toLowerCase())) continue;
+    items.push({
+      id: kind === "meta" ? c.trigger : `plugin-${c.plugin}-${c.trigger}`,
+      trigger: c.trigger,
+      label: c.label ?? c.trigger,
+      description: c.description,
+      kind,
+      prompt: c.prompt,
+    });
+  }
+  if (!items.some((i) => i.id === "help")) {
+    items.push({
+      id: "help",
+      trigger: "help",
+      label: "help",
+      description: "查看可用 / 快捷命令",
+      kind: "meta",
+    });
+  }
   return items;
 }
 

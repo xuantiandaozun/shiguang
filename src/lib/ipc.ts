@@ -565,7 +565,101 @@ export const ipc = {
     }),
   readSkillContent: (name: string) => invoke<string>("read_skill_content", { name }),
   getLlmUsageStats: () => invoke<LlmUsageSnapshot>("get_llm_usage_stats"),
+
+  // ---------- 插件 ----------
+  listPlugins: () => invoke<PluginManifestList>("list_plugins"),
+  reloadPlugins: () => invoke<PluginManifestList>("reload_plugins"),
+  setPluginEnabled: (id: string, enabled: boolean) => invoke<unknown>("set_plugin_enabled", { id, enabled }),
+  getPluginSettings: (id: string) => invoke<Record<string, unknown>>("get_plugin_settings", { id }),
+  savePluginSettings: (id: string, values: Record<string, unknown>) =>
+    invoke<Record<string, unknown>>("save_plugin_settings", { id, values }),
+  pluginVersions: (id: string) => invoke<PluginVersion[]>("plugin_versions", { id }),
+  rollbackPlugin: (id: string, version: string) => invoke<unknown>("rollback_plugin", { id, version }),
+  readPluginView: (id: string, path: string) => invoke<unknown>("read_plugin_view", { id, path }),
+  openPluginsDir: () => invoke<void>("open_plugins_dir"),
+  setPluginSafeMode: (enabled: boolean) => invoke<PluginManifestList>("set_plugin_safe_mode", { enabled }),
+  pluginsBootOk: () => invoke<void>("plugins_boot_ok"),
+  pluginCallTool: <T = unknown>(pluginId: string, tool: string, args: Record<string, unknown> = {}) =>
+    invoke<T>("plugin_call_tool", { pluginId, tool, args }),
+  openPluginWindow: (pluginId: string, route: string, query?: string) =>
+    invoke<void>("open_plugin_window", { pluginId, route, query: query ?? null }),
 };
+
+/** 插件界面挂载项：component（仅内置）/ entry（iframe 页面）/ view（声明式 JSON）三选一。 */
+export interface PluginUiItem {
+  id?: string;
+  route?: string;
+  label?: string;
+  icon?: string;
+  order?: number;
+  group?: string;
+  group_label?: string;
+  nav?: boolean;
+  lazy?: boolean;
+  component?: string;
+  entry?: string;
+  view?: string;
+}
+
+export interface PluginSlashCommand {
+  trigger: string;
+  label?: string;
+  description?: string;
+  kind?: "meta" | "prompt";
+  /** kind=prompt：选择后发给 AI 的文字 */
+  prompt?: string;
+}
+
+export interface PluginUi {
+  tabs?: PluginUiItem[];
+  windows?: PluginUiItem[];
+  tool_labels?: Record<string, string>;
+  slash_commands?: PluginSlashCommand[];
+  [slot: string]: unknown;
+}
+
+export interface PluginInfo {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  order: number;
+  builtin: boolean;
+  enabled: boolean;
+  permissions: string[];
+  tools: string[];
+  ui: PluginUi | null;
+  settings_schema: JsonSchema | null;
+}
+
+export interface JsonSchema {
+  type?: string;
+  title?: string;
+  description?: string;
+  properties?: Record<string, JsonSchema & { default?: unknown; enum?: unknown[]; format?: string }>;
+  required?: string[];
+  [key: string]: unknown;
+}
+
+export interface PluginError {
+  plugin: string;
+  path: string;
+  message: string;
+}
+
+export interface PluginManifestList {
+  generation: number;
+  safe_mode: boolean;
+  plugins: PluginInfo[];
+  tool_labels: Record<string, string>;
+  errors: PluginError[];
+}
+
+export interface PluginVersion {
+  version: string;
+  reason: string | null;
+  at: string | null;
+}
 
 export function onEvent<T>(name: string, cb: (payload: T) => void): Promise<() => void> {
   return listen<T>(name, (e) => cb(e.payload));

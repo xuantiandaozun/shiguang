@@ -1,0 +1,66 @@
+[
+  {
+    "name": "propose_organization",
+    "label": "生成整理方案",
+    "description": "生成桌面整理方案并交给用户在界面上确认。方案只是提议，用户确认后系统才会移动/删除文件。分类的 action 为 delete 时文件会被移入回收站（可恢复），同样需要用户确认后才会执行。",
+    "parameters": {
+      "properties": {
+        "categories": {
+          "items": {
+            "properties": {
+              "action": {
+                "description": "move=移动到分类文件夹（默认）；delete=移入回收站。仅当用户明确要求删除或文件明显无用时才用 delete",
+                "enum": [
+                  "move",
+                  "delete"
+                ],
+                "type": "string"
+              },
+              "files": {
+                "description": "该分类下的文件名（与 scan_desktop 返回的 name 一致）",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "name": {
+                "description": "分类名，如 图片、文档；删除分类建议命名为「移入回收站」",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "files"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "description": "方案一句话概述",
+          "type": "string"
+        }
+      },
+      "required": [
+        "categories"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "undo_batch",
+    "label": "撤销整理批次",
+    "description": "撤销某个整理批次，把该批次移动的文件移回原位置。",
+    "parameters": {
+      "properties": {
+        "batch_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "batch_id"
+      ],
+      "type": "object"
+    }
+  }
+]

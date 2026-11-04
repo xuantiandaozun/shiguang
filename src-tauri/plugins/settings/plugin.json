@@ -1,0 +1,18 @@
+{
+  "id": "settings",
+  "name": "设置",
+  "version": "1.0.0",
+  "description": "应用设置。",
+  "order": 100,
+  "ui": {
+    "tabs": [
+      {
+        "id": "settings",
+        "label": "设置",
+        "icon": "settings",
+        "order": 60,
+        "component": "builtin:SettingsTab"
+      }
+    ]
+  }
+}

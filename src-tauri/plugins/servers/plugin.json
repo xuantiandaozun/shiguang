@@ -1,0 +1,50 @@
+{
+  "id": "servers",
+  "name": "服务器",
+  "version": "1.0.0",
+  "description": "SSH/SFTP 连接管理、远程命令、终端。",
+  "order": 60,
+  "tools": [
+    "tools.json"
+  ],
+  "categories": {
+    "servers": {
+      "label": "服务器",
+      "tools": [
+        "list_servers",
+        "get_server",
+        "create_server",
+        "update_server",
+        "delete_server",
+        "test_server_connection",
+        "ssh_exec",
+        "sftp_list",
+        "sftp_stat",
+        "sftp_upload",
+        "sftp_download",
+        "list_remote_tasks",
+        "get_remote_task",
+        "wait_remote_task",
+        "cancel_remote_task"
+      ]
+    }
+  },
+  "ui": {
+    "tabs": [
+      {
+        "id": "servers",
+        "label": "服务器",
+        "icon": "server",
+        "order": 20,
+        "component": "builtin:ServersTab"
+      }
+    ],
+    "windows": [
+      {
+        "route": "terminal",
+        "component": "builtin:ServerTerminal",
+        "lazy": true
+      }
+    ]
+  }
+}

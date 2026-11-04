@@ -1,0 +1,233 @@
+[
+  {
+    "name": "discover_capabilities",
+    "label": "发现所需能力",
+    "description": "围绕当前目标检索 Skills、工具组合与批量文件索引策略。本轮工具列表可能按类别精简；没有看到所需工具时，通过本工具选择相关类别，下一轮自动补齐，不要据此断言没有该能力。文件导入服务器清单等跨领域任务一次选择 files、servers 及确实需要的其它类别。命中 Skill 时 load_skill。",
+    "parameters": {
+      "properties": {
+        "categories": {
+          "description": "要检索的能力：files=本地文件/图片，browser=已打开的网页，web=公开网页搜索/抓取，organize=桌面整理，todos=待办，profile=个人资料，commands=命令/脚本/CLI，servers=拾光已保存的SSH连接、服务器新增修改删除、远程命令和SFTP传输，system=硬件与进程，delegation=资料、文件和浏览器子代理，skills=管理技能，workspaces=登记的固定项目（路径、部署、规则），agents=把代码修改外派给 Claude Code / Codex",
+          "items": {
+            "enum": [
+              "files",
+              "browser",
+              "web",
+              "organize",
+              "todos",
+              "profile",
+              "commands",
+              "servers",
+              "system",
+              "delegation",
+              "skills",
+              "workspaces",
+              "agents"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "query": {
+          "description": "用一句具体的话描述要完成的结果、涉及的对象和当前缺口，用于匹配 Skills",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query",
+        "categories"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_tool_call_history",
+    "label": "查询工具调用历史",
+    "description": "查询当前这次会话内已持久化的工具调用历史，用于复盘本会话过去操作、追踪“失败 → 调整 → 验证”过程、排障或总结可复用 Skill。不能查看其他会话。search 返回的 id 是工具调用 id；对话消息 id 不能拿来 get。被压缩从上下文拿掉的用户原话、定稿和中间草稿要用 recall_session，不要用本工具猜。不要用它代替对当前环境的实际验证。",
+    "parameters": {
+      "properties": {
+        "action": {
+          "description": "默认 search；get 按 id 返回单次调用的完整参数和结果",
+          "enum": [
+            "search",
+            "get"
+          ],
+          "type": "string"
+        },
+        "before_id": {
+          "description": "分页：只返回小于该 id 的更早记录",
+          "type": "integer"
+        },
+        "id": {
+          "description": "action=get 时必填，来自本会话 search 结果",
+          "type": "integer"
+        },
+        "include_history_queries": {
+          "description": "是否也返回历史查询工具自身的调用，默认 false",
+          "type": "boolean"
+        },
+        "limit": {
+          "description": "search 返回数，默认 20，最大 50",
+          "type": "integer"
+        },
+        "query": {
+          "description": "搜索工具名、参数、结果、用户消息和最终回复中包含的文字；多个词按空格分开，命中任一即可",
+          "type": "string"
+        },
+        "status": {
+          "description": "按最终调用状态过滤",
+          "enum": [
+            "running",
+            "done",
+            "error"
+          ],
+          "type": "string"
+        },
+        "tool_name": {
+          "description": "精确限定工具名",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    }
+  },
+  {
+    "name": "recall_session",
+    "label": "查回对话原文",
+    "description": "查回当前这次会话里的对话原文。上下文压缩后，检查点没写进去的用户原话、已保存的助手回复、定稿和只出现在工具轮里的中间草稿都还在，不会被删掉。需要原样使用这些内容时先 search 再 get，不要凭摘要重写，也不要改用 get_tool_call_history（那是工具调用 id，不是消息 id）。不能查看其他会话。",
+    "parameters": {
+      "properties": {
+        "action": {
+          "description": "默认 search。search 按关键词找消息和中间草稿；get 按 message_id 返回全文",
+          "enum": [
+            "search",
+            "get"
+          ],
+          "type": "string"
+        },
+        "before_id": {
+          "description": "search 分页：只返回 id 小于该 message_id 的更早消息",
+          "type": "integer"
+        },
+        "id": {
+          "description": "action=get 时必填，必须是 search 结果里的 message_id，不是工具调用 id",
+          "type": "integer"
+        },
+        "limit": {
+          "description": "search 返回条数，默认 8，最大 20",
+          "type": "integer"
+        },
+        "offset": {
+          "description": "action=get 时的字符偏移，正文超过单次返回长度时用返回的 next_offset 续读",
+          "type": "integer"
+        },
+        "query": {
+          "description": "search 用的关键词。多个词按空格分开，命中任一即可。用摘要里记下的检索词、专有名称或用户原话中的短句",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    }
+  },
+  {
+    "name": "ask_user",
+    "label": "等你确认",
+    "description": "仅在缺少无法安全获取的关键输入、存在实质歧义或需要新增授权时调用。只读检查、常规下一步、实现细节及已授权的同范围操作不要提问；相关问题合并一次询问，专用方案卡已确认的操作不重复确认。会在聊天里弹出选项卡片并等待回答；在收到结果前不要继续执行有副作用的操作。问题用用户能听懂的话说清影响、是否可撤销、同意后会发生什么。选项写具体后果，不要只写「是/否」；若有建议，把该项放第一并在 label 末尾加「（建议）」。一次只问当前必须决定的事，最多 4 题。用户关掉卡片会返回 dismissed：继续等下一条消息，不要当成同意，也不要立刻再弹同一问题。整理方案仍用 propose_organization 的方案卡片，不要用本工具替代。",
+    "parameters": {
+      "properties": {
+        "questions": {
+          "description": "要问的问题，1–4 个",
+          "items": {
+            "properties": {
+              "header": {
+                "description": "可选短标题，如「允许系统确认」",
+                "type": "string"
+              },
+              "id": {
+                "description": "稳定 id，会随答案原样返回",
+                "type": "string"
+              },
+              "multi_select": {
+                "description": "是否可多选，默认 false。无选项时不要设为 true",
+                "type": "boolean"
+              },
+              "options": {
+                "items": {
+                  "properties": {
+                    "description": {
+                      "description": "选项的补充说明，可空",
+                      "type": "string"
+                    },
+                    "label": {
+                      "description": "选项按钮上的短句",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "label"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "question": {
+                "description": "问题正文",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "question"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "questions"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "todo_write",
+    "label": "更新进度",
+    "description": "更新当前这次回复里正在做的步骤进度，会在聊天窗显示进度条。每次传入完整列表（整表替换）。用于多步任务让你和用户都看清做到哪；不是提醒待办——用户要事后提醒才用 add_todo。条目 content 简短、互不重复；同一时刻最多一项 in_progress；完成一项就标 completed 并立刻更新。两三步以内的简单问答不必调用。",
+    "parameters": {
+      "properties": {
+        "todos": {
+          "description": "完整进度列表，1–12 项",
+          "items": {
+            "properties": {
+              "content": {
+                "description": "一步要做的事，最多 80 字",
+                "type": "string"
+              },
+              "status": {
+                "description": "pending 未开始，in_progress 正在做，completed 已完成",
+                "enum": [
+                  "pending",
+                  "in_progress",
+                  "completed"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "content",
+              "status"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "todos"
+      ],
+      "type": "object"
+    }
+  }
+]

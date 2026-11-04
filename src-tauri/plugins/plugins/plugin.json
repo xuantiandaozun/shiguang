@@ -1,0 +1,28 @@
+{
+  "id": "plugins",
+  "name": "插件管理",
+  "version": "1.0.0",
+  "description": "查看、启停、编写和回滚插件。拾光通过这里的工具自己新增或修改用户插件。",
+  "order": 95,
+  "tools": [
+    "tools.json"
+  ],
+  "categories": {
+    "plugins": {
+      "label": "插件",
+      "description": "新增/修改/回滚用户插件（工具、提示词、脚本、界面）"
+    }
+  },
+  "ui": {
+    "tabs": [
+      {
+        "id": "plugins",
+        "label": "插件",
+        "icon": "plug",
+        "order": 55,
+        "component": "builtin:PluginsTab"
+      }
+    ]
+  },
+  "skills": "skills"
+}

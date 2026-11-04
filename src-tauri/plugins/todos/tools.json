@@ -1,0 +1,111 @@
+[
+  {
+    "name": "add_todo",
+    "label": "新建待办",
+    "description": "新建用户的提醒待办（到点通知或弹窗）。当前这次任务的步骤进度请用 todo_write，不要写到这里。",
+    "parameters": {
+      "properties": {
+        "due_at": {
+          "description": "截止时间，本地时间格式 YYYY-MM-DD HH:MM:SS，可选",
+          "type": "string"
+        },
+        "note": {
+          "description": "备注，可选",
+          "type": "string"
+        },
+        "priority": {
+          "description": "0 低 1 中 2 高，默认 1",
+          "enum": [
+            0,
+            1,
+            2
+          ],
+          "type": "integer"
+        },
+        "remind_mode": {
+          "description": "提醒方式，默认 notify（仅系统通知）。popup=弹窗提醒（用户明确要弹窗/强提醒时用）；popup_input=弹窗带输入框，用户填的内容会作为聊天消息发回给你处理——适合「提醒我写日报/周报，到时让我填内容」这类需要用户提交材料的提醒",
+          "enum": [
+            "notify",
+            "popup",
+            "popup_input"
+          ],
+          "type": "string"
+        },
+        "repeat_rule": {
+          "description": "重复规则，默认 none",
+          "enum": [
+            "none",
+            "daily",
+            "weekly"
+          ],
+          "type": "string"
+        },
+        "title": {
+          "description": "待办标题",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_todos",
+    "label": "查询待办",
+    "description": "查询用户的提醒待办列表。当前这次任务的步骤进度请用 todo_write，不要用本工具。",
+    "parameters": {
+      "properties": {
+        "filter": {
+          "description": "默认 pending",
+          "enum": [
+            "pending",
+            "done",
+            "all"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    }
+  },
+  {
+    "name": "complete_todo",
+    "label": "完成待办",
+    "description": "把待办标记为完成。",
+    "parameters": {
+      "properties": {
+        "id": {
+          "description": "待办 id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "snooze_todo",
+    "label": "延后提醒",
+    "description": "把待办提醒延后若干分钟。",
+    "parameters": {
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "minutes": {
+          "description": "延后分钟数，默认 10",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    }
+  }
+]

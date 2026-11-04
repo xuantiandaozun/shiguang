@@ -106,7 +106,7 @@ async fn handle(req: &Value) -> Result<Value> {
             "instructions":"服务器操作直接使用 list_servers/ssh_exec/sftp_* 等工具，不需要委托模型；长操作返回 task_id，用 wait_remote_task 等待；已有密码不会自动返回。首次信任主机指纹需在拾光服务器页确认。取消或断线后远程命令可能继续，先核实状态再操作。新目标才使用 delegate_to_shiguang。goal 必须明确对象、环境、验收标准、输出绝对路径和范围；项目上下文由委托方提供，不让拾光自行搜源码或全盘找文件。复杂任务约定少量关键节点，用 report_checkpoint 回传并暂停等待委托方审核。后续保留原 id，用 wait_shiguang_delegation 挂起等待节点或结果，不逐次get历史或实时监控。waiting_peer 时检查 checkpoint/question 的结果、证据及下一步，符合目标则用 reply 明确继续范围，跑偏则立即用原id纠偏。blocked/error 先读 result，补充信息后 resume 原任务，勿新建或无限重试。丢失 id 先 list/get 核实。waiting_user 等用户，委托方不可代答。blocked/error/cancelled 不可报告为完成；complete 也须核对验收标准。"
         })),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({"tools":tool_list()})),
+        "tools/list" => Ok(json!({"tools":tool_list().await})),
         "tools/call" => {
             let params = req.get("params").ok_or_else(|| anyhow!("missing params"))?;
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
@@ -124,9 +124,21 @@ async fn handle(req: &Value) -> Result<Value> {
     }
 }
 
-fn tool_list() -> Vec<Value> {
+/// 服务器工具的说明以 servers 插件为准（主程序运行时向它获取，改插件即生效）；
+/// 主程序未运行时退回编译时的副本。
+async fn server_tool_definitions() -> Vec<Value> {
+    match bridge(json!({"action":"server_tool_definitions"})).await {
+        Ok(value) => match value.get("tools").and_then(Value::as_array) {
+            Some(tools) if !tools.is_empty() => tools.clone(),
+            _ => server_tools::definitions(),
+        },
+        Err(_) => server_tools::definitions(),
+    }
+}
+
+async fn tool_list() -> Vec<Value> {
     let mut tools = delegation_tools();
-    tools.extend(server_tools::definitions());
+    tools.extend(server_tool_definitions().await);
     tools
 }
 
@@ -143,7 +155,7 @@ fn delegation_tools() -> Vec<Value> {
 }
 
 async fn call(name: &str, args: Value) -> Result<Value> {
-    if server_tools::definitions().iter().any(|t| t["name"].as_str() == Some(name)) {
+    if server_tool_definitions().await.iter().any(|t| t["name"].as_str() == Some(name)) {
         return bridge(json!({"action":"server_tool","name":name,"arguments":args})).await;
     }
     let get = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("").to_string();

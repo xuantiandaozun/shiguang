@@ -1,0 +1,6 @@
+{
+  "type": "object",
+  "properties": {
+    "max_items": { "type": "integer", "title": "最多保留条数", "default": 100, "description": "超出后自动丢弃最早的便签" }
+  }
+}

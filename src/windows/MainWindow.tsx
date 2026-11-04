@@ -1,34 +1,30 @@
-import ServersTab from "../components/ServersTab";
 import Icon, { type IconName } from "../components/Icon";
-import { useEffect, useState } from "react";
-import TodosTab from "../components/TodosTab";
-import TasksTab from "../components/TasksTab";
-import DelegationsTab from "../components/DelegationsTab";
-import SkillsTab from "../components/SkillsTab";
-import WorkspacesTab from "../components/WorkspacesTab";
-import UsageTab, { cacheHitRatio, formatPercent, formatTokenCount } from "../components/UsageTab";
-import SettingsTab from "../components/SettingsTab";
+import { useEffect, useMemo, useState } from "react";
+import { cacheHitRatio, formatPercent, formatTokenCount } from "../components/UsageTab";
 import appIcon from "../assets/brand-mark.svg";
 import { ipc, onEvent } from "../lib/ipc";
 import type { LlmUsageTotals } from "../lib/ipc";
+import { startPluginRegistry, usePluginStore, usePluginTabs } from "../plugins/registry";
+import type { MountedItem } from "../plugins/registry";
+import PluginMount from "../plugins/PluginMount";
 
-type Tab = "servers" | "todos" | "tasks" | "delegations" | "workspaces" | "skills" | "usage" | "settings";
+const ICONS = new Set<string>(["plus", "history", "close", "maximize", "files", "ai", "clear", "plug", "refresh", "upload", "up", "send", "stop", "tab", "todo", "server", "skill", "usage", "settings"]);
+const iconOf = (item: MountedItem): IconName => (item.icon && ICONS.has(item.icon) ? (item.icon as IconName) : "plug");
 
-const NAV_ICONS: Record<string, IconName> = { todos: "todo", servers: "server", workspaces: "files", skills: "skill", usage: "usage", settings: "settings" };
-const TABS: Array<{ key: Tab; label: string }> = [
-  { key: "todos", label: "待办事项" },
-
-  { key: "servers", label: "服务器" },
-  { key: "workspaces", label: "工作区" },
-
-  { key: "skills", label: "Skills" },
-  { key: "usage", label: "用量" },
-  { key: "settings", label: "设置" },
-];
-
+/** 标签页都由插件声明（plugin.json 的 ui.tabs）；同一 group 的页在顶部显示切换链接。 */
 export default function MainWindow() {
-  const [tab, setTab] = useState<Tab>("todos");
+  const tabs = usePluginTabs();
+  const loaded = usePluginStore((s) => s.list !== null);
+  const loadError = usePluginStore((s) => s.error);
+  const [tabKey, setTabKey] = useState<string | null>(null);
   const [today, setToday] = useState<LlmUsageTotals | null>(null);
+
+  useEffect(() => startPluginRegistry(), []);
+
+  const navTabs = useMemo(() => tabs.filter((t) => t.nav !== false), [tabs]);
+  const current = tabs.find((t) => t.key === tabKey) ?? navTabs[0] ?? null;
+  const byId = (id: string) => tabs.find((t) => t.id === id || t.key === id);
+  const group = current?.group ? tabs.filter((t) => t.group === current.group) : [];
 
   useEffect(() => {
     const load = () => {
@@ -43,9 +39,23 @@ export default function MainWindow() {
     return () => unlisten?.();
   }, []);
 
+  // 拾光编写插件后请求预览：切到该插件的第一个标签页，没有则打开插件管理页。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    onEvent<{ id: string }>("plugin-preview", ({ id }) => {
+      const list = usePluginStore.getState();
+      void list.load().then(() => {
+        const own = usePluginStore.getState().list?.plugins.find((p) => p.id === id)?.ui?.tabs?.[0];
+        setTabKey(own ? `${id}:${own.id ?? own.route ?? "0"}` : "plugins:plugins");
+      });
+    }).then((u) => (unlisten = u));
+    return () => unlisten?.();
+  }, []);
+
   const todayTokens = today?.total_tokens ?? 0;
   const todayRequests = today?.requests ?? 0;
   const todayRatio = today ? cacheHitRatio(today) : null;
+  const usageTab = byId("usage");
 
   return (
     <div className="h-full flex flex-col text-slate-200">
@@ -57,9 +67,9 @@ export default function MainWindow() {
             <div className="text-[11px] text-slate-500">关闭此窗口不会退出程序，将最小化到系统托盘</div>
           </div>
         </div>
-        {todayRequests > 0 && (
+        {todayRequests > 0 && usageTab && (
           <button
-            onClick={() => setTab("usage")}
+            onClick={() => setTabKey(usageTab.key)}
             className="text-right rounded-lg px-2.5 py-1.5 hover:bg-slate-800/80 transition"
             title="查看模型用量"
           >
@@ -74,37 +84,37 @@ export default function MainWindow() {
       </header>
 
       <nav className="shrink-0 flex gap-1 px-5 pt-3 overflow-x-auto">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`px-4 py-2 rounded-t-lg text-sm transition whitespace-nowrap ${
-              tab === t.key
-                ? "bg-slate-800/80 text-sky-300 font-medium"
-                : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
-            }`}
-          >
-            <Icon name={NAV_ICONS[t.key]} className="mr-2 align-middle" />{t.label}
-          </button>
-        ))}
+        {navTabs.map((t) => {
+          const active = current?.key === t.key;
+          return (
+            <button
+              key={t.key}
+              onClick={() => setTabKey(t.key)}
+              className={`px-4 py-2 rounded-t-lg text-sm transition whitespace-nowrap ${
+                active
+                  ? "bg-slate-800/80 text-sky-300 font-medium"
+                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
+              }`}
+            >
+              <Icon name={iconOf(t)} className="mr-2 align-middle" />{t.label ?? t.plugin.name}
+            </button>
+          );
+        })}
       </nav>
 
       <main className="flex-1 overflow-y-auto scrollbar-thin bg-slate-800/50 mx-5 mb-5 rounded-b-lg rounded-tr-lg p-4">
-        {(["todos", "tasks", "delegations"] as Tab[]).includes(tab) && (
+        {group.length > 1 && (
           <div className="organize-links" aria-label="任务类型">
-            <button onClick={() => setTab("todos")}>待办提醒</button>
-            <button onClick={() => setTab("tasks")}>后台任务</button>
-            <button onClick={() => setTab("delegations")}>委托任务</button>
+            {group.map((t) => (
+              <button key={t.key} onClick={() => setTabKey(t.key)}>
+                {t.group_label ?? t.label}
+              </button>
+            ))}
           </div>
         )}
-        {tab === "todos" && <TodosTab />}
-        {tab === "tasks" && <TasksTab />}
-        {tab === "servers" && <ServersTab />}
-        {tab === "delegations" && <DelegationsTab />}
-        {tab === "workspaces" && <WorkspacesTab />}
-        {tab === "skills" && <SkillsTab />}
-        {tab === "usage" && <UsageTab />}
-        {tab === "settings" && <SettingsTab />}
+        {!loaded && !loadError && <div className="text-sm text-slate-500">加载中…</div>}
+        {loadError && <div className="text-sm text-rose-400">插件清单加载失败：{loadError}</div>}
+        {current && <PluginMount key={current.key} item={current} slot="tab" />}
       </main>
     </div>
   );

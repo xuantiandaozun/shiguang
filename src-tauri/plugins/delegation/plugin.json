@@ -1,0 +1,39 @@
+{
+  "id": "delegation",
+  "name": "子代理与委托",
+  "version": "1.0.0",
+  "description": "子代理与外部委托任务。",
+  "order": 55,
+  "tools": [
+    "tools.json"
+  ],
+  "categories": {
+    "delegation": {
+      "label": "委托",
+      "tools": [
+        "run_subagent",
+        "await_subagent",
+        "reply_subagent"
+      ]
+    }
+  },
+  "ui": {
+    "tabs": [
+      {
+        "id": "delegations",
+        "label": "委托任务",
+        "icon": "todo",
+        "order": 12,
+        "group": "tasks",
+        "nav": false,
+        "component": "builtin:DelegationsTab"
+      }
+    ],
+    "windows": [
+      {
+        "route": "delegation",
+        "component": "builtin:DelegationWindow"
+      }
+    ]
+  }
+}

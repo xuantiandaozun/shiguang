@@ -1,0 +1,55 @@
+{
+  "id": "browser",
+  "name": "浏览器",
+  "version": "1.0.0",
+  "description": "通过拾光浏览器扩展 / CDP 操作用户浏览器。",
+  "order": 20,
+  "tools": [
+    "tools.json"
+  ],
+  "categories": {
+    "browser": {
+      "label": "浏览器",
+      "tools": [
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_find",
+        "browser_capabilities",
+        "browser_action",
+        "browser_wait",
+        "browser_extract",
+        "browser_network_observe",
+        "browser_request",
+        "browser_cookies",
+        "browser_read",
+        "browser_click",
+        "browser_type",
+        "browser_scroll",
+        "browser_tabs",
+        "browser_activate_tab",
+        "browser_screenshot",
+        "browser_evaluate",
+        "browser_status",
+        "browser_fast_loop"
+      ]
+    }
+  },
+  "assets": {
+    "readability": [
+      "assets/readability.js",
+      "../../../browser-extension/readability.js"
+    ],
+    "page_api": [
+      "assets/page-api.js",
+      "../../../browser-extension/page-api.js"
+    ],
+    "page_operations": [
+      "assets/page-operations.js",
+      "../../../browser-extension/page-operations.js"
+    ],
+    "page_runtime": [
+      "assets/page-runtime.js",
+      "../../../browser-extension/page-runtime.js"
+    ]
+  }
+}

@@ -1,0 +1,282 @@
+[
+  {
+    "name": "lookup_cache",
+    "label": "读写参考缓存",
+    "description": "本地缓存外部 CLI/API 的稳定对照数据（id↔名称、字段定义、选项列表、资源目录），避免每次任务都把大段实时输出灌进对话。不绑定某一家 CLI。读对照表用 get；没有或过期再调用外部命令，把提炼后的短表 put 回来。当天日程、最新一条记录等会变的数据不要缓存；密钥/token 不要写入。",
+    "parameters": {
+      "properties": {
+        "action": {
+          "description": "get 读取；put 写入提炼后的对照表；list 只返回目录不含正文；delete 删除",
+          "enum": [
+            "get",
+            "put",
+            "list",
+            "delete"
+          ],
+          "type": "string"
+        },
+        "key": {
+          "description": "稳定键名，建议 来源.对象.用途，如 lark.base.T1O7.projects、aliyun.ecs.regions",
+          "type": "string"
+        },
+        "source": {
+          "description": "可选来源标签，如 lark-cli、aliyun；put 时写入，list 时可过滤",
+          "type": "string"
+        },
+        "summary": {
+          "description": "put 时的一句话摘要，会出现在缓存目录里",
+          "type": "string"
+        },
+        "ttl_secs": {
+          "description": "put 时的有效期秒数，默认 7 天；0 表示直到手动删除",
+          "type": "integer"
+        },
+        "value": {
+          "description": "action=put 时必填。只放提炼后的对照表（JSON/短文本），不要放 CLI 原始大段输出",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "run_command",
+    "label": "执行命令",
+    "description": "同步执行一条 Windows 命令并等待结束（默认 60 秒超时）。调用外部程序时优先用 argv：每个参数独立一项，JSON/空格/中文不必转义；系统直启进程，按 PATHEXT 解析 exe/cmd，不会命中同名 .ps1。JSON 入参放 stdin 或 files（工作目录文件，argv 里写 @文件名）；不要拼进命令字符串，也不必先 create_file。stdout 若是 JSON 会自动解析：小结果在 json 字段，大结果给 json_summary（必要时 json_file），不要再重定向到文件后 read_file；只要子集时用 json_pointer。只有 cmd 内建命令或 PowerShell 语法（$变量、管道、对象）才用 command+shell。PowerShell 走 EncodedCommand，动态值放 script_args（脚本里 $DHArgs），不要再包 powershell -Command。PowerShell 管道无匹配时是 $null，取 .Count 前用 @()。失败时按 guidance 修正，不能声称成功。预计超过几十秒的命令、安装、构建或自己写的脚本，改用 run_command_background 并 await=true，不要用 check_task 轮询。破坏性操作须征得同意。整盘、跨目录或大量文件扫描优先 search_files。",
+    "parameters": {
+      "properties": {
+        "argv": {
+          "description": "推荐。外部程序+参数，每项一个参数，例如 [\"git\", \"status\", \"-sb\"]。第一项只放程序名，不要把整条命令塞进一项",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "description": "cmd 内建命令或 PowerShell 脚本正文。有 argv 时忽略。PowerShell 模式直接写 `$dirs=...`，不要再包 powershell -Command",
+          "type": "string"
+        },
+        "environment": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "可选环境变量键值；适合向 CLI 安全传递配置，避免把动态值拼进命令。不得包含敏感信息，除非当前任务确实需要",
+          "type": "object"
+        },
+        "files": {
+          "description": "在工作目录先写入若干文件再执行。键为文件名（仅字母数字 . - _），值为字符串或 JSON 对象/数组（自动序列化）。适合要求 @file 的 CLI 入参；未指定 workdir 时自动用应用临时目录。不要为此单独 create_file",
+          "type": "object"
+        },
+        "json_pointer": {
+          "description": "可选。RFC 6901 指针，例如 /data/items。仅当 stdout 为 JSON 时生效，用来只取子集",
+          "type": "string"
+        },
+        "powershell_strict": {
+          "description": "PowerShell 是否启用严格变量检查和错误即停，默认 true。管道无匹配时是 $null，取 .Count 前用 @()；不要为了 Count 关闭严格模式",
+          "type": "boolean"
+        },
+        "script_args": {
+          "description": "PowerShell 的结构化 JSON 参数；脚本中通过 `$DHArgs` 读取。用户提供的路径、关键词、文本等动态数据优先放这里，不要拼入脚本字符串"
+        },
+        "shell": {
+          "description": "仅 command 使用，默认 auto。cmd 内建选 cmd；`$变量`/管道/对象/多行脚本选 powershell。有 argv 时忽略",
+          "enum": [
+            "auto",
+            "cmd",
+            "powershell"
+          ],
+          "type": "string"
+        },
+        "stdin": {
+          "description": "写入子进程标准输入的文本（UTF-8）。JSON/长文本优先放这里，不要拼进命令行",
+          "type": "string"
+        },
+        "success_exit_codes": {
+          "description": "被视为成功的退出码，默认 [0]；仅按目标程序文档扩展，例如某些同步/差异工具",
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "tail_chars": {
+          "description": "非 JSON 输出时返回的末尾字符数，默认 2000，上限 8000。stdout 为 JSON 时忽略，改走自动解析",
+          "type": "integer"
+        },
+        "timeout_secs": {
+          "description": "超时秒数，默认 60，上限 600；超时自动终止",
+          "type": "integer"
+        },
+        "workdir": {
+          "description": "工作目录（绝对路径）。默认桌面；有 files 时默认改为应用临时目录。命令会写中间文件时必须设为系统提示词中的临时目录",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    }
+  },
+  {
+    "name": "run_command_background",
+    "label": "后台执行命令",
+    "description": "在后台执行 Windows 命令或 PowerShell 脚本（构建、下载、批量处理、启动服务、自己写的脚本等耗时任务），立即返回 task_id。argv / stdin / command / shell 的选择规则与 run_command 相同：外部程序用 argv，结构化正文用 stdin，脚本才用 command。预计会跑很久时必须 await=true：当前对话会挂起、不消耗工具轮次去轮询，任务结束后带着结果自动继续。不要用 check_task 反复查询。破坏性命令必须先向用户说明并征得同意。",
+    "parameters": {
+      "properties": {
+        "argv": {
+          "description": "推荐。外部程序+参数，每项一个参数；第一项只放程序名",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "await": {
+          "description": "true：启动后挂起当前对话直到任务结束，完成后自动继续。长时间命令和自己写的脚本都应设为 true。不要用 check_task 轮询",
+          "type": "boolean"
+        },
+        "command": {
+          "description": "cmd 内建命令或 PowerShell 脚本正文；有 argv 时忽略",
+          "type": "string"
+        },
+        "environment": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "传给子进程的环境变量键值",
+          "type": "object"
+        },
+        "files": {
+          "description": "在工作目录先写入若干文件再执行；规则与 run_command 相同",
+          "type": "object"
+        },
+        "label": {
+          "description": "任务备注名（如「构建前端」），方便用户识别",
+          "type": "string"
+        },
+        "powershell_strict": {
+          "description": "PowerShell 严格模式，默认 true。管道无匹配时取 .Count 前用 @()；不要为了 Count 关闭严格模式",
+          "type": "boolean"
+        },
+        "script_args": {
+          "description": "PowerShell 结构化 JSON 参数，脚本中通过 `$DHArgs` 读取；避免拼接动态文本"
+        },
+        "shell": {
+          "description": "仅 command 使用，默认 auto；cmd 内建选 cmd，PowerShell 语法和 `$变量` 选 powershell",
+          "enum": [
+            "auto",
+            "cmd",
+            "powershell"
+          ],
+          "type": "string"
+        },
+        "stdin": {
+          "description": "写入子进程标准输入的文本（UTF-8）",
+          "type": "string"
+        },
+        "success_exit_codes": {
+          "description": "成功退出码，默认 [0]；只依据目标程序的退出码语义扩展",
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "timeout_secs": {
+          "description": "仅 await=true 时生效：最长等待秒数，默认 7200（2 小时），上限 86400。超时不杀进程，可再 await_task",
+          "type": "integer"
+        },
+        "workdir": {
+          "description": "工作目录（绝对路径）。默认桌面；有 files 时默认改为应用临时目录。命令会写中间文件时必须设为系统提示词中的临时目录",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    }
+  },
+  {
+    "name": "await_task",
+    "label": "等待任务结束",
+    "description": "挂起当前对话，直到指定后台任务结束，再带着输出继续。等待期间不消耗工具调用轮次。长时间命令、安装、构建、自己写的脚本在 run_command_background 之后应立刻调用本工具（或直接给 background 设 await=true）。不要用 check_task 反复查询。用户中断对话会停止该任务。",
+    "parameters": {
+      "properties": {
+        "json_pointer": {
+          "description": "可选。任务结束后若 stdout 为 JSON，按 RFC 6901 取子集",
+          "type": "string"
+        },
+        "tail_chars": {
+          "description": "非 JSON 输出时返回末尾字符数，默认 2000，上限 8000",
+          "type": "integer"
+        },
+        "task_id": {
+          "description": "run_command_background 返回的 task_id",
+          "type": "string"
+        },
+        "timeout_secs": {
+          "description": "最长等待秒数，默认 7200（2 小时），上限 86400。超时不杀进程",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "check_task",
+    "label": "查询后台任务",
+    "description": "查看已结束任务的输出片段，或确认当前状态。不要用它轮询尚未结束的长时间任务，那会很快耗尽工具轮次；应改用 await_task，或给 run_command_background 设 await=true，任务结束后对话会自动继续。stdout 若是 JSON 会自动解析；可用 json_pointer 取子集。非 JSON 时默认返回末尾 tail_chars 字符。",
+    "parameters": {
+      "properties": {
+        "json_pointer": {
+          "description": "可选。从该任务 stdout 的 JSON 里取子集（RFC 6901），不必重跑 CLI",
+          "type": "string"
+        },
+        "pattern": {
+          "description": "可选：只取包含该关键字的行（如 error、失败、完成）；与 json_pointer 同时出现时以 json_pointer 为准",
+          "type": "string"
+        },
+        "tail_chars": {
+          "description": "非 JSON 输出时返回末尾字符数，默认 2000，上限 8000",
+          "type": "integer"
+        },
+        "task_id": {
+          "description": "run_command_background 返回的 task_id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_tasks",
+    "label": "列出后台任务",
+    "description": "列出所有后台任务（id/状态/命令/起止时间/日志路径，不含输出内容）。",
+    "parameters": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    }
+  },
+  {
+    "name": "stop_task",
+    "label": "停止后台任务",
+    "description": "停止一个正在运行的后台任务（结束整棵进程树）。",
+    "parameters": {
+      "properties": {
+        "task_id": {
+          "description": "要停止的任务 id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "type": "object"
+    }
+  }
+]

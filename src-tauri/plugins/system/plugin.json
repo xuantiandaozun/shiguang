@@ -1,0 +1,18 @@
+{
+  "id": "system",
+  "name": "本机信息",
+  "version": "1.0.0",
+  "description": "查询本机系统信息。",
+  "order": 35,
+  "tools": [
+    "tools.json"
+  ],
+  "categories": {
+    "system": {
+      "label": "本机",
+      "tools": [
+        "get_system_info"
+      ]
+    }
+  }
+}

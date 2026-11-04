@@ -1,0 +1,38 @@
+{
+  "id": "commands",
+  "name": "命令",
+  "version": "1.0.0",
+  "description": "本机命令与后台任务、外部参考缓存；Windows CLI 调用规范。",
+  "order": 15,
+  "tools": [
+    "tools.json"
+  ],
+  "skills": "skills",
+  "categories": {
+    "commands": {
+      "label": "命令",
+      "tools": [
+        "run_command",
+        "run_command_background",
+        "await_task",
+        "check_task",
+        "list_tasks",
+        "stop_task",
+        "lookup_cache"
+      ]
+    }
+  },
+  "ui": {
+    "tabs": [
+      {
+        "id": "tasks",
+        "label": "后台任务",
+        "icon": "todo",
+        "order": 11,
+        "group": "tasks",
+        "nav": false,
+        "component": "builtin:TasksTab"
+      }
+    ]
+  }
+}

@@ -61,6 +61,21 @@ async fn handle(mut socket: TcpStream, app: AppHandle, token: &str) -> anyhow::R
 }
 
 async fn dispatch(app: &AppHandle, r: &Value) -> anyhow::Result<Value> {
+    if r.get("action").and_then(Value::as_str) == Some("server_tool_definitions") {
+        // 以 MCP 格式返回 servers 插件当前的工具定义。
+        let snapshot = crate::plugins::snapshot();
+        let tools: Vec<Value> = snapshot
+            .tools
+            .iter()
+            .filter(|t| t.plugin == "servers")
+            .map(|t| json!({
+                "name": t.name,
+                "description": t.definition["function"]["description"],
+                "inputSchema": t.definition["function"]["parameters"],
+            }))
+            .collect();
+        return Ok(json!({ "tools": tools }));
+    }
     if r.get("action").and_then(Value::as_str) == Some("server_tool") {
         let name = r.get("name").and_then(Value::as_str).unwrap_or("");
         return crate::servers::dispatch(app, name, &r.get("arguments").cloned().unwrap_or_else(|| json!({}))).await;

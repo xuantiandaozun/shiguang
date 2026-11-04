@@ -1,0 +1,50 @@
+[
+  {
+    "name": "list_profile",
+    "label": "查询个人信息",
+    "description": "查看用户个人信息：固定字段（姓名/性别/出生年月/手机/邮箱/城市）+ AI 维护的自由条目（工作经历/自媒体号/项目描述等）。任务需要本人信息但对话中没有提供时调用。",
+    "parameters": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    }
+  },
+  {
+    "name": "save_profile_entry",
+    "label": "保存个人信息",
+    "description": "保存/更新用户个人信息的自由条目（按 label 查重覆盖）。用户在聊天中透露了可长期复用的个人信息时主动保存：工作经历、技能、学历、自媒体账号、开发项目、作品链接、常用署名等。label 用简短名词（如「工作经历」「B站账号」），content 写具体内容（200字以内）。姓名/性别/出生年月等固定字段由用户在设置页维护，不要用本工具保存。",
+    "parameters": {
+      "properties": {
+        "content": {
+          "description": "具体内容，保留长期有效信息，丢弃一次性细节",
+          "type": "string"
+        },
+        "label": {
+          "description": "条目名，如 工作经历 / 自媒体账号 / 项目经历",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "content"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "delete_profile_entry",
+    "label": "删除个人信息",
+    "description": "按 id 删除一条个人信息自由条目（先用 list_profile 获取 id）。",
+    "parameters": {
+      "properties": {
+        "id": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    }
+  }
+]

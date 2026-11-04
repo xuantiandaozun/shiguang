@@ -1,0 +1,76 @@
+{
+  "id": "core",
+  "name": "核心",
+  "version": "1.0.0",
+  "description": "聊天主循环的核心工具：能力发现、历史查询、确认卡片、任务进度；系统提示词；插件 UI SDK。",
+  "order": 0,
+  "tools": [
+    "tools.json"
+  ],
+  "core_tools": [
+    "discover_capabilities",
+    "get_tool_call_history",
+    "recall_session",
+    "load_skill",
+    "ask_user",
+    "todo_write",
+    "workspace_open"
+  ],
+  "retired_tools": [
+    "create_rule",
+    "toggle_rule",
+    "get_operation_history",
+    "list_workflows",
+    "create_workflow",
+    "manage_workflow",
+    "find_browser_recipes",
+    "save_browser_recipe",
+    "run_browser_recipe"
+  ],
+  "retired_message": "该能力已下线。整理偏好请更新 desktop-organize 外部 Skill，通用流程请使用 Skill。",
+  "prompts": {
+    "system": "prompts/system.md",
+    "permission_confirmation": "prompts/permission-confirmation.md",
+    "permission_autopilot": "prompts/permission-autopilot.md",
+    "permission_balanced": "prompts/permission-balanced.md"
+  },
+  "ui": {
+    "windows": [
+      {
+        "route": "floatball",
+        "component": "builtin:FloatBall"
+      },
+      {
+        "route": "chat",
+        "component": "builtin:ChatPanel"
+      },
+      {
+        "route": "main",
+        "component": "builtin:MainWindow"
+      },
+      {
+        "route": "reply-reader",
+        "component": "builtin:ReplyReader"
+      }
+    ],
+    "tool_labels": {
+      "get_operation_history": "查询整理历史",
+      "create_rule": "创建整理规则",
+      "toggle_rule": "切换规则状态",
+      "find_browser_recipes": "查找浏览器经验",
+      "save_browser_recipe": "保存浏览器配方",
+      "run_browser_recipe": "运行浏览器配方",
+      "list_workflows": "查看工作流",
+      "create_workflow": "创建工作流",
+      "manage_workflow": "管理工作流"
+    },
+    "slash_commands": [
+      {
+        "trigger": "help",
+        "label": "help",
+        "description": "查看可用 / 快捷命令",
+        "kind": "meta"
+      }
+    ]
+  }
+}

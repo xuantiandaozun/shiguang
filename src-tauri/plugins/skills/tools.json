@@ -1,0 +1,204 @@
+[
+  {
+    "name": "list_skills",
+    "label": "列出 Skills",
+    "description": "列出已安装 Skills（含 scope=internal|external、启用状态）。目录通常已在系统提示之后的 Skills 消息里；需核对全量、含未启用项、或确认某技能是否存在时调用。",
+    "parameters": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    }
+  },
+  {
+    "name": "load_skill",
+    "label": "加载 Skill",
+    "category": "core",
+    "description": "加载某个 Skill 的完整 SKILL.md。目录描述与当前目标相符时先调用再执行。对话里已有该技能的 <skill_content> 时不要再调用。内部技能只读；不要凭摘要猜步骤。",
+    "parameters": {
+      "properties": {
+        "name": {
+          "description": "技能名（与目录中的 name 一致）",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "create_skill",
+    "label": "创建 Skill",
+    "description": "创建或覆盖一条【外部】Skill。内部技能禁止覆盖。完整完成用户目标后，用它沉淀可复用路径（description 写触发场景，body 写步骤与坑点，丢弃一次性文案/数字/时间）；中途失败不要调用。用户要求新建/改外部技能时也用它。",
+    "parameters": {
+      "properties": {
+        "body": {
+          "description": "技能正文 Markdown：步骤、约束、示例等",
+          "type": "string"
+        },
+        "description": {
+          "description": "触发场景描述：什么时候该用这个技能（会进目录摘要，写清楚触发词）",
+          "type": "string"
+        },
+        "name": {
+          "description": "技能标识名，建议小写英文+连字符，如 git-auto-commit-zh",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "body"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "skill_resource",
+    "label": "管理 Skill 文件",
+    "description": "管理【外部】Skill 私有目录中的资源文件。路径始终相对于该技能目录，不能访问目录之外；SKILL.md 必须用 create_skill 修改。list 列出资源，read 读取 UTF-8 文本，write 新建或覆盖代码、模板、配置等文本文件。用户要求技能保存持久文件或修改自己的代码/资源时使用。",
+    "parameters": {
+      "properties": {
+        "action": {
+          "enum": [
+            "list",
+            "read",
+            "write"
+          ],
+          "type": "string"
+        },
+        "content": {
+          "description": "write 写入的完整 UTF-8 文本，最大 1 MB",
+          "type": "string"
+        },
+        "name": {
+          "description": "外部技能名",
+          "type": "string"
+        },
+        "path": {
+          "description": "read/write 使用的技能内相对路径，如 scripts/main.py",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "run_skill_program",
+    "label": "运行 Skill 程序",
+    "description": "执行【外部】Skill 私有目录中的程序，工作目录固定为该技能目录。程序可自行读写技能资源、创建 SQLite 等持久数据。必须先通过 skill_resource 写入或确认入口文件；需启用设置中的命令执行功能。入口路径不能越出技能目录。注意：这是普通本机进程，工作目录隔离不等于操作系统沙箱，程序主动使用绝对路径时仍继承当前用户权限。",
+    "parameters": {
+      "properties": {
+        "args": {
+          "description": "传给程序的参数，每项独立，不需要命令行转义",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "entry": {
+          "description": "技能内入口文件，如 scripts/main.py",
+          "type": "string"
+        },
+        "name": {
+          "description": "外部技能名",
+          "type": "string"
+        },
+        "runtime": {
+          "description": "入口运行方式；direct 用于技能内 exe/cmd/bat",
+          "enum": [
+            "python",
+            "node",
+            "powershell",
+            "direct"
+          ],
+          "type": "string"
+        },
+        "stdin": {
+          "description": "可选标准输入",
+          "type": "string"
+        },
+        "timeout_secs": {
+          "description": "超时秒数，默认 60，范围 1–300",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "entry",
+        "runtime"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "delete_skill",
+    "label": "删除 Skill",
+    "description": "删除一条【外部】Skill（不可恢复）。内部技能禁止删除。仅用户明确要求时调用。",
+    "parameters": {
+      "properties": {
+        "name": {
+          "description": "要删除的技能名",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "manage_skill",
+    "label": "管理 Skill",
+    "description": "管理 Skill：enable/disable（内外部均可）、scan/sync 从本机 Claude/Codex/Cursor 导入为外部技能。不能用 sync 覆盖内部技能。",
+    "parameters": {
+      "properties": {
+        "action": {
+          "description": "enable/disable 需 name；scan 扫描外部候选；sync 导入到本地",
+          "enum": [
+            "enable",
+            "disable",
+            "scan",
+            "sync"
+          ],
+          "type": "string"
+        },
+        "name": {
+          "description": "enable/disable 时的技能名",
+          "type": "string"
+        },
+        "names": {
+          "description": "sync 可选：只同步这些技能名；留空则同步该来源下全部",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "overwrite": {
+          "description": "sync 时若本地已有同名技能是否覆盖，默认 false（跳过）",
+          "type": "boolean"
+        },
+        "source": {
+          "description": "sync/scan 可选：只处理该来源；留空则全部",
+          "enum": [
+            "claude",
+            "codex",
+            "cursor",
+            "cursor-builtin"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    }
+  }
+]
