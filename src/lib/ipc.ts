@@ -463,7 +463,8 @@ export const ipc = {
   cancelDelegation: (id: string) => invoke<DelegationTask>("cancel_delegation", { id }),
   recorderStatus: () => invoke<RecorderStatus>("recorder_status"),
   recorderList: () => invoke<Recording[]>("recorder_list"),
-  recorderStart: (title?: string, url?: string) => invoke<{ id: string; title: string }>("recorder_start", { title: title || null, url: url || null }),
+  recorderStart: (title?: string, url?: string, opts?: RecorderStartOpts) =>
+    invoke<{ id: string; title: string }>("recorder_start", { title: title || null, url: url || null, opts: opts ?? null }),
   recorderStop: () => invoke<{ id: string; duration_s: number }>("recorder_stop"),
   recorderExport: (id: string, opts?: RecorderExportOpts) => invoke<{ path: string }>("recorder_export", { id, opts: opts ?? null }),
   recorderCancelExport: () => invoke<void>("recorder_cancel_export"),
@@ -689,6 +690,8 @@ export interface Recording {
   id: string; title: string; url: string; started_at: string; duration_s: number; clicks: number; marks: number;
   size: [number, number]; end_reason: string | null; exported: string | null; exported_at: string | null; thumb: string; dir: string;
 }
+/** 录制来源：browser 网页标签页；screen 整块屏幕；select 让用户框选区域或点选窗口；window 按名称找窗口 */
+export interface RecorderStartOpts { source?: "browser" | "screen" | "window" | "region" | "select"; window?: string; monitor?: number; include_self?: boolean }
 export interface RecorderExportOpts { zoom?: boolean; style?: "plain" | "padded"; zoom_scale?: number; cursor_scale?: number; fps?: number; preview?: boolean; burn_subtitles?: boolean; tighten?: boolean }
 export interface RecorderExportProgress { id: string; phase: "ffmpeg" | "audio" | "render" | "done"; done?: number; total?: number; ok?: boolean }
 export interface ScreenshotResult { path: string; width: number; height: number; copied: boolean }

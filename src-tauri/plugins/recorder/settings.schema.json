@@ -21,6 +21,23 @@
       "title": "截图保存目录（留空为 图片/拾光截图）",
       "default": ""
     },
+    "record_hotkey": {
+      "type": "string",
+      "title": "录屏快捷键：开始录鼠标所在的屏幕 / 停止录制（留空关闭）",
+      "default": "Ctrl+Alt+R"
+    },
+    "record_include_self": {
+      "type": "boolean",
+      "title": "桌面录屏时把拾光自己的窗口也录进去（录拾光宣传视频时打开）",
+      "default": false
+    },
+    "desktop_fps": {
+      "type": "integer",
+      "title": "桌面录屏采集帧率（5–30，画面不变时不占空间）",
+      "default": 20,
+      "minimum": 5,
+      "maximum": 30
+    },
     "mask_phone": {
       "type": "boolean",
       "title": "打码：手机号",

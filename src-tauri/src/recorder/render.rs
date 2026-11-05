@@ -36,6 +36,8 @@ pub struct RenderOpts {
 pub struct SourceFrame {
     pub t: f64,
     pub file: PathBuf,
+    /// 和上一帧几乎一样（桌面录屏里输入光标闪烁之类）：紧凑节奏不把它当作「有动静」
+    pub minor: bool,
 }
 
 /// 手动打码区域（timeline.json masks）：归一化矩形 + 时间范围（源时间）

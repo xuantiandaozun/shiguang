@@ -39,6 +39,14 @@ export default function RecorderTab() {
   const [playing, setPlaying] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
+  const [source, setSource] = useState<"browser" | "screen" | "select">(() => {
+    try { const v = localStorage.getItem("recorder.source"); return v === "screen" || v === "select" ? v : "browser"; } catch { return "browser"; }
+  });
+  const [includeSelf, setIncludeSelf] = useState(false);
+  const pickSource = (v: typeof source) => {
+    setSource(v);
+    try { localStorage.setItem("recorder.source", v); } catch { /* 无痕模式等 */ }
+  };
 
   const refresh = useCallback(async () => {
     try {
@@ -53,6 +61,7 @@ export default function RecorderTab() {
     const offs = [
       onEvent("recorder-changed", () => void refresh()),
       onEvent<RecorderExportProgress>("recorder-export-progress", (p) => setProgress(p)),
+      onEvent<string>("recorder-error", (e) => setError(e)),
     ];
     return () => { offs.forEach((o) => void o.then((f) => f())); };
   }, [refresh]);
@@ -71,7 +80,8 @@ export default function RecorderTab() {
   };
 
   const start = () => run(async () => {
-    await ipc.recorderStart(title.trim(), url.trim());
+    if (source === "browser") await ipc.recorderStart(title.trim(), url.trim());
+    else await ipc.recorderStart(title.trim(), "", { source, include_self: includeSelf });
     setTitle("");
   });
   const stop = () => run(() => ipc.recorderStop());
@@ -109,7 +119,7 @@ export default function RecorderTab() {
     <section className="space-y-3">
       <div>
         <h2 className="text-base font-semibold text-slate-100">录屏</h2>
-        <p className="mt-1 text-xs text-slate-400">录制浏览器当前标签页的操作。导出时自动放大点击处、画放大的光标和点击波纹。密码、手机号、身份证、邮箱、银行卡、密钥在页面上就被模糊，录到的画面里没有明文；更多打码规则在「插件 → 录屏」设置里加。也可以在聊天里让拾光边操作边录。</p>
+        <p className="mt-1 text-xs text-slate-400">录网页或桌面软件的操作。导出时自动放大点击处、画放大的光标和点击波纹。也可以在聊天里让拾光边操作边录。</p>
       </div>
 
       {status.recording
@@ -127,12 +137,23 @@ export default function RecorderTab() {
           <button type="button" disabled={busy} onClick={() => void stop()} className="shrink-0 rounded-md bg-rose-600 px-3 py-1.5 text-xs text-white hover:bg-rose-500 disabled:opacity-50">停止录制</button>
         </div>
         : <div className="space-y-2 rounded-lg border border-slate-700/60 bg-slate-900/30 p-4">
-          <div className="grid grid-cols-2 gap-2">
-            <input className={input} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="标题（可选，默认用网页标题）" />
-            <input className={input} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="先打开的网址（可选，默认录当前标签页）" />
+          <div className="flex flex-wrap gap-1">
+            {([["browser", "网页标签页"], ["screen", "整个屏幕"], ["select", "选择窗口或区域"]] as const).map(([v, label]) =>
+              <button key={v} type="button" onClick={() => pickSource(v)}
+                className={`rounded-md px-3 py-1 text-xs ${source === v ? "bg-sky-600 text-white" : "bg-slate-800 text-slate-300 hover:bg-slate-700"}`}>{label}</button>)}
           </div>
+          <div className={source === "browser" ? "grid grid-cols-2 gap-2" : "grid grid-cols-1 gap-2"}>
+            <input className={input} value={title} onChange={(e) => setTitle(e.target.value)} placeholder={source === "browser" ? "标题（可选，默认用网页标题）" : "标题（可选）"} />
+            {source === "browser" && <input className={input} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="先打开的网址（可选，默认录当前标签页）" />}
+          </div>
+          {source !== "browser" && <label className="flex items-center gap-2 text-xs text-slate-300">
+            <input type="checkbox" checked={includeSelf} onChange={(e) => setIncludeSelf(e.target.checked)} />
+            把拾光自己的窗口也录进去（录拾光宣传视频时勾选）
+          </label>}
           <div className="flex items-center justify-between gap-3">
-            <p className="text-[11px] text-slate-500">录制中不要切换标签页，否则画面会停住。</p>
+            <p className="text-[11px] text-slate-500">{source === "browser"
+              ? "密码、手机号、身份证、邮箱、银行卡、密钥在页面上就被模糊，录到的画面里没有明文。录制中不要切换标签页，否则画面会停住。"
+              : `${source === "select" ? "开始后框选一块区域或单击一个窗口。" : "录鼠标所在的那块屏幕。"}桌面软件不能自动打码，录完在「编辑」里框选打码。快捷键 Ctrl+Alt+R 随时开始/停止（可在插件设置里改）。`}</p>
             <button type="button" disabled={busy} onClick={() => void start()} className="shrink-0 rounded-md bg-sky-600 px-3 py-1.5 text-xs text-white hover:bg-sky-500 disabled:opacity-50">开始录制</button>
           </div>
         </div>}

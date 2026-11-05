@@ -1,4 +1,4 @@
-// 框选截图：全屏显示冻结的屏幕画面。拖动框选区域；鼠标停在窗口上会高亮，单击选中该窗口（截完整窗口，被遮挡也完整）。
+// 框选截图（也用于桌面录屏选范围，purpose=record）：全屏显示冻结的屏幕画面。拖动框选区域；鼠标停在窗口上会高亮，单击选中该窗口（截完整窗口，被遮挡也完整）。
 // Enter/双击完成，Esc/右键重选或退出。坐标：后端给的是物理像素，按图片显示比例换算。
 import { useCallback, useEffect, useRef, useState } from "react";
 import type React from "react";
@@ -6,7 +6,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { ipc } from "../lib/ipc";
 
 interface Win { hwnd: number; title: string; process: string; rect: [number, number, number, number] }
-interface Init { image: string; width: number; height: number; windows: Win[]; copy: boolean }
+interface Init { image: string; width: number; height: number; windows: Win[]; copy: boolean; purpose?: "screenshot" | "record" }
 type Sel = { kind: "region"; rect: [number, number, number, number] } | { kind: "window"; win: Win };
 
 const id = new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("id") ?? "";
@@ -99,7 +99,8 @@ export default function CaptureOverlay() {
   else if (drag?.moved) {
     box = [Math.min(drag.x0, drag.x1), Math.min(drag.y0, drag.y1), Math.abs(drag.x1 - drag.x0), Math.abs(drag.y1 - drag.y0)];
     label = `${box[2]} × ${box[3]}`;
-  } else if (hover) { box = hover.rect; label = `${hover.title}（单击截取整个窗口）`; }
+  } else if (hover) { box = hover.rect; label = `${hover.title}（单击${init.purpose === "record" ? "录制这个窗口" : "截取整个窗口"}）`; }
+  const record = init.purpose === "record";
 
   const s = k();
   const css = box && {
@@ -121,16 +122,16 @@ export default function CaptureOverlay() {
       </div>
       : <div className="pointer-events-none absolute inset-0 bg-black/30" />}
     {!sel && !drag && <div className="pointer-events-none absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-black/70 px-4 py-1.5 text-xs text-white">
-      拖动框选区域，或单击一个窗口 · Esc 取消
+      {record ? "拖动框选要录制的区域，或单击要录制的窗口 · Esc 取消" : "拖动框选区域，或单击一个窗口 · Esc 取消"}
     </div>}
     {sel && css && <div className="absolute flex gap-1 rounded-lg bg-slate-900/95 p-1 shadow-xl"
       style={{ top: toolbarTop, left: Math.min(Math.max(8, css.left + css.width - 300), window.innerWidth - 308) }}
       onMouseDown={(e) => e.stopPropagation()} onMouseUp={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
       <button type="button" disabled={busy} className={btn} onClick={() => setSel(null)}>重选</button>
       <button type="button" disabled={busy} className={btn} onClick={cancel}>取消</button>
-      <button type="button" disabled={busy} className={btn} onClick={() => void finish(true)}>保存并复制</button>
-      <button type="button" disabled={busy} className="rounded bg-sky-600 px-3 py-1.5 text-xs text-white hover:bg-sky-500 disabled:opacity-50" onClick={() => void finish()}>
-        {busy ? "保存中…" : init.copy ? "完成（Enter）" : "保存（Enter）"}
+      {!record && <button type="button" disabled={busy} className={btn} onClick={() => void finish(true)}>保存并复制</button>}
+      <button type="button" disabled={busy} className={`rounded px-3 py-1.5 text-xs text-white disabled:opacity-50 ${record ? "bg-rose-600 hover:bg-rose-500" : "bg-sky-600 hover:bg-sky-500"}`} onClick={() => void finish()}>
+        {record ? "开始录制（Enter）" : busy ? "保存中…" : init.copy ? "完成（Enter）" : "保存（Enter）"}
       </button>
     </div>}
   </div>;

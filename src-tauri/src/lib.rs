@@ -214,7 +214,7 @@ pub fn run() {
                 log::warn!("准备浏览器扩展失败: {e}");
             }
             if let Err(e) = recorder::screenshot::apply_hotkey(app.handle()) {
-                log::warn!("注册截图快捷键失败: {e:#}");
+                log::warn!("注册全局快捷键失败: {e:#}");
             }
             tray::create_tray(app.handle())?;
             todo::scheduler::spawn(app.handle().clone());

@@ -54,17 +54,47 @@
   {
     "name": "record_start",
     "label": "开始录屏",
-    "description": "开始录制浏览器当前标签页（画面不含鼠标，导出时再画光标和放大效果）。录制期间页面上的敏感信息（密码框、手机号、身份证、邮箱、银行卡、密钥及设置里的规则）在源头就被模糊，画面里不会出现明文。给了 url 会先打开该网页再开始。同时只能有一个录制。",
+    "description": "开始录屏（画面不含鼠标，导出时再画光标和放大效果）。同时只能有一个录制。source=browser（默认）：录浏览器当前标签页，页面上的敏感信息（密码框、手机号、身份证、邮箱、银行卡、密钥及设置里的规则）在源头就被模糊；给了 url 会先打开该网页。source=window：录某个桌面软件的窗口（window 写标题或进程名的一部分，不确定先 list_windows；会把它切到前台，录的是它在屏幕上的位置，别让其它窗口挡住它）。source=screen：录整块屏幕（默认鼠标所在的那块，monitor 指定第几块）。source=region：录屏幕上的 rect 区域。source=select：弹出选区让用户自己框选区域或单击窗口。桌面录制默认不录拾光自己的窗口，录拾光宣传视频时 include_self=true。桌面软件不能在源头打码，录完要用 record_edit 的 masks 补。",
     "parameters": {
       "type": "object",
       "properties": {
+        "source": {
+          "type": "string",
+          "enum": [
+            "browser",
+            "window",
+            "screen",
+            "region",
+            "select"
+          ],
+          "description": "录制来源，默认 browser"
+        },
         "title": {
           "type": "string",
           "description": "录制标题，用于列表和导出文件名"
         },
         "url": {
           "type": "string",
-          "description": "先打开的网页（可选）"
+          "description": "source=browser 时先打开的网页（可选）"
+        },
+        "window": {
+          "type": "string",
+          "description": "source=window 时：窗口标题或进程名的一部分，如「微信」「notepad」"
+        },
+        "monitor": {
+          "type": "integer",
+          "description": "source=screen 时：第几块屏幕（1 起），默认鼠标所在的屏幕"
+        },
+        "rect": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "source=region 时：[x, y, 宽, 高]，屏幕物理像素"
+        },
+        "include_self": {
+          "type": "boolean",
+          "description": "桌面录制时是否把拾光自己的窗口录进去（默认按设置，通常不录）"
         }
       }
     }
@@ -72,7 +102,7 @@
   {
     "name": "record_stop",
     "label": "停止录屏",
-    "description": "停止当前录制并保存工程，返回录制 id、时长、帧数和点击次数。",
+    "description": "停止当前录制并保存工程，返回录制 id、时长、帧数和点击次数。用户也可以按录屏快捷键（默认 Ctrl+Alt+R）停止。",
     "parameters": {
       "type": "object",
       "properties": {}

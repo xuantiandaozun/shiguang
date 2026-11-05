@@ -93,12 +93,17 @@ fn deliver(app: &AppHandle, img: &RgbaImage, label: &str, copy: bool) -> Result<
 
 // ---------- 拾光自身窗口 ----------
 
-fn own_hwnds(app: &AppHandle) -> Vec<isize> {
+pub(crate) fn own_hwnds(app: &AppHandle) -> Vec<isize> {
     app.webview_windows()
         .values()
         .filter(|w| !w.label().starts_with("capture-"))
         .filter_map(|w| w.hwnd().ok().map(|h| h.0 as isize))
         .collect()
+}
+
+/// 把拾光的窗口排除出（或恢复到）屏幕采集；桌面录屏全程使用
+pub(crate) fn set_self_excluded(app: &AppHandle, on: bool) {
+    win::set_exclude(&own_hwnds(app), on);
 }
 
 /// 在 f 执行期间把拾光的窗口排除出屏幕采集（include_self 时什么都不做）
@@ -120,7 +125,7 @@ pub fn list_windows(include_self: bool) -> Vec<WinInfo> {
 }
 
 /// 按标题或进程名找窗口（不区分大小写；多个命中取最上层）
-fn find_window(query: &str, include_self: bool) -> Result<(WinInfo, Vec<String>)> {
+pub(crate) fn find_window(query: &str, include_self: bool) -> Result<(WinInfo, Vec<String>)> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
         bail!("需要窗口标题或进程名");
@@ -201,6 +206,8 @@ struct Session {
     windows: Vec<WinInfo>,
     image_path: PathBuf,
     copy: bool,
+    /// 只选区域不截图（桌面录屏选录制范围）
+    select_only: bool,
     tx: Option<tokio::sync::oneshot::Sender<Result<Value, String>>>,
 }
 
@@ -211,6 +218,15 @@ const OVERLAY: &str = "capture-overlay";
 pub async fn interactive(app: &AppHandle, include_self: Option<bool>, copy: Option<bool>) -> Result<Value> {
     let include_self = include_self.unwrap_or_else(|| default_include_self(app));
     let copy = copy.unwrap_or_else(|| default_copy(app));
+    open_overlay(app, include_self, copy, false).await
+}
+
+/// 让用户框选一个区域或单击一个窗口（不截图）。返回 {kind: region|window, rect: 虚拟屏幕物理像素, hwnd?, title?}
+pub async fn select_area(app: &AppHandle, include_self: bool) -> Result<Value> {
+    open_overlay(app, include_self, false, true).await
+}
+
+async fn open_overlay(app: &AppHandle, include_self: bool, copy: bool, select_only: bool) -> Result<Value> {
     cancel_session("开始了新的截图");
     let app2 = app.clone();
     let (screen, virt, windows) = tokio::task::spawn_blocking(move || -> Result<_> {
@@ -230,7 +246,7 @@ pub async fn interactive(app: &AppHandle, include_self: Option<bool>, copy: Opti
         tokio::task::spawn_blocking(move || save_fast_png(&s, &p)).await.map_err(|e| anyhow!("{e}"))??;
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
-    *SESSION.lock().unwrap() = Some(Session { id: id.clone(), screen, virt, windows, image_path, copy, tx: Some(tx) });
+    *SESSION.lock().unwrap() = Some(Session { id: id.clone(), screen, virt, windows, image_path, copy, select_only, tx: Some(tx) });
     if let Some(old) = app.get_webview_window(OVERLAY) {
         let _ = old.destroy();
     }
@@ -303,7 +319,8 @@ pub fn capture_overlay_init(id: String) -> Result<Value, String> {
         .map(|w| json!({"hwnd": w.hwnd, "title": w.title, "process": w.process,
             "rect": [w.rect[0] - s.virt.x, w.rect[1] - s.virt.y, w.rect[2], w.rect[3]]}))
         .collect();
-    Ok(json!({"image": s.image_path.to_string_lossy(), "width": s.virt.w, "height": s.virt.h, "windows": windows, "copy": s.copy}))
+    Ok(json!({"image": s.image_path.to_string_lossy(), "width": s.virt.w, "height": s.virt.h, "windows": windows, "copy": s.copy,
+        "purpose": if s.select_only { "record" } else { "screenshot" }}))
 }
 
 /// 冻结画面加载完再显示，避免黑屏闪一下
@@ -326,7 +343,25 @@ pub async fn capture_finish(app: AppHandle, id: String, kind: String, rect: Opti
         }
     };
     close_overlay(&app);
-    let Session { screen, virt, windows, image_path, copy: default_copy, mut tx, .. } = session;
+    let Session { screen, virt, windows, image_path, copy: default_copy, select_only, mut tx, .. } = session;
+    if select_only {
+        let _ = std::fs::remove_file(&image_path);
+        let result = match kind.as_str() {
+            "window" => windows
+                .iter()
+                .find(|w| Some(w.hwnd) == hwnd)
+                .map(|w| json!({"kind": "window", "hwnd": w.hwnd, "title": w.title, "process": w.process, "rect": w.rect}))
+                .ok_or_else(|| "窗口已不存在".to_string()),
+            _ => rect
+                .filter(|r| r[2] >= 16 && r[3] >= 16)
+                .map(|r| json!({"kind": "region", "rect": [r[0] + virt.x, r[1] + virt.y, r[2], r[3]]}))
+                .ok_or_else(|| "选区太小".to_string()),
+        };
+        if let Some(tx) = tx.take() {
+            let _ = tx.send(result.clone());
+        }
+        return result;
+    }
     let copy = copy.unwrap_or(default_copy);
     let app2 = app.clone();
     let result = tokio::task::spawn_blocking(move || -> Result<Value> {
@@ -405,28 +440,53 @@ pub fn parse_hotkey(s: &str) -> Result<(u32, u32)> {
     Ok((mods, vk))
 }
 
-/// 按设置注册截图快捷键（设置为空则取消）。返回实际生效的快捷键或错误说明
+/// 按设置注册全局快捷键：截图、开始/停止桌面录屏（设置为空则不注册）。返回生效的快捷键说明
 pub fn apply_hotkey(app: &AppHandle) -> Result<String> {
-    let key = settings(app).get("screenshot_hotkey").and_then(Value::as_str).unwrap_or("").trim().to_string();
-    if key.is_empty() {
-        let _ = win::set_hotkey(None);
-        return Ok(String::new());
+    let s = settings(app);
+    let key = |k: &str, default: &str| s.get(k).and_then(Value::as_str).unwrap_or(default).trim().to_string();
+    let mut specs: Vec<(String, u32, u32, win::Callback)> = Vec::new();
+    let mut errors = Vec::new();
+    let shot = key("screenshot_hotkey", "Ctrl+Shift+X");
+    if !shot.is_empty() {
+        match parse_hotkey(&shot) {
+            Ok((m, vk)) => {
+                let app2 = app.clone();
+                specs.push((format!("截图 {shot}"), m, vk, Box::new(move || {
+                    let app = app2.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = interactive(&app, None, None).await {
+                            log::info!("快捷键截图: {e:#}");
+                        }
+                    });
+                })));
+            }
+            Err(e) => errors.push(format!("截图快捷键：{e:#}")),
+        }
     }
-    let (mods, vk) = parse_hotkey(&key)?;
-    let app2 = app.clone();
-    win::set_hotkey(Some((
-        mods,
-        vk,
-        Box::new(move || {
-            let app = app2.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = interactive(&app, None, None).await {
-                    log::info!("快捷键截图: {e:#}");
-                }
-            });
-        }),
-    )))?;
-    Ok(key)
+    let rec = key("record_hotkey", "Ctrl+Alt+R");
+    if !rec.is_empty() {
+        match parse_hotkey(&rec) {
+            Ok((m, vk)) => {
+                let app2 = app.clone();
+                specs.push((format!("录屏 {rec}"), m, vk, Box::new(move || {
+                    let app = app2.clone();
+                    tauri::async_runtime::spawn(async move {
+                        super::hotkey_toggle(&app).await;
+                    });
+                })));
+            }
+            Err(e) => errors.push(format!("录屏快捷键：{e:#}")),
+        }
+    }
+    let names: Vec<String> = specs.iter().map(|s| s.0.clone()).collect();
+    let failed = win::set_hotkeys(specs.into_iter().map(|(_, m, vk, cb)| (m, vk, cb)).collect())?;
+    for i in failed {
+        errors.push(format!("{} 已被其它程序占用，请在「插件 → 录屏与截图」设置里换一个", names[i]));
+    }
+    if !errors.is_empty() {
+        bail!("{}", errors.join("；"));
+    }
+    Ok(names.join("，"))
 }
 
 // ---------- AI 工具 ----------
@@ -513,7 +573,7 @@ pub fn screenshot_copy(app: AppHandle, path: String) -> Result<(), String> {
 // ---------- Windows 实现 ----------
 
 #[cfg(windows)]
-mod win {
+pub(crate) mod win {
     use super::{Virtual, WinInfo};
     use anyhow::{anyhow, bail, Result};
     use image::RgbaImage;
@@ -539,7 +599,7 @@ mod win {
     };
 
     /// 线程级切到每显示器 DPI 感知，保证所有坐标都是物理像素（与 DWM 返回的一致）
-    fn dpi_aware<T>(f: impl FnOnce() -> T) -> T {
+    pub fn dpi_aware<T>(f: impl FnOnce() -> T) -> T {
         use windows_sys::Win32::UI::HiDpi::{SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
         unsafe {
             let old = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -602,7 +662,7 @@ mod win {
         })
     }
 
-    fn frame_bounds(hwnd: HWND) -> Option<RECT> {
+    pub fn frame_bounds(hwnd: HWND) -> Option<RECT> {
         unsafe {
             let mut r: RECT = std::mem::zeroed();
             let hr = DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS as u32, &mut r as *mut RECT as *mut c_void, std::mem::size_of::<RECT>() as u32);
@@ -644,7 +704,7 @@ mod win {
         })
     }
 
-    fn process_name(pid: u32) -> String {
+    pub fn process_name(pid: u32) -> String {
         unsafe {
             let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if h.is_null() {
@@ -797,47 +857,55 @@ mod win {
         Ok(())
     }
 
-    type Callback = Box<dyn Fn() + Send + 'static>;
+    pub type Callback = Box<dyn Fn() + Send + 'static>;
     /// 快捷键线程 id（换快捷键时让旧线程退出）
     static HOTKEY_THREAD: Mutex<Option<u32>> = Mutex::new(None);
 
-    pub fn set_hotkey(spec: Option<(u32, u32, Callback)>) -> Result<()> {
+    /// 注册一组全局快捷键（替换之前的）。返回注册失败（被占用）的序号
+    pub fn set_hotkeys(specs: Vec<(u32, u32, Callback)>) -> Result<Vec<usize>> {
         if let Some(tid) = HOTKEY_THREAD.lock().unwrap().take() {
             unsafe {
                 PostThreadMessageW(tid, WM_QUIT, 0, 0);
             }
         }
-        let Some((mods, vk, cb)) = spec else { return Ok(()) };
-        let (tx, rx) = std::sync::mpsc::channel::<Result<u32, String>>();
+        if specs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<(u32, Vec<usize>)>();
         std::thread::Builder::new()
-            .name("screenshot-hotkey".into())
+            .name("global-hotkeys".into())
             .spawn(move || unsafe {
-                if RegisterHotKey(std::ptr::null_mut(), 1, mods | MOD_NOREPEAT, vk) == 0 {
-                    let _ = tx.send(Err("快捷键已被其它程序占用，请在「插件 → 录屏」设置里换一个".into()));
-                    return;
+                let mut failed = Vec::new();
+                for (i, (mods, vk, _)) in specs.iter().enumerate() {
+                    if RegisterHotKey(std::ptr::null_mut(), i as i32 + 1, mods | MOD_NOREPEAT, *vk) == 0 {
+                        failed.push(i);
+                    }
                 }
-                let _ = tx.send(Ok(GetCurrentThreadId()));
+                let _ = tx.send((GetCurrentThreadId(), failed));
                 let mut msg: MSG = std::mem::zeroed();
                 while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
                     if msg.message == WM_HOTKEY {
-                        cb();
+                        if let Some((_, _, cb)) = specs.get(msg.wParam.wrapping_sub(1)) {
+                            cb();
+                        }
                     }
                 }
-                UnregisterHotKey(std::ptr::null_mut(), 1);
+                for i in 0..specs.len() {
+                    UnregisterHotKey(std::ptr::null_mut(), i as i32 + 1);
+                }
             })?;
         match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-            Ok(Ok(tid)) => {
+            Ok((tid, failed)) => {
                 *HOTKEY_THREAD.lock().unwrap() = Some(tid);
-                Ok(())
+                Ok(failed)
             }
-            Ok(Err(e)) => bail!("{e}"),
             Err(_) => bail!("注册快捷键超时"),
         }
     }
 }
 
 #[cfg(not(windows))]
-mod win {
+pub(crate) mod win {
     use super::{Virtual, WinInfo};
     use anyhow::{bail, Result};
     use image::RgbaImage;
@@ -857,8 +925,9 @@ mod win {
     pub fn clipboard_set_image(_: &RgbaImage) -> Result<()> {
         bail!("只支持 Windows")
     }
-    pub fn set_hotkey(_: Option<(u32, u32, Box<dyn Fn() + Send + 'static>)>) -> Result<()> {
-        Ok(())
+    pub type Callback = Box<dyn Fn() + Send + 'static>;
+    pub fn set_hotkeys(_: Vec<(u32, u32, Callback)>) -> Result<Vec<usize>> {
+        Ok(Vec::new())
     }
 }
 

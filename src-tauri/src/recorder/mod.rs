@@ -1,6 +1,8 @@
 //! 操作录屏：录原始画面 + 事件轨，导出时再做放大、光标、打码（设计见 docs/RECORDING.md）。
+//! 画面来源：浏览器标签页（CDP 推帧）或桌面（desktop.rs：屏幕、窗口、区域），产出格式相同。
 //! 工具描述、设置、页面脚本、Skill、界面都在 plugins/recorder；这里只有录制会话、写盘和渲染。
 
+pub mod desktop;
 pub mod doc;
 pub mod ffmpeg;
 pub mod narration;
@@ -86,6 +88,10 @@ struct Active {
     stats: Arc<Stats>,
     marks: Vec<Mark>,
     writer: tokio::task::JoinHandle<()>,
+    /// 桌面录屏的采集线程（网页录制为 None）
+    desktop: Option<desktop::Session>,
+    /// 录制期间把拾光窗口排除出了画面，停止时要恢复
+    self_excluded: bool,
 }
 
 #[derive(Default)]
@@ -141,7 +147,110 @@ fn emit_changed(app: &AppHandle) {
 }
 
 impl RecorderHub {
-    pub async fn start(&self, app: &AppHandle, title: Option<&str>, url: Option<&str>) -> Result<Value> {
+    /// 开始录制。args: source = browser（默认）| screen | window | region | select，
+    /// 以及 title、url（browser）、window（标题或进程名）、rect、monitor、include_self
+    pub async fn start(&self, app: &AppHandle, args: &Value) -> Result<Value> {
+        let str_arg = |k: &str| args.get(k).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
+        let source = str_arg("source").unwrap_or("browser");
+        if source == "browser" {
+            return self.start_browser(app, str_arg("title"), str_arg("url")).await;
+        }
+        if let Some(a) = self.active.lock().await.as_ref() {
+            bail!("已经在录制「{}」，先停止再开始新的", a.title);
+        }
+        let include_self = args
+            .get("include_self")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| settings(app).get("record_include_self").and_then(Value::as_bool).unwrap_or(false));
+        let target = match source {
+            "screen" => {
+                let monitor = args.get("monitor").and_then(Value::as_u64).map(|n| n as usize);
+                tokio::task::spawn_blocking(move || desktop::screen_target(monitor)).await??
+            }
+            "window" => {
+                let q = str_arg("window").ok_or_else(|| anyhow!("录窗口需要 window（标题或进程名的一部分），不确定时先 list_windows"))?.to_string();
+                tokio::task::spawn_blocking(move || desktop::window_target(&q, include_self)).await??
+            }
+            "region" => {
+                let r: Vec<i32> = args
+                    .get("rect")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_f64).map(|v| v.round() as i32).collect())
+                    .unwrap_or_default();
+                if r.len() != 4 {
+                    bail!("录区域需要 rect [x, y, 宽, 高]（屏幕物理像素），或用 source=select 让用户框选");
+                }
+                desktop::region_target([r[0], r[1], r[2], r[3]])?
+            }
+            "select" => {
+                let sel = screenshot::select_area(app, include_self).await?;
+                tokio::task::spawn_blocking(move || desktop::from_selection(&sel)).await??
+            }
+            other => bail!("未知录制来源 {other}（browser / screen / window / region / select）"),
+        };
+        self.start_desktop(app, target, str_arg("title"), include_self).await
+    }
+
+    async fn start_desktop(&self, app: &AppHandle, target: desktop::Target, title: Option<&str>, include_self: bool) -> Result<Value> {
+        let mut active = self.active.lock().await;
+        if let Some(a) = active.as_ref() {
+            bail!("已经在录制「{}」，先停止再开始新的", a.title);
+        }
+        let id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let dir = recordings_dir(app)?.join(&id);
+        std::fs::create_dir_all(dir.join("frames"))?;
+        if !include_self {
+            screenshot::set_self_excluded(app, true);
+        }
+        let s = settings(app);
+        let fps = s.get("desktop_fps").and_then(Value::as_u64).unwrap_or(20) as u32;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let session = match desktop::start(&target, dir.clone(), desktop::Options { fps, include_self }, tx) {
+            Ok(s) => s,
+            Err(e) => {
+                if !include_self {
+                    screenshot::set_self_excluded(app, false);
+                }
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(e);
+            }
+        };
+        let title = title.map(str::to_string).unwrap_or_else(|| match target.kind {
+            "window" if !target.title.is_empty() => target.title.clone(),
+            _ => format!("桌面录屏 {id}"),
+        });
+        let stats = Arc::new(Stats::default());
+        let max_min = s.get("max_minutes").and_then(Value::as_f64).unwrap_or(30.0).clamp(1.0, 240.0);
+        let writer = tokio::spawn(write_loop(app.clone(), id.clone(), dir.clone(), rx, stats.clone(), max_min * 60_000.0));
+        let what = target.describe();
+        *active = Some(Active {
+            id: id.clone(),
+            title: title.clone(),
+            url: what.clone(),
+            dir,
+            channel: "desktop",
+            started_at: chrono::Local::now().to_rfc3339(),
+            started: std::time::Instant::now(),
+            stats,
+            marks: Vec::new(),
+            writer,
+            desktop: Some(session),
+            self_excluded: !include_self,
+        });
+        drop(active);
+        emit_changed(app);
+        let hotkey = s.get("record_hotkey").and_then(Value::as_str).unwrap_or("Ctrl+Alt+R").to_string();
+        Ok(json!({
+            "id": id, "title": title, "target": what, "channel": "desktop",
+            "include_self": include_self,
+            "note": format!(
+                "已开始录制{what}。{}桌面软件不能在源头打码，录完用 record_edit 的 masks 给敏感区域补马赛克。停止：record_stop，或让用户按 {hotkey}。",
+                if include_self { "拾光自己的窗口也会录进去。" } else { "拾光自己的窗口不会出现在画面里。" }
+            ),
+        }))
+    }
+
+    async fn start_browser(&self, app: &AppHandle, title: Option<&str>, url: Option<&str>) -> Result<Value> {
         let mut active = self.active.lock().await;
         if let Some(a) = active.as_ref() {
             bail!("已经在录制「{}」，先停止再开始新的", a.title);
@@ -183,6 +292,8 @@ impl RecorderHub {
             stats,
             marks: Vec::new(),
             writer,
+            desktop: None,
+            self_excluded: false,
         });
         drop(active);
         emit_changed(app);
@@ -196,9 +307,17 @@ impl RecorderHub {
         let Some(a) = self.active.lock().await.take() else {
             bail!("当前没有在录制");
         };
-        let state = app.state::<crate::AppState>();
-        if let Err(e) = state.browser.record_stop(a.channel, &a.id).await {
-            log::warn!("停止浏览器录屏: {e:#}");
+        if let Some(session) = a.desktop {
+            // 先停采集线程：剩下的帧编码完、通道关闭后写盘任务自然结束
+            let _ = tokio::task::spawn_blocking(move || session.stop()).await;
+        } else {
+            let state = app.state::<crate::AppState>();
+            if let Err(e) = state.browser.record_stop(a.channel, &a.id).await {
+                log::warn!("停止浏览器录屏: {e:#}");
+            }
+        }
+        if a.self_excluded {
+            screenshot::set_self_excluded(app, false);
         }
         let mut writer = a.writer;
         if tokio::time::timeout(std::time::Duration::from_secs(5), &mut writer).await.is_err() {
@@ -321,6 +440,19 @@ async fn write_loop(
                     Some("rec_frame") => {
                         if let Err(e) = write_frame(&dir, &msg, &stats, &mut frames_log) {
                             log::warn!("写入录屏画面失败: {e:#}");
+                        }
+                    }
+                    Some("rec_frame_saved") => {
+                        let (Some(i), Some(t)) = (msg.get("i").and_then(Value::as_u64), msg.get("t").and_then(Value::as_f64)) else { continue };
+                        let (w, h) = (msg["w"].as_u64().unwrap_or(0) as u32, msg["h"].as_u64().unwrap_or(0) as u32);
+                        stats.frames.fetch_add(1, Ordering::SeqCst);
+                        let minor = msg.get("minor").and_then(Value::as_bool).unwrap_or(false);
+                        let _ = writeln!(frames_log, "{}", json!({"i": i, "t": t, "w": w, "h": h, "minor": minor}));
+                        // 多个编码线程可能乱序完成：零点取最早的帧
+                        let mut first = stats.first_frame_ms.lock().unwrap();
+                        if first.is_none_or(|f| t < f) {
+                            *first = Some(t);
+                            *stats.size.lock().unwrap() = (w, h);
                         }
                     }
                     Some("rec_event") => {
@@ -501,7 +633,8 @@ fn load_sources(dir: &Path, meta: &Meta) -> (Vec<render::SourceFrame>, Vec<timel
         .filter_map(|v| {
             let i = v.get("i")?.as_u64()?;
             let t = v.get("t")?.as_f64()?;
-            Some(render::SourceFrame { t: (t - meta.t0_ms) / 1000.0, file: dir.join("frames").join(format!("{i:06}.jpg")) })
+            let minor = v.get("minor").and_then(Value::as_bool).unwrap_or(false);
+            Some(render::SourceFrame { t: (t - meta.t0_ms) / 1000.0, file: dir.join("frames").join(format!("{i:06}.jpg")), minor })
         })
         .filter(|f| f.file.is_file())
         .collect();
@@ -596,7 +729,7 @@ async fn export_inner(app: &AppHandle, id: &str, overrides: &Value, cancel: Arc<
         let music = tl.music.clone();
         let tighten = opts.tighten;
         // 紧凑节奏用到的「有动静」的时间点：画面帧与操作事件（不含纯鼠标移动）
-        let frame_times: Vec<f64> = sources.iter().map(|f| f.t).collect();
+        let frame_times: Vec<f64> = sources.iter().filter(|f| !f.minor).map(|f| f.t).collect();
         let event_times: Vec<f64> = events.iter().filter(|e| e.kind != "move").map(|e| e.t).collect();
         tokio::task::spawn_blocking(move || -> Result<(narration::Plan, Option<PathBuf>, f64)> {
             let mut pcms: Vec<Option<Vec<i16>>> = Vec::with_capacity(items.len());
@@ -797,16 +930,20 @@ pub fn timeline_summary(app: &AppHandle, id: &str) -> Result<Value> {
             Some("click") => steps.push(json!({"at": at, "action": "点击", "target": label})),
             Some("focus") => steps.push(json!({"at": at, "action": "进入输入框", "target": label})),
             Some("page") => steps.push(json!({"at": at, "action": "打开页面", "target": v.get("title").and_then(Value::as_str).unwrap_or("")})),
+            Some("window") => steps.push(json!({"at": at, "action": "切换到窗口", "target": v.get("title").and_then(Value::as_str).unwrap_or("")})),
             _ => {}
         }
         if steps.len() >= 300 {
             break;
         }
     }
+    // 桌面录屏的点击由识别线程补发，文件里不一定按时间顺序
+    steps.sort_by(|a, b| a["at"].as_f64().unwrap_or(0.0).total_cmp(&b["at"].as_f64().unwrap_or(0.0)));
     let audio_dir = dir.join("audio");
     std::fs::create_dir_all(&audio_dir)?;
     Ok(json!({
         "id": meta.id, "title": meta.title, "url": meta.url,
+        "source": if meta.channel == "desktop" { "desktop" } else { "browser" },
         "duration_s": r1(meta.duration_ms / 1000.0),
         "marks": meta.marks.iter().map(|m| json!({"at": r1((m.t_ms - meta.t0_ms) / 1000.0), "label": m.label, "note": m.note})).collect::<Vec<_>>(),
         "steps": steps,
@@ -882,7 +1019,7 @@ pub async fn execute(
     let hub = &state.recorder;
     let str_arg = |k: &str| args.get(k).and_then(Value::as_str);
     match name {
-        "record_start" => hub.start(app, str_arg("title"), str_arg("url")).await,
+        "record_start" => hub.start(app, args).await,
         "record_stop" => hub.stop(app).await,
         "record_status" => Ok(hub.status().await),
         "record_mark" => hub.mark(str_arg("label").unwrap_or(""), str_arg("note").unwrap_or("")).await,
@@ -969,9 +1106,30 @@ pub async fn recorder_list(app: AppHandle) -> Result<Vec<Value>, String> {
 }
 
 #[tauri::command]
-pub async fn recorder_start(app: AppHandle, title: Option<String>, url: Option<String>) -> Result<Value, String> {
+pub async fn recorder_start(app: AppHandle, title: Option<String>, url: Option<String>, opts: Option<Value>) -> Result<Value, String> {
+    let mut args = opts.unwrap_or_else(|| json!({}));
+    if !args.is_object() {
+        args = json!({});
+    }
+    args["title"] = json!(title);
+    args["url"] = json!(url);
     let state = app.state::<crate::AppState>();
-    state.recorder.start(&app, title.as_deref(), url.as_deref()).await.map_err(err)
+    state.recorder.start(&app, &args).await.map_err(err)
+}
+
+/// 录屏快捷键：没在录就录鼠标所在的整块屏幕，在录就停止
+pub async fn hotkey_toggle(app: &AppHandle) {
+    let state = app.state::<crate::AppState>();
+    let recording = state.recorder.recording_id().await.is_some();
+    let r = if recording {
+        state.recorder.stop(app).await
+    } else {
+        state.recorder.start(app, &json!({"source": "screen"})).await
+    };
+    if let Err(e) = r {
+        log::info!("快捷键录屏: {e:#}");
+        let _ = app.emit("recorder-error", format!("{e:#}"));
+    }
 }
 
 #[tauri::command]
@@ -1069,7 +1227,7 @@ mod e2e {
             });
             let file = frames_dir.join(format!("{:06}.jpg", i + 1));
             img.save(&file).unwrap();
-            sources.push(render::SourceFrame { t: i as f64 * 0.2, file });
+            sources.push(render::SourceFrame { t: i as f64 * 0.2, file, minor: false });
         }
         let ev = |t: f64, kind: &str, pos: (f64, f64), bbox: Option<[f64; 4]>| timeline::Event { t, kind: kind.into(), pos: Some(pos), bbox };
         let events = vec![
