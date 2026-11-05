@@ -471,6 +471,16 @@ export const ipc = {
   recorderSaveTimeline: (id: string, timeline: TimelineDoc) => invoke<TimelineDoc>("recorder_save_timeline", { id, timeline }),
   recorderDelete: (id: string) => invoke<void>("recorder_delete", { id }),
   recorderReveal: (path: string) => invoke<void>("recorder_reveal", { path }),
+  captureOverlayInit: (id: string) => invoke<{ image: string; width: number; height: number; windows: { hwnd: number; title: string; process: string; rect: [number, number, number, number] }[]; copy: boolean }>("capture_overlay_init", { id }),
+  captureOverlayShow: () => invoke<void>("capture_overlay_show"),
+  captureFinish: (id: string, kind: "region" | "window", rect: [number, number, number, number] | null, hwnd: number | null, copy: boolean | null) =>
+    invoke<ScreenshotResult>("capture_finish", { id, kind, rect, hwnd, copy }),
+  captureCancel: (id: string) => invoke<void>("capture_cancel", { id }),
+  screenshotCapture: (mode: "interactive" | "screen" | "window", opts: { window?: string; includeSelf?: boolean; copy?: boolean } = {}) =>
+    invoke<ScreenshotResult>("screenshot_capture", { mode, window: opts.window ?? null, includeSelf: opts.includeSelf ?? null, copy: opts.copy ?? null }),
+  screenshotWindows: (includeSelf?: boolean) => invoke<ScreenWindow[]>("screenshot_windows", { includeSelf: includeSelf ?? null }),
+  screenshotRecent: (limit?: number) => invoke<{ path: string; name: string }[]>("screenshot_recent", { limit: limit ?? null }),
+  screenshotCopy: (path: string) => invoke<void>("screenshot_copy", { path }),
   listWorkspaces: () => invoke<Workspace[]>("list_workspaces"),
   saveWorkspace: (id: number, name: string, root: string, data: WorkspaceData) => invoke<Workspace>("save_workspace", { id, name, root, data }),
   deleteWorkspace: (id: number) => invoke<void>("delete_workspace", { id }),
@@ -679,14 +689,18 @@ export interface Recording {
   id: string; title: string; url: string; started_at: string; duration_s: number; clicks: number; marks: number;
   size: [number, number]; end_reason: string | null; exported: string | null; exported_at: string | null; thumb: string; dir: string;
 }
-export interface RecorderExportOpts { zoom?: boolean; style?: "plain" | "padded"; zoom_scale?: number; cursor_scale?: number; fps?: number; preview?: boolean; burn_subtitles?: boolean }
+export interface RecorderExportOpts { zoom?: boolean; style?: "plain" | "padded"; zoom_scale?: number; cursor_scale?: number; fps?: number; preview?: boolean; burn_subtitles?: boolean; tighten?: boolean }
 export interface RecorderExportProgress { id: string; phase: "ffmpeg" | "audio" | "render" | "done"; done?: number; total?: number; ok?: boolean }
+export interface ScreenshotResult { path: string; width: number; height: number; copied: boolean }
+export interface ScreenWindow { hwnd: number; pid: number; title: string; process: string; rect: [number, number, number, number]; minimized: boolean }
 export interface ZoomSeg { start: number; end: number; scale: number; focus?: [number, number] }
 export interface MaskSeg { start: number; end: number; rect: [number, number, number, number] }
 export interface CutSeg { start: number; end: number }
 export interface NarrationItem { at: number; text: string; audio?: string }
+export interface MusicTrack { path: string; volume: number; duck: number; fade_in: number; fade_out: number }
 export interface TimelineDoc {
   zooms_edited: boolean; zooms: ZoomSeg[]; masks: MaskSeg[]; cuts: CutSeg[]; narration: NarrationItem[]; burn_subtitles?: boolean | null;
+  music?: MusicTrack | null; tighten?: boolean | null;
 }
 export interface RecorderProject {
   meta: { id: string; title: string; width: number; height: number };
@@ -697,6 +711,9 @@ export interface RecorderProject {
   timeline: TimelineDoc;
   preview: string | null;
   burn_default: boolean;
+  tighten_default: boolean;
+  music_library: string[];
+  music_dir: string;
 }
 
 export function onEvent<T>(name: string, cb: (payload: T) => void): Promise<() => void> {

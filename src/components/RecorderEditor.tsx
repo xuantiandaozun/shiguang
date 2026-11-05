@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { ipc, onEvent } from "../lib/ipc";
 import type { RecorderExportProgress, RecorderProject, TimelineDoc } from "../lib/ipc";
 
@@ -128,6 +129,16 @@ export default function RecorderEditor({ id, onClose }: { id: string; onClose: (
   const pct = (v: number) => `${(Math.min(Math.max(v, 0), duration) / duration) * 100}%`;
   const activeZoom = doc.zooms.find((z) => t >= z.start && t <= z.end);
   const burnValue = doc.burn_subtitles == null ? "" : doc.burn_subtitles ? "on" : "off";
+  const tightenValue = doc.tighten == null ? "" : doc.tighten ? "on" : "off";
+  const fileName = (p: string) => p.split(/[\/]/).pop() ?? p;
+  const setMusic = (path: string | null) => update((d) => ({
+    ...d,
+    music: path ? { path, volume: d.music?.volume ?? 0.25, duck: d.music?.duck ?? 0.35, fade_in: d.music?.fade_in ?? 1, fade_out: d.music?.fade_out ?? 2.5 } : null,
+  }));
+  const pickMusic = async () => {
+    const picked = await open({ multiple: false, defaultPath: proj.music_dir, filters: [{ name: "音频", extensions: ["mp3", "wav", "m4a", "aac", "ogg", "opus", "flac"] }] });
+    if (typeof picked === "string") setMusic(picked);
+  };
   const progressLabel = progress?.phase === "ffmpeg" ? "准备 ffmpeg…" : progress?.phase === "audio" ? "处理配音…"
     : progress?.phase === "render" && progress.total ? `渲染 ${Math.round(((progress.done ?? 0) / progress.total) * 100)}%` : "准备中…";
 
@@ -226,6 +237,41 @@ export default function RecorderEditor({ id, onClose }: { id: string; onClose: (
                 <option value="off">只生成 .srt</option>
               </select>
             </label>
+          </div>
+          <div className="space-y-2 rounded border border-violet-500/30 bg-violet-500/5 p-2">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
+              <span className="font-medium">背景音乐</span>
+              <select className="max-w-[16rem] rounded border border-slate-600 bg-slate-900/60 px-1.5 py-0.5 text-xs text-slate-200"
+                value={doc.music?.path && proj.music_library.includes(doc.music.path) ? doc.music.path : ""}
+                onChange={(e) => setMusic(e.target.value || null)}>
+                <option value="">{doc.music && !proj.music_library.includes(doc.music.path) ? fileName(doc.music.path) : proj.music_library.length ? "从配乐目录选…" : "配乐目录是空的"}</option>
+                {proj.music_library.map((m) => <option key={m} value={m}>{fileName(m)}</option>)}
+              </select>
+              <button type="button" className={btn} onClick={() => void pickMusic()}>选择文件…</button>
+              {doc.music && <button type="button" className={btn} onClick={() => setMusic(null)}>去掉</button>}
+              <label className="ml-auto flex items-center gap-1.5 text-slate-400">节奏
+                <select className="rounded border border-slate-600 bg-slate-900/60 px-1.5 py-0.5 text-xs text-slate-200" value={tightenValue}
+                  onChange={(e) => update((d) => ({ ...d, tighten: e.target.value === "" ? null : e.target.value === "on" }))}>
+                  <option value="">按设置（{proj.tighten_default ? "紧凑" : "保留原样"}）</option>
+                  <option value="on">紧凑：剪掉静止空档</option>
+                  <option value="off">保留原样</option>
+                </select>
+              </label>
+            </div>
+            {doc.music && <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+              <label className="flex items-center gap-1.5">音量
+                <input type="range" min={0.05} max={0.8} step={0.05} value={doc.music.volume}
+                  onChange={(e) => update((d) => ({ ...d, music: d.music && { ...d.music, volume: parseFloat(e.target.value) } }))} />
+                <span className="w-8 text-slate-300">{Math.round(doc.music.volume * 100)}%</span>
+              </label>
+              <label className="flex items-center gap-1.5">解说时压低到
+                <input type="range" min={0.1} max={1} step={0.05} value={doc.music.duck}
+                  onChange={(e) => update((d) => ({ ...d, music: d.music && { ...d.music, duck: parseFloat(e.target.value) } }))} />
+                <span className="w-8 text-slate-300">{Math.round(doc.music.duck * 100)}%</span>
+              </label>
+              <audio src={convertFileSrc(doc.music.path)} controls className="h-7" />
+            </div>}
+            <p className="text-[11px] text-slate-500">配乐目录：{proj.music_dir}。音乐会循环铺满全片，开头淡入、结尾淡出，有解说的地方自动压低。</p>
           </div>
           <p className="text-[11px] text-slate-500">配音可以在聊天里让拾光生成，比如「给这个录屏写解说并用火山 CLI 配音」，生成后会自动填到这里。某段配音比画面长时，画面会自动定格等它说完。</p>
           {doc.narration.map((n, i) => <div key={i} className="space-y-1.5 rounded border border-slate-700/60 p-2">

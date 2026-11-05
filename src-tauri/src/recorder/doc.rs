@@ -15,6 +15,36 @@ pub struct Cut {
     pub end: f64,
 }
 
+fn default_volume() -> f64 {
+    0.25
+}
+fn default_duck() -> f64 {
+    0.35
+}
+fn default_fade_in() -> f64 {
+    1.0
+}
+fn default_fade_out() -> f64 {
+    2.5
+}
+
+/// 背景音乐：循环铺满全片；有解说时自动压低
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Music {
+    /// 音频文件：绝对路径，或相对录制目录
+    pub path: String,
+    /// 音量 0–1（线性），默认 0.25
+    #[serde(default = "default_volume")]
+    pub volume: f64,
+    /// 解说时音乐再乘的系数 0–1，默认 0.35；1 表示不压低
+    #[serde(default = "default_duck")]
+    pub duck: f64,
+    #[serde(default = "default_fade_in")]
+    pub fade_in: f64,
+    #[serde(default = "default_fade_out")]
+    pub fade_out: f64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TimelineDoc {
     /// true 时用 zooms 原样渲染；false 时导出时按事件自动生成（zooms 只是上次的结果）
@@ -31,6 +61,11 @@ pub struct TimelineDoc {
     /// 把字幕画进画面；None 用插件设置
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub burn_subtitles: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub music: Option<Music>,
+    /// 紧凑节奏：导出时自动剪掉画面静止且没有解说的空档；None 用插件设置
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tighten: Option<bool>,
 }
 
 pub fn load(dir: &Path) -> TimelineDoc {
@@ -119,6 +154,22 @@ pub fn normalize(doc: &mut TimelineDoc, duration: f64, dir: &Path) -> Result<()>
         }
     }
     doc.narration.sort_by(|a, b| a.at.total_cmp(&b.at));
+    if let Some(m) = doc.music.as_mut() {
+        m.path = m.path.trim().trim_matches('"').to_string();
+        let path = super::narration::resolve_audio(dir, &m.path);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        if !AUDIO_EXT.contains(&ext.as_str()) {
+            bail!("不支持的背景音乐格式：{}（支持 {}）", m.path, AUDIO_EXT.join("/"));
+        }
+        if !path.is_file() {
+            bail!("背景音乐文件不存在：{}", path.display());
+        }
+        if !(0.0..=1.0).contains(&m.volume) || !(0.0..=1.0).contains(&m.duck) {
+            bail!("背景音乐的 volume 和 duck 要在 0–1 之间");
+        }
+        m.fade_in = m.fade_in.clamp(0.0, 10.0);
+        m.fade_out = m.fade_out.clamp(0.0, 10.0);
+    }
     Ok(())
 }
 
@@ -147,6 +198,21 @@ pub fn apply_patch(doc: &mut TimelineDoc, args: &Value) -> Result<Vec<&'static s
         doc.narration = serde_json::from_value(v).map_err(|e| anyhow::anyhow!("narration 格式不对：{e}"))?;
         changed.push("narration");
     }
+    // music：对象设置，null 去掉
+    if let Some(v) = args.get("music") {
+        doc.music = if v.is_null() {
+            None
+        } else if let Some(p) = v.as_str() {
+            Some(serde_json::from_value(serde_json::json!({ "path": p }))?)
+        } else {
+            Some(serde_json::from_value(v.clone()).map_err(|e| anyhow::anyhow!("music 格式不对：{e}"))?)
+        };
+        changed.push("music");
+    }
+    if let Some(v) = args.get("tighten") {
+        doc.tighten = v.as_bool();
+        changed.push("tighten");
+    }
     // 显式传 null 表示恢复「按插件设置」
     if let Some(v) = args.get("burn_subtitles") {
         doc.burn_subtitles = v.as_bool();
@@ -174,6 +240,11 @@ mod tests {
         apply_patch(&mut doc, &json!({"zooms": "auto"})).unwrap();
         assert!(!doc.zooms_edited);
         assert_eq!(doc.narration.len(), 1);
+        apply_patch(&mut doc, &json!({"music": "D:/bgm.mp3", "tighten": true})).unwrap();
+        assert_eq!(doc.music.as_ref().unwrap().volume, 0.25);
+        assert_eq!(doc.tighten, Some(true));
+        apply_patch(&mut doc, &json!({"music": null})).unwrap();
+        assert!(doc.music.is_none());
     }
 
     #[test]

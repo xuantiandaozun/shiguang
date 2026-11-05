@@ -811,9 +811,69 @@ async fn finalize_with_summary(
     Ok(())
 }
 
+fn body_has_images(body: &Value) -> bool {
+    body.get("messages").and_then(Value::as_array).is_some_and(|ms| {
+        ms.iter().any(|m| {
+            m.get("content").and_then(Value::as_array).is_some_and(|parts| {
+                parts.iter().any(|p| p.get("type").and_then(Value::as_str) == Some("image_url"))
+            })
+        })
+    })
+}
+
+/// 去掉请求里的图片块，只留文字（图片本身仍在磁盘上，路径在文字里）
+fn strip_images(body: &Value) -> Value {
+    let mut out = body.clone();
+    if let Some(ms) = out.get_mut("messages").and_then(Value::as_array_mut) {
+        for m in ms.iter_mut() {
+            let Some(parts) = m.get("content").and_then(Value::as_array) else { continue };
+            if !parts.iter().any(|p| p.get("type").and_then(Value::as_str) == Some("image_url")) {
+                continue;
+            }
+            let mut text: Vec<String> = parts
+                .iter()
+                .filter(|p| p.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|p| p.get("text").and_then(Value::as_str).map(str::to_string))
+                .collect();
+            text.push("（图片没有随这次请求发送。需要了解画面时用 ocr_image 提取文字。）".to_string());
+            m["content"] = json!(text.join("\n"));
+        }
+    }
+    out
+}
+
+/// 带图片的请求被拒（4xx，排除鉴权和限流）：去掉图片还能继续，避免会话卡死
+fn is_image_rejection(e: &anyhow::Error) -> bool {
+    let msg = e.to_string();
+    let Some(rest) = msg.strip_prefix("LLM API 返回 ") else { return false };
+    let code: u16 = rest.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0);
+    (400..500).contains(&code) && !matches!(code, 401 | 403 | 404 | 408 | 429)
+}
+
 /// 发起一轮流式请求：正文增量先经 ToolTextFilter（剔除文本形式的工具调用）再透传前端，
 /// 思维链增量直接透传；流结束后把过滤器里残留的正常文本尾巴补发出去。
+/// 带图片的请求被接口拒绝时，去掉图片重试一次（只影响这一次请求）。
 async fn stream_filtered(
+    http: &reqwest::Client,
+    cfg: &client::LlmConfig,
+    body: &Value,
+    cancel: &tokio_util::sync::CancellationToken,
+    app: &AppHandle,
+) -> Result<client::AssistantResp> {
+    match stream_filtered_once(http, cfg, body, cancel, app).await {
+        Err(e) if body_has_images(body) && is_image_rejection(&e) => {
+            log::warn!("带图片的请求被 {} 拒绝，去掉图片重试：{e:#}", cfg.model);
+            let _ = app.emit(
+                "llm-reasoning",
+                json!({ "delta": format!("（带图片的请求被拒绝：{e}。已去掉图片重试。）\n") }),
+            );
+            stream_filtered_once(http, cfg, &strip_images(body), cancel, app).await
+        }
+        other => other,
+    }
+}
+
+async fn stream_filtered_once(
     http: &reqwest::Client,
     cfg: &client::LlmConfig,
     body: &Value,
@@ -1172,8 +1232,14 @@ pub(crate) fn prepare_messages_for_api(messages: &[Value]) -> Vec<Value> {
     let mut out = Vec::with_capacity(messages.len() + 4);
     let mut embedded = 0usize;
     let mut seen: HashSet<String> = HashSet::new();
+    // 同一轮可能并行调用多个工具：assistant 的 tool_calls 后面必须连续跟完所有 tool 结果，
+    // 截图生成的图片消息要等这一串 tool 结果结束后再插入，否则接口返回 400。
+    let mut pending: Vec<Value> = Vec::new();
     for m in messages {
         let role = m.get("role").and_then(Value::as_str).unwrap_or("");
+        if role != "tool" {
+            out.append(&mut pending);
+        }
         if role == "user" {
             out.push(expand_user_message(m, &mut embedded, &mut seen));
             continue;
@@ -1192,11 +1258,12 @@ pub(crate) fn prepare_messages_for_api(messages: &[Value]) -> Vec<Value> {
         }
         if let Some(img) = native_image_user_message(&path) {
             embedded += 1;
-            out.push(img);
+            pending.push(img);
         } else {
             seen.remove(&path);
         }
     }
+    out.append(&mut pending);
     out
 }
 
@@ -1570,9 +1637,36 @@ mod tests {
         let expanded = prepare_messages_for_api(&messages);
         assert_eq!(expanded[0]["content"][0]["type"], "text");
         assert_eq!(expanded[0]["content"][1]["type"], "image_url");
+        let body = json!({ "messages": expanded.clone() });
+        assert!(body_has_images(&body));
+        let stripped = strip_images(&body);
+        assert!(!body_has_images(&stripped));
+        assert!(stripped["messages"][0]["content"].as_str().unwrap().contains("图片没有随这次请求发送"));
+        assert!(is_image_rejection(&anyhow::anyhow!("LLM API 返回 400: unsupported image_url")));
+        assert!(!is_image_rejection(&anyhow::anyhow!("LLM API 返回 429: rate limit")));
+        assert!(!is_image_rejection(&anyhow::anyhow!("请求 LLM 失败: timeout")));
         assert_eq!(expanded[1]["role"], "tool");
         assert_eq!(expanded[2]["role"], "user");
         assert_eq!(expanded[2]["content"][1]["type"], "image_url");
+
+        // 同一轮并行调用「截图 + 读正文」：图片消息不能插在两个 tool 结果中间
+        let parallel = vec![
+            json!({"role": "assistant", "content": "", "tool_calls": [
+                {"id": "a", "type": "function", "function": {"name": "browser_screenshot", "arguments": "{}"}},
+                {"id": "b", "type": "function", "function": {"name": "browser_read", "arguments": "{}"}},
+            ]}),
+            json!({"role": "tool", "tool_call_id": "a", "content": json!({ "saved": shot_path }).to_string()}),
+            json!({"role": "tool", "tool_call_id": "b", "content": "正文"}),
+            json!({"role": "assistant", "content": "好的"}),
+        ];
+        let expanded = prepare_messages_for_api(&parallel);
+        let roles: Vec<&str> = expanded.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["assistant", "tool", "tool", "user", "assistant"]);
+        assert_eq!(expanded[3]["content"][1]["type"], "image_url");
+        // 结尾是 tool 结果时，图片也追加在最后
+        let expanded = prepare_messages_for_api(&parallel[..3]);
+        let roles: Vec<&str> = expanded.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["assistant", "tool", "tool", "user"]);
         let _ = std::fs::remove_file(&user_img);
         let _ = std::fs::remove_file(&shot_img);
     }

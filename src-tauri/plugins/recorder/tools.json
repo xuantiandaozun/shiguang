@@ -1,5 +1,57 @@
 [
   {
+    "name": "screenshot",
+    "label": "截图",
+    "description": "截图并保存为 PNG（默认在 图片/拾光截图，可同时复制到剪贴板）。mode=interactive：弹出全屏选区，让用户自己拖选区域或单击某个窗口（用户说「截个图」「我框一下」时用）；window：按标题或进程名截指定软件的整个窗口，被遮挡也完整（不确定名字先用 list_windows）；screen：全屏（所有显示器）；region：按 rect [x,y,宽,高] 屏幕物理像素截。默认不包含拾光自己的窗口，做宣传素材需要时 include_self=true。返回文件路径，要看内容再用 read_image。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "interactive",
+            "window",
+            "screen",
+            "region"
+          ],
+          "description": "默认 interactive"
+        },
+        "window": {
+          "type": "string",
+          "description": "mode=window 时：窗口标题或进程名的一部分，如「微信」「chrome」"
+        },
+        "rect": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "mode=region 时：[x, y, 宽, 高]"
+        },
+        "include_self": {
+          "type": "boolean",
+          "description": "是否包含拾光自己的窗口"
+        },
+        "copy": {
+          "type": "boolean",
+          "description": "是否复制到剪贴板（默认按设置）"
+        }
+      }
+    }
+  },
+  {
+    "name": "list_windows",
+    "label": "列出窗口",
+    "description": "列出当前打开的软件窗口（标题、进程名、尺寸、是否最小化），按从上到下的层叠顺序。用于确定 screenshot 的 window 参数。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "include_self": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
     "name": "record_start",
     "label": "开始录屏",
     "description": "开始录制浏览器当前标签页（画面不含鼠标，导出时再画光标和放大效果）。录制期间页面上的敏感信息（密码框、手机号、身份证、邮箱、银行卡、密钥及设置里的规则）在源头就被模糊，画面里不会出现明文。给了 url 会先打开该网页再开始。同时只能有一个录制。",
@@ -73,7 +125,7 @@
   {
     "name": "record_export",
     "label": "导出录屏",
-    "description": "把录制渲染成 MP4：按时间线做放大（自动或用户编辑过的）、合成光标和点击波纹、手动打码、剪切；有解说时混入配音、生成同名 .srt 字幕，并可把字幕画进画面。某段配音比画面长时，画面会在那一步定格等配音说完。首次导出会自动准备 ffmpeg（可能需要下载）。未给的参数用插件设置。preview=true 出低分辨率预览（存在录制目录），不算正式导出。导出后提醒用户检查打码。",
+    "description": "把录制渲染成 MP4：按时间线做放大（自动或用户编辑过的）、合成光标和点击波纹、手动打码、剪切；有解说时混入配音、有背景音乐时铺满全片并在解说处自动压低、生成同名 .srt 字幕，并可把字幕画进画面。某段配音比画面长时，画面会在那一步定格等配音说完；紧凑节奏开启时自动剪掉画面静止且没有解说的空档。首次导出会自动准备 ffmpeg（可能需要下载）。未给的参数用插件设置。preview=true 出低分辨率预览（存在录制目录），不算正式导出。导出后提醒用户检查打码。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -115,6 +167,10 @@
         "burn_subtitles": {
           "type": "boolean",
           "description": "把字幕画进画面（默认按时间线/设置）"
+        },
+        "tighten": {
+          "type": "boolean",
+          "description": "紧凑节奏，默认按时间线/设置（默认开启）"
         }
       }
     }
@@ -138,7 +194,7 @@
   {
     "name": "record_timeline",
     "label": "查看录屏时间线",
-    "description": "读取一次录制的时间线：步骤标记（record_mark 的 label/note）、点击/输入/打开页面的步骤（带时间和目标文字）、当前的放大段/打码/剪切/解说，以及放配音文件的 audio_dir。写解说词、配音、剪辑前先调用它。时间都是录制开始后的秒数。",
+    "description": "读取一次录制的时间线：步骤标记（record_mark 的 label/note）、点击/输入/打开页面的步骤（带时间和目标文字）、当前的放大段/打码/剪切/解说，以及放配音文件的 audio_dir、可选背景音乐 music_library。写解说词、配音、剪辑前先调用它。时间都是录制开始后的秒数。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -152,7 +208,7 @@
   {
     "name": "record_edit",
     "label": "编辑录屏",
-    "description": "修改录制的时间线，给了哪个字段就整体替换哪个字段（先用 record_timeline 读出现有内容再改）。narration：解说列表，at 为挂在第几秒（一般用步骤或标记的时间），text 为解说词（也用作字幕），audio 为配音文件（相对录制目录如 audio/01.mp3，或绝对路径；没有就只出字幕）。masks：手动打码 [{start,end,rect:[x,y,宽,高]}]，rect 用 0–1 的画面比例。cuts：剪掉的时间段 [{start,end}]。zooms：放大段 [{start,end,scale,focus?:[x,y]}]，传 \"auto\" 恢复自动。burn_subtitles：是否把字幕画进画面。",
+    "description": "修改录制的时间线，给了哪个字段就整体替换哪个字段（先用 record_timeline 读出现有内容再改）。narration：解说列表，at 为挂在第几秒（一般用步骤或标记的时间），text 为解说词（也用作字幕），audio 为配音文件（相对录制目录如 audio/01.mp3，或绝对路径；没有就只出字幕）。masks：手动打码 [{start,end,rect:[x,y,宽,高]}]，rect 用 0–1 的画面比例。cuts：剪掉的时间段 [{start,end}]。zooms：放大段 [{start,end,scale,focus?:[x,y]}]，传 \"auto\" 恢复自动。burn_subtitles：是否把字幕画进画面。music：背景音乐 {path, volume?(0–1，默认 0.25), duck?(解说时音乐再乘的系数，默认 0.35)}，或直接给路径字符串，null 去掉；从 record_timeline 的 music_library 里挑。tighten：紧凑节奏，导出时自动剪掉画面静止且没有解说的空档。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -228,6 +284,13 @@
         },
         "burn_subtitles": {
           "type": "boolean"
+        },
+        "music": {
+          "description": "背景音乐：路径字符串，或 {path, volume, duck, fade_in, fade_out}；null 去掉"
+        },
+        "tighten": {
+          "type": "boolean",
+          "description": "紧凑节奏（自动剪掉静止空档）"
         }
       }
     }

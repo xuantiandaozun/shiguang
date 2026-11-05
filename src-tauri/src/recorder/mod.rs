@@ -5,6 +5,7 @@ pub mod doc;
 pub mod ffmpeg;
 pub mod narration;
 pub mod render;
+pub mod screenshot;
 pub mod timeline;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -521,6 +522,7 @@ struct ExportOpts {
     style: render::Style,
     burn: bool,
     preview: bool,
+    tighten: bool,
 }
 
 fn export_opts(app: &AppHandle, overrides: &Value, doc: &doc::TimelineDoc) -> ExportOpts {
@@ -540,6 +542,12 @@ fn export_opts(app: &AppHandle, overrides: &Value, doc: &doc::TimelineDoc) -> Ex
             .or_else(|| s.get("burn_subtitles").and_then(Value::as_bool))
             .unwrap_or(true),
         preview,
+        tighten: overrides
+            .get("tighten")
+            .and_then(Value::as_bool)
+            .or(doc.tighten)
+            .or_else(|| s.get("tighten").and_then(Value::as_bool))
+            .unwrap_or(true),
     }
 }
 
@@ -581,11 +589,16 @@ async fn export_inner(app: &AppHandle, id: &str, overrides: &Value, cancel: Arc<
 
     // 配音：解码得到真实时长，排期（必要时定格画面），混成一条音轨
     let _ = app.emit("recorder-export-progress", json!({"id": id, "phase": "audio"}));
-    let (plan, audio_path) = {
+    let (plan, audio_path, auto_cut_secs) = {
         let items = tl.narration.clone();
-        let cuts: Vec<(f64, f64)> = tl.cuts.iter().map(|c| (c.start, c.end)).collect();
+        let mut cuts: Vec<(f64, f64)> = tl.cuts.iter().map(|c| (c.start, c.end)).collect();
         let (ff, d) = (ffmpeg.clone(), dir.clone());
-        tokio::task::spawn_blocking(move || -> Result<(narration::Plan, Option<PathBuf>)> {
+        let music = tl.music.clone();
+        let tighten = opts.tighten;
+        // 紧凑节奏用到的「有动静」的时间点：画面帧与操作事件（不含纯鼠标移动）
+        let frame_times: Vec<f64> = sources.iter().map(|f| f.t).collect();
+        let event_times: Vec<f64> = events.iter().filter(|e| e.kind != "move").map(|e| e.t).collect();
+        tokio::task::spawn_blocking(move || -> Result<(narration::Plan, Option<PathBuf>, f64)> {
             let mut pcms: Vec<Option<Vec<i16>>> = Vec::with_capacity(items.len());
             for it in &items {
                 pcms.push(match &it.audio {
@@ -598,6 +611,13 @@ async fn export_inner(app: &AppHandle, id: &str, overrides: &Value, cancel: Arc<
                 .zip(&pcms)
                 .map(|(it, p)| p.as_ref().map(|p| narration::pcm_seconds(p)).unwrap_or_else(|| narration::estimate(&it.text)))
                 .collect();
+            let mut auto_cut = 0.0;
+            if tighten {
+                let voice: Vec<(f64, f64)> = items.iter().zip(&durations).map(|(it, d)| (it.at, it.at + d)).collect();
+                let extra = narration::idle_cuts(duration, &frame_times, &event_times, &voice, 1.0, 0.4);
+                auto_cut = extra.iter().map(|c| c.1 - c.0).sum();
+                cuts.extend(extra);
+            }
             let plan = narration::plan(duration, &cuts, &items, &durations);
             let clips: Vec<(f64, &[i16])> = plan
                 .slots
@@ -605,14 +625,25 @@ async fn export_inner(app: &AppHandle, id: &str, overrides: &Value, cancel: Arc<
                 .zip(&pcms)
                 .filter_map(|(slot, p)| Some((slot.as_ref()?.0, p.as_deref()?)))
                 .collect();
-            let audio = if clips.is_empty() {
+            let music_pcm = match &music {
+                Some(m) => Some(narration::decode(&ff, &narration::resolve_audio(&d, &m.path))?),
+                None => None,
+            };
+            let track = music.as_ref().zip(music_pcm.as_deref()).map(|(m, pcm)| narration::MusicTrack {
+                pcm,
+                volume: m.volume,
+                duck: m.duck,
+                fade_in: m.fade_in,
+                fade_out: m.fade_out,
+            });
+            let audio = if clips.is_empty() && track.is_none() {
                 None
             } else {
                 let path = d.join("narration.wav");
-                narration::write_mix(&path, plan.map.output_duration(), &clips)?;
+                narration::write_mix(&path, plan.map.output_duration(), &clips, track.as_ref())?;
                 Some(path)
             };
-            Ok((plan, audio))
+            Ok((plan, audio, auto_cut))
         })
         .await
         .map_err(|e| anyhow!("处理配音失败：{e}"))??
@@ -702,10 +733,53 @@ async fn export_inner(app: &AppHandle, id: &str, overrides: &Value, cancel: Arc<
         "id": id, "path": out.to_string_lossy(), "preview": opts.preview,
         "duration_s": (out_dur * 10.0).round() / 10.0,
         "zoom_segments": zoom_count, "subtitles": cue_count,
+        "music": tl.music.as_ref().map(|m| m.path.clone()),
+        "tightened_s": (auto_cut_secs * 10.0).round() / 10.0,
         "srt": if cue_count > 0 { Some(srt_path.to_string_lossy().to_string()) } else { None },
         "encoder": encoder.get(1),
         "note": if opts.preview { "这是低分辨率预览。" } else { "已导出。请用户看一遍成片，确认没有漏掉的敏感信息再对外发。" },
     }))
+}
+
+/// 配乐目录（插件设置 music_dir，默认 音乐/拾光配乐）
+pub fn music_dir(app: &AppHandle) -> PathBuf {
+    settings(app)
+        .get("music_dir")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::audio_dir().map(|d| d.join("拾光配乐")))
+        .unwrap_or_else(|| std::env::temp_dir().join("拾光配乐"))
+}
+
+/// 配乐目录里的音频文件（含子目录一层）
+pub fn music_library(app: &AppHandle) -> Vec<String> {
+    let dir = music_dir(app);
+    // 目录不存在就建好，方便用户把配乐放进来
+    let _ = std::fs::create_dir_all(&dir);
+    let mut out = Vec::new();
+    let mut push = |p: PathBuf| {
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        if narration::AUDIO_EXT.contains(&ext.as_str()) {
+            out.push(p.to_string_lossy().to_string());
+        }
+    };
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if let Ok(sub) = std::fs::read_dir(&p) {
+                    sub.flatten().for_each(|e| push(e.path()));
+                }
+            } else {
+                push(p);
+            }
+        }
+    }
+    out.sort();
+    out.truncate(80);
+    out
 }
 
 /// 给模型看的时间线：步骤标记、点击/输入/页面切换、当前编辑内容和配音目录
@@ -738,7 +812,9 @@ pub fn timeline_summary(app: &AppHandle, id: &str) -> Result<Value> {
         "steps": steps,
         "timeline": tl,
         "audio_dir": audio_dir.to_string_lossy(),
-        "hint": "时间都是录制开始后的秒数。配音文件放进 audio_dir，再用 record_edit 的 narration[].audio 填相对路径（如 audio/01.mp3）。",
+        "music_dir": music_dir(app).to_string_lossy(),
+        "music_library": music_library(app),
+        "hint": "时间都是录制开始后的秒数。配音文件放进 audio_dir，再用 record_edit 的 narration[].audio 填相对路径（如 audio/01.mp3）。背景音乐从 music_library 里按视频风格挑一首，用 record_edit 的 music 设置。",
     }))
 }
 
@@ -788,6 +864,9 @@ pub fn project(app: &AppHandle, id: &str) -> Result<Value> {
         "timeline": tl,
         "preview": if preview.is_file() { Some(preview.to_string_lossy().to_string()) } else { None },
         "burn_default": settings(app).get("burn_subtitles").and_then(Value::as_bool).unwrap_or(true),
+        "tighten_default": settings(app).get("tighten").and_then(Value::as_bool).unwrap_or(true),
+        "music_library": music_library(app),
+        "music_dir": music_dir(app).to_string_lossy(),
     }))
 }
 
@@ -858,13 +937,14 @@ pub async fn execute(
             };
             let (tl, changed) = edit_timeline(app, &id, args)?;
             if changed.is_empty() {
-                bail!("没有要修改的字段（可改 narration / masks / cuts / zooms / burn_subtitles）");
+                bail!("没有要修改的字段（可改 narration / music / tighten / masks / cuts / zooms / burn_subtitles）");
             }
             Ok(json!({
                 "id": id, "changed": changed,
                 "narration": tl.narration.len(),
                 "with_audio": tl.narration.iter().filter(|n| n.audio.is_some()).count(),
                 "masks": tl.masks.len(), "cuts": tl.cuts.len(), "zooms": tl.zooms.len(), "zooms_edited": tl.zooms_edited,
+                "music": tl.music.as_ref().map(|m| m.path.clone()), "tighten": tl.tighten,
                 "note": "已保存。可以用 record_export 的 preview: true 先出低分辨率预览。",
             }))
         }
@@ -921,6 +1001,8 @@ pub async fn recorder_save_timeline(app: AppHandle, id: String, timeline: Value)
         obj.remove("zooms_edited");
         // 界面传 null 表示按设置
         obj.entry("burn_subtitles").or_insert(Value::Null);
+        obj.entry("music").or_insert(Value::Null);
+        obj.entry("tighten").or_insert(Value::Null);
     }
     let (tl, _) = edit_timeline(&app, &id, &patch).map_err(err)?;
     serde_json::to_value(tl).map_err(|e| e.to_string())
@@ -943,13 +1025,14 @@ pub async fn recorder_delete(app: AppHandle, id: String) -> Result<(), String> {
 #[tauri::command]
 pub fn recorder_reveal(app: AppHandle, path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
-    let in_recordings = recordings_dir(&app).map(|r| p.starts_with(r)).unwrap_or(false);
+    let in_recordings = recordings_dir(&app).map(|r| p.starts_with(r)).unwrap_or(false)
+        || p.starts_with(screenshot::output_dir(&app));
     let is_export = list(&app, 500)
         .unwrap_or_default()
         .iter()
         .any(|v| v["exported"].as_str() == Some(path.as_str()));
     if !(in_recordings || is_export) || !p.exists() {
-        return Err("只能打开录制目录或导出的视频".into());
+        return Err("只能打开录制目录、导出的视频或截图".into());
     }
     let mut cmd = std::process::Command::new("explorer");
     if p.is_file() {
@@ -1004,7 +1087,9 @@ mod e2e {
             let plan = narration::plan(6.0, &[(4.0, 5.0)], &items, &[1.0]);
             let tone: Vec<i16> = (0..narration::RATE as usize * 2).map(|i| (((i / 2) as f64 * 0.06).sin() * 8000.0) as i16).collect();
             let wav = root.join("narration.wav");
-            narration::write_mix(&wav, plan.map.output_duration(), &[(plan.slots[0].unwrap().0, &tone)]).unwrap();
+            let bgm: Vec<i16> = (0..narration::RATE as usize).map(|i| (((i / 2) as f64 * 0.02).sin() * 6000.0) as i16).collect();
+            let track = narration::MusicTrack { pcm: &bgm, volume: 0.3, duck: 0.35, fade_in: 0.5, fade_out: 1.0 };
+            narration::write_mix(&wav, plan.map.output_duration(), &[(plan.slots[0].unwrap().0, &tone)], Some(&track)).unwrap();
             let n_out = (plan.map.output_duration() * 30.0).ceil() as usize;
             let frame_map = (0..n_out).map(|k| { let t = k as f64 / 30.0; (((plan.map.to_source(t) * 30.0).round() as usize).min(compiled.frames.len() - 1), t) }).collect();
             let out = root.join(format!("out-{style:?}.mp4"));

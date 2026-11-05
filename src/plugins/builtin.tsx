@@ -8,6 +8,7 @@ import Reminder from "../windows/Reminder";
 import DelegationWindow from "../windows/DelegationWindow";
 import AgentRunWindow from "../windows/AgentRunWindow";
 import ReplyReader from "../windows/ReplyReader";
+import CaptureOverlay from "../windows/CaptureOverlay";
 import TodosTab from "../components/TodosTab";
 import TasksTab from "../components/TasksTab";
 import ServersTab from "../components/ServersTab";
@@ -30,6 +31,7 @@ const table = (): Record<string, React.ComponentType> => ({
   DelegationWindow,
   AgentRunWindow,
   ReplyReader,
+  CaptureOverlay,
   ServerTerminal,
   TodosTab,
   TasksTab,
@@ -60,4 +62,5 @@ export const BUILTIN_WINDOWS: Record<string, string> = {
   delegation: "builtin:DelegationWindow",
   "agent-run": "builtin:AgentRunWindow",
   "reply-reader": "builtin:ReplyReader",
+  capture: "builtin:CaptureOverlay",
 };

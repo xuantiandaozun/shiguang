@@ -1,6 +1,26 @@
 {
   "type": "object",
   "properties": {
+    "screenshot_hotkey": {
+      "type": "string",
+      "title": "截图快捷键（如 Ctrl+Shift+X、F1；留空关闭）",
+      "default": "Ctrl+Shift+X"
+    },
+    "screenshot_copy": {
+      "type": "boolean",
+      "title": "截图后同时复制到剪贴板",
+      "default": true
+    },
+    "screenshot_include_self": {
+      "type": "boolean",
+      "title": "截图默认包含拾光自己的窗口",
+      "default": false
+    },
+    "screenshot_dir": {
+      "type": "string",
+      "title": "截图保存目录（留空为 图片/拾光截图）",
+      "default": ""
+    },
     "mask_phone": {
       "type": "boolean",
       "title": "打码：手机号",
@@ -76,6 +96,16 @@
       "type": "boolean",
       "title": "有解说时把字幕画进画面（同时总会生成 .srt）",
       "default": true
+    },
+    "tighten": {
+      "type": "boolean",
+      "title": "紧凑节奏：导出时自动剪掉画面静止且没有解说的空档",
+      "default": true
+    },
+    "music_dir": {
+      "type": "string",
+      "title": "配乐目录（留空为 音乐/拾光配乐；拾光从这里挑背景音乐）",
+      "default": ""
     },
     "max_minutes": {
       "type": "integer",

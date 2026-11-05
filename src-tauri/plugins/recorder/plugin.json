@@ -1,17 +1,19 @@
 {
   "id": "recorder",
-  "name": "录屏",
+  "name": "录屏与截图",
   "version": "1.0.0",
-  "description": "操作录屏：录网页操作，导出时自动放大点击处、平滑光标、源头打码；时间线可编辑，配音由 Skill 指导用 CLI 生成后挂上。",
+  "description": "操作录屏与截图：录网页操作（自动放大、平滑光标、源头打码、时间线编辑、配音字幕）；框选/窗口/全屏截图，全局快捷键。",
   "order": 75,
   "tools": [
     "tools.json"
   ],
   "categories": {
     "recorder": {
-      "label": "录屏",
-      "description": "录制网页操作视频、打步骤标记、编辑时间线（解说/配音/字幕/打码/剪切/放大）、导出 MP4",
+      "label": "录屏与截图",
+      "description": "截图（框选/指定软件窗口/全屏）、录制网页操作视频、编辑时间线（解说/配音/字幕/打码/剪切/放大）、导出 MP4",
       "tools": [
+        "screenshot",
+        "list_windows",
         "record_start",
         "record_stop",
         "record_status",
@@ -33,7 +35,7 @@
     "tabs": [
       {
         "id": "recorder",
-        "label": "录屏",
+        "label": "录屏截图",
         "icon": "video",
         "order": 35,
         "component": "builtin:RecorderTab"

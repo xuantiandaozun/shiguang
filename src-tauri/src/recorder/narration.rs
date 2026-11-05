@@ -132,6 +132,42 @@ pub fn split_cues(text: &str, start: f64, dur: f64) -> Vec<Cue> {
         .collect()
 }
 
+/// 紧凑节奏：找出「画面静止（没有新画面帧）、没有操作事件、也没有解说」的空档，
+/// 每段只留 keep 秒，其余剪掉。frames / events / voice 都是源时间。
+pub fn idle_cuts(duration: f64, frames: &[f64], events: &[f64], voice: &[(f64, f64)], min_gap: f64, keep: f64) -> Vec<(f64, f64)> {
+    let mut busy: Vec<f64> = frames.iter().chain(events.iter()).copied().filter(|t| t.is_finite()).collect();
+    busy.push(0.0);
+    busy.push(duration);
+    busy.sort_by(f64::total_cmp);
+    let mut cuts = Vec::new();
+    for w in busy.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if b - a < min_gap {
+            continue;
+        }
+        // 空档里去掉解说占用的部分，剩下的才剪
+        let mut free = vec![(a + keep, b)];
+        for &(va, vb) in voice {
+            free = free
+                .into_iter()
+                .flat_map(|(fa, fb)| {
+                    let mut out = Vec::new();
+                    if va > fa {
+                        out.push((fa, va.min(fb)));
+                    }
+                    if vb < fb {
+                        out.push((vb.max(fa) + keep, fb));
+                    }
+                    out
+                })
+                .filter(|(fa, fb)| fb - fa > 0.05)
+                .collect();
+        }
+        cuts.extend(free.into_iter().filter(|(fa, fb)| fb - fa >= keep));
+    }
+    cuts
+}
+
 pub fn srt(cues: &[Cue]) -> String {
     let ts = |t: f64| {
         let ms = (t.max(0.0) * 1000.0).round() as u64;
@@ -167,10 +203,50 @@ pub fn pcm_seconds(pcm: &[i16]) -> f64 {
     pcm.len() as f64 / 2.0 / RATE as f64
 }
 
-/// 把各段 PCM 放到排好的位置，写成 WAV
-pub fn write_mix(path: &Path, total_secs: f64, clips: &[(f64, &[i16])]) -> Result<()> {
+/// 背景音乐：循环铺满全片，淡入淡出，有解说时自动压低（ducking）
+pub struct MusicTrack<'a> {
+    pub pcm: &'a [i16],
+    /// 基础音量（线性，0–1）
+    pub volume: f64,
+    /// 有解说时再乘的系数（0–1，1 表示不压低）
+    pub duck: f64,
+    pub fade_in: f64,
+    pub fade_out: f64,
+}
+
+/// 背景音乐在 t 秒的增益：基础音量 × 淡入淡出 × 解说压低（压低前后 0.3 秒平滑过渡）
+pub fn music_gain(t: f64, total: f64, m: &MusicTrack, voice: &[(f64, f64)]) -> f64 {
+    let fade_in = if m.fade_in > 0.0 { (t / m.fade_in).clamp(0.0, 1.0) } else { 1.0 };
+    let fade_out = if m.fade_out > 0.0 { ((total - t) / m.fade_out).clamp(0.0, 1.0) } else { 1.0 };
+    const RAMP: f64 = 0.3;
+    // 离最近一段解说的距离：在解说内为 0
+    let dist = voice
+        .iter()
+        .map(|&(a, b)| if t < a { a - t } else if t > b { t - b } else { 0.0 })
+        .fold(f64::INFINITY, f64::min);
+    let k = (dist / RAMP).clamp(0.0, 1.0); // 0 = 完全压低，1 = 不压低
+    let duck = m.duck + (1.0 - m.duck) * k;
+    m.volume * fade_in * fade_out * duck
+}
+
+/// 把各段 PCM 放到排好的位置（可叠加背景音乐），写成 WAV
+pub fn write_mix(path: &Path, total_secs: f64, clips: &[(f64, &[i16])], music: Option<&MusicTrack>) -> Result<()> {
     let total = ((total_secs * RATE as f64).ceil() as usize) * 2;
     let mut mix = vec![0i32; total];
+    if let Some(m) = music.filter(|m| m.pcm.len() >= 2) {
+        let voice: Vec<(f64, f64)> = clips.iter().map(|&(s, p)| (s, s + pcm_seconds(p))).collect();
+        let mut gain = 0.0;
+        for frame in 0..total / 2 {
+            // 增益每 10ms 算一次，足够平滑
+            if frame % (RATE as usize / 100) == 0 {
+                gain = music_gain(frame as f64 / RATE as f64, total_secs, m, &voice);
+            }
+            for ch in 0..2 {
+                let src = m.pcm[(frame * 2 + ch) % m.pcm.len()] as f64;
+                mix[frame * 2 + ch] += (src * gain) as i32;
+            }
+        }
+    }
     for &(start, pcm) in clips {
         let off = ((start * RATE as f64).round() as usize) * 2;
         for (i, &s) in pcm.iter().enumerate() {
@@ -245,10 +321,42 @@ mod tests {
     }
 
     #[test]
+    fn music_ducks_under_voice_and_fades() {
+        let pcm = vec![0i16; 4];
+        let m = MusicTrack { pcm: &pcm, volume: 0.3, duck: 0.4, fade_in: 1.0, fade_out: 2.0 };
+        let voice = [(5.0, 8.0)];
+        assert!((music_gain(0.0, 20.0, &m, &voice)).abs() < 1e-9); // 淡入起点
+        assert!((music_gain(3.0, 20.0, &m, &voice) - 0.3).abs() < 1e-9); // 正常
+        assert!((music_gain(6.0, 20.0, &m, &voice) - 0.12).abs() < 1e-9); // 解说中压低
+        let mid = music_gain(8.15, 20.0, &m, &voice); // 解说结束后平滑回升
+        assert!(mid > 0.12 && mid < 0.3);
+        assert!((music_gain(19.0, 20.0, &m, &voice) - 0.15).abs() < 1e-9); // 淡出一半
+    }
+
+    #[test]
+    fn idle_cuts_skip_voice_and_activity() {
+        // 0–10 秒：2 秒前有画面，8 秒后有画面；4–5 秒有解说
+        let frames = [0.5, 1.0, 1.5, 2.0, 8.0, 8.5, 9.0];
+        let cuts = idle_cuts(9.2, &frames, &[], &[(4.0, 5.0)], 1.0, 0.4);
+        assert_eq!(cuts.len(), 2);
+        assert!((cuts[0].0 - 2.4).abs() < 1e-9 && (cuts[0].1 - 4.0).abs() < 1e-9);
+        assert!((cuts[1].0 - 5.4).abs() < 1e-9 && (cuts[1].1 - 8.0).abs() < 1e-9);
+        // 有点击事件打断空档时不剪
+        let events = [3.0, 4.5, 6.0, 7.0];
+        let cuts = idle_cuts(9.2, &frames, &events, &[], 1.0, 0.4);
+        assert!(cuts.iter().all(|c| !events.iter().any(|&e| e > c.0 && e < c.1)));
+        assert!(cuts.iter().all(|c| c.1 - c.0 <= 1.2));
+    }
+
+    #[test]
     fn wav_has_expected_length() {
         let path = std::env::temp_dir().join(format!("sg-mix-{}.wav", uuid::Uuid::new_v4()));
         let clip = vec![1000i16; RATE as usize * 2];
-        write_mix(&path, 2.0, &[(0.5, &clip)]).unwrap();
+        write_mix(&path, 2.0, &[(0.5, &clip)], None).unwrap();
+        // 叠加背景音乐长度不变
+        let music = vec![500i16; 1000];
+        let m = MusicTrack { pcm: &music, volume: 0.3, duck: 0.4, fade_in: 0.5, fade_out: 0.5 };
+        write_mix(&path, 2.0, &[(0.5, &clip)], Some(&m)).unwrap();
         let len = std::fs::metadata(&path).unwrap().len();
         assert_eq!(len, 44 + 2 * RATE as u64 * 2 * 2);
         let _ = std::fs::remove_file(path);

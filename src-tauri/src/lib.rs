@@ -112,6 +112,8 @@ pub fn run() {
                     tauri_plugin_window_state::StateFlags::all()
                         ^ tauri_plugin_window_state::StateFlags::VISIBLE,
                 )
+                // 截图选区窗口每次按屏幕大小新建，不记位置
+                .with_denylist(&["capture-overlay"])
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
@@ -211,6 +213,9 @@ pub fn run() {
             if let Err(e) = browser::ensure_extension_unpacked(&app.handle()) {
                 log::warn!("准备浏览器扩展失败: {e}");
             }
+            if let Err(e) = recorder::screenshot::apply_hotkey(app.handle()) {
+                log::warn!("注册截图快捷键失败: {e:#}");
+            }
             tray::create_tray(app.handle())?;
             todo::scheduler::spawn(app.handle().clone());
             // Desktop organization is user-invoked through the editable external Skill.
@@ -231,6 +236,14 @@ pub fn run() {
             recorder::recorder_save_timeline,
             recorder::recorder_delete,
             recorder::recorder_reveal,
+            recorder::screenshot::capture_overlay_init,
+            recorder::screenshot::capture_overlay_show,
+            recorder::screenshot::capture_finish,
+            recorder::screenshot::capture_cancel,
+            recorder::screenshot::screenshot_capture,
+            recorder::screenshot::screenshot_windows,
+            recorder::screenshot::screenshot_recent,
+            recorder::screenshot::screenshot_copy,
             plugins::ipc::reload_plugins,
             plugins::ipc::set_plugin_enabled,
             plugins::ipc::get_plugin_settings,

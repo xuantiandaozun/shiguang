@@ -29,6 +29,7 @@ and when you need a new feature, it can write a plugin for itself.
 - 🫧 **Floating ball + chat window**: lives in the tray, one click to talk, and closing the window keeps it running.
 - 🗂️ **Desktop organizing**: you see the plan first and confirm before anything moves; it only moves files, never deletes, and every batch can be undone.
 - 🌐 **Your own browser**: a companion extension reads, clicks and fills pages in the browser you are already logged into. A trusted-input engine waits for the page to settle before it reports what happened.
+- 📸 **Screenshots**: drag a region, or click any app window to capture all of it (even when covered); global hotkey, copied to the clipboard automatically.
 - 🎬 **Screen recording**: record web workflows; on export it zooms in on clicks and draws a smooth cursor. Sensitive data is blurred on the page itself, and you can cut clips, write narration, add a voiceover and subtitles.
 - 🧑‍💻 **Workspaces & code agents**: it remembers how your projects are verified and deployed, and can hand code changes to Claude Code / Codex, then review the result and commit with your consent.
 - 🖥️ **Server ops**: SSH / SFTP, interactive terminals and conversational operations, with each action confirmed according to its risk.
@@ -77,6 +78,7 @@ See the [v0.1.5 release notes (Chinese)](docs/releases/0.1.5.md).
 | Feature | Description |
 | --- | --- |
 | 🌐 Browser control | Drives the browser you already use (with your logins) through the companion extension, failing over to a standalone CDP instance. Reads articles, takes snapshots, clicks, types and extracts data |
+| 📸 Screenshots | Region, click-a-window, a named app or full screen; ShiGuang's own windows are left out unless you include them; saved to `Pictures/拾光截图` and copied to the clipboard |
 | 🎬 Screen recording | Record web workflows and export MP4 with auto-zoom, a synthetic cursor, source-side masking, cuts, narration, voiceover and subtitles. See [below](#-screen-recording) |
 | 🔍 Web search | Search and fetch web pages |
 

@@ -29,7 +29,14 @@ pub fn get_plugin_settings(app: AppHandle, id: String) -> Value {
 
 #[tauri::command]
 pub fn save_plugin_settings(app: AppHandle, id: String, values: Value) -> Result<Value, String> {
-    super::settings::save(&app, &id, &values).map_err(err)
+    let saved = super::settings::save(&app, &id, &values).map_err(err)?;
+    // 截图快捷键改了要重新注册
+    if id == "recorder" {
+        if let Err(e) = crate::recorder::screenshot::apply_hotkey(&app) {
+            return Err(format!("设置已保存，但截图快捷键没有生效：{e:#}"));
+        }
+    }
+    Ok(saved)
 }
 
 #[tauri::command]

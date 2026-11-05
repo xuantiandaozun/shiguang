@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { ipc, onEvent } from "../lib/ipc";
 import RecorderEditor from "./RecorderEditor";
+import ScreenshotPanel from "./ScreenshotPanel";
 import type { RecorderExportOpts, RecorderExportProgress, RecorderStatus, Recording } from "../lib/ipc";
 
 const input = "w-full rounded-md border border-slate-600 bg-slate-900/60 px-2.5 py-1.5 text-xs text-slate-100 outline-none focus:border-sky-500 placeholder:text-slate-500";
@@ -104,6 +105,7 @@ export default function RecorderTab() {
   if (editing) return <RecorderEditor id={editing} onClose={() => { setEditing(null); void refresh(); }} />;
 
   return <div className="space-y-6 text-sm">
+    <ScreenshotPanel />
     <section className="space-y-3">
       <div>
         <h2 className="text-base font-semibold text-slate-100">录屏</h2>
