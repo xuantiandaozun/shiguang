@@ -669,6 +669,9 @@ async fn execute_inner(
     if crate::agents::TOOL_NAMES.contains(&name) {
         return crate::agents::execute(app, name, args, cancel, session_id).await;
     }
+    if crate::recorder::TOOL_NAMES.contains(&name) {
+        return crate::recorder::execute(app, name, args, cancel).await;
+    }
     match name {
         "discover_capabilities" => {
             let query = args

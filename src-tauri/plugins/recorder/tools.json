@@ -1,0 +1,235 @@
+[
+  {
+    "name": "record_start",
+    "label": "开始录屏",
+    "description": "开始录制浏览器当前标签页（画面不含鼠标，导出时再画光标和放大效果）。录制期间页面上的敏感信息（密码框、手机号、身份证、邮箱、银行卡、密钥及设置里的规则）在源头就被模糊，画面里不会出现明文。给了 url 会先打开该网页再开始。同时只能有一个录制。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "录制标题，用于列表和导出文件名"
+        },
+        "url": {
+          "type": "string",
+          "description": "先打开的网页（可选）"
+        }
+      }
+    }
+  },
+  {
+    "name": "record_stop",
+    "label": "停止录屏",
+    "description": "停止当前录制并保存工程，返回录制 id、时长、帧数和点击次数。",
+    "parameters": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "record_status",
+    "label": "录屏状态",
+    "description": "查看是否正在录制、已录时长、帧数和事件数。",
+    "parameters": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "record_mark",
+    "label": "录屏标记",
+    "description": "在当前录制时间点打一个步骤标记（例如「第 2 步：填写表单」）。标记是后续解说词和配音的锚点；拾光自己操作演示时每一步开始前打一个。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string",
+          "description": "步骤名称，简短"
+        },
+        "note": {
+          "type": "string",
+          "description": "这一步的说明，可作为解说词草稿"
+        }
+      },
+      "required": [
+        "label"
+      ]
+    }
+  },
+  {
+    "name": "record_list",
+    "label": "录屏列表",
+    "description": "列出已保存的录制（最新在前），含标题、时长、是否已导出。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "description": "默认 20"
+        }
+      }
+    }
+  },
+  {
+    "name": "record_export",
+    "label": "导出录屏",
+    "description": "把录制渲染成 MP4：按时间线做放大（自动或用户编辑过的）、合成光标和点击波纹、手动打码、剪切；有解说时混入配音、生成同名 .srt 字幕，并可把字幕画进画面。某段配音比画面长时，画面会在那一步定格等配音说完。首次导出会自动准备 ffmpeg（可能需要下载）。未给的参数用插件设置。preview=true 出低分辨率预览（存在录制目录），不算正式导出。导出后提醒用户检查打码。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "录制 id，默认最近一次"
+        },
+        "zoom": {
+          "type": "boolean",
+          "description": "是否自动放大"
+        },
+        "zoom_scale": {
+          "type": "number",
+          "description": "放大倍数，1.2–3"
+        },
+        "cursor_scale": {
+          "type": "number",
+          "description": "光标大小倍数"
+        },
+        "style": {
+          "type": "string",
+          "enum": [
+            "plain",
+            "padded"
+          ],
+          "description": "plain=原样；padded=带渐变背景、圆角和阴影（适合宣传视频）"
+        },
+        "fps": {
+          "type": "integer"
+        },
+        "out_path": {
+          "type": "string",
+          "description": "输出 mp4 的完整路径（可选）"
+        },
+        "preview": {
+          "type": "boolean",
+          "description": "低分辨率快速预览"
+        },
+        "burn_subtitles": {
+          "type": "boolean",
+          "description": "把字幕画进画面（默认按时间线/设置）"
+        }
+      }
+    }
+  },
+  {
+    "name": "record_delete",
+    "label": "删除录屏",
+    "description": "删除一个录制工程（原始素材），会先让用户确认。已导出的 MP4 不删。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "record_timeline",
+    "label": "查看录屏时间线",
+    "description": "读取一次录制的时间线：步骤标记（record_mark 的 label/note）、点击/输入/打开页面的步骤（带时间和目标文字）、当前的放大段/打码/剪切/解说，以及放配音文件的 audio_dir。写解说词、配音、剪辑前先调用它。时间都是录制开始后的秒数。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "录制 id，默认最近一次"
+        }
+      }
+    }
+  },
+  {
+    "name": "record_edit",
+    "label": "编辑录屏",
+    "description": "修改录制的时间线，给了哪个字段就整体替换哪个字段（先用 record_timeline 读出现有内容再改）。narration：解说列表，at 为挂在第几秒（一般用步骤或标记的时间），text 为解说词（也用作字幕），audio 为配音文件（相对录制目录如 audio/01.mp3，或绝对路径；没有就只出字幕）。masks：手动打码 [{start,end,rect:[x,y,宽,高]}]，rect 用 0–1 的画面比例。cuts：剪掉的时间段 [{start,end}]。zooms：放大段 [{start,end,scale,focus?:[x,y]}]，传 \"auto\" 恢复自动。burn_subtitles：是否把字幕画进画面。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "录制 id，默认最近一次"
+        },
+        "narration": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "number"
+              },
+              "text": {
+                "type": "string"
+              },
+              "audio": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "at"
+            ]
+          }
+        },
+        "masks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": "number"
+              },
+              "end": {
+                "type": "number"
+              },
+              "rect": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              }
+            },
+            "required": [
+              "start",
+              "end",
+              "rect"
+            ]
+          }
+        },
+        "cuts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": "number"
+              },
+              "end": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ]
+          }
+        },
+        "zooms": {
+          "description": "放大段数组 [{start,end,scale,focus?:[x,y]}]，或字符串 \"auto\" 恢复自动"
+        },
+        "burn_subtitles": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+]

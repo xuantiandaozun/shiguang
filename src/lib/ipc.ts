@@ -461,6 +461,16 @@ export const ipc = {
   createDelegation: (title: string, goal: string) => invoke<DelegationTask>("create_delegation", { title, goal }),
   replyDelegation: (id: string, content: string) => invoke<DelegationTask>("reply_delegation", { id, content }),
   cancelDelegation: (id: string) => invoke<DelegationTask>("cancel_delegation", { id }),
+  recorderStatus: () => invoke<RecorderStatus>("recorder_status"),
+  recorderList: () => invoke<Recording[]>("recorder_list"),
+  recorderStart: (title?: string, url?: string) => invoke<{ id: string; title: string }>("recorder_start", { title: title || null, url: url || null }),
+  recorderStop: () => invoke<{ id: string; duration_s: number }>("recorder_stop"),
+  recorderExport: (id: string, opts?: RecorderExportOpts) => invoke<{ path: string }>("recorder_export", { id, opts: opts ?? null }),
+  recorderCancelExport: () => invoke<void>("recorder_cancel_export"),
+  recorderProject: (id: string) => invoke<RecorderProject>("recorder_project", { id }),
+  recorderSaveTimeline: (id: string, timeline: TimelineDoc) => invoke<TimelineDoc>("recorder_save_timeline", { id, timeline }),
+  recorderDelete: (id: string) => invoke<void>("recorder_delete", { id }),
+  recorderReveal: (path: string) => invoke<void>("recorder_reveal", { path }),
   listWorkspaces: () => invoke<Workspace[]>("list_workspaces"),
   saveWorkspace: (id: number, name: string, root: string, data: WorkspaceData) => invoke<Workspace>("save_workspace", { id, name, root, data }),
   deleteWorkspace: (id: number) => invoke<void>("delete_workspace", { id }),
@@ -659,6 +669,34 @@ export interface PluginVersion {
   version: string;
   reason: string | null;
   at: string | null;
+}
+
+export interface RecorderStatus {
+  recording: boolean; id?: string; title?: string; url?: string; channel?: string;
+  elapsed_s?: number; frames?: number; events?: number; clicks?: number; marks?: number; ended_reason?: string | null;
+}
+export interface Recording {
+  id: string; title: string; url: string; started_at: string; duration_s: number; clicks: number; marks: number;
+  size: [number, number]; end_reason: string | null; exported: string | null; exported_at: string | null; thumb: string; dir: string;
+}
+export interface RecorderExportOpts { zoom?: boolean; style?: "plain" | "padded"; zoom_scale?: number; cursor_scale?: number; fps?: number; preview?: boolean; burn_subtitles?: boolean }
+export interface RecorderExportProgress { id: string; phase: "ffmpeg" | "audio" | "render" | "done"; done?: number; total?: number; ok?: boolean }
+export interface ZoomSeg { start: number; end: number; scale: number; focus?: [number, number] }
+export interface MaskSeg { start: number; end: number; rect: [number, number, number, number] }
+export interface CutSeg { start: number; end: number }
+export interface NarrationItem { at: number; text: string; audio?: string }
+export interface TimelineDoc {
+  zooms_edited: boolean; zooms: ZoomSeg[]; masks: MaskSeg[]; cuts: CutSeg[]; narration: NarrationItem[]; burn_subtitles?: boolean | null;
+}
+export interface RecorderProject {
+  meta: { id: string; title: string; width: number; height: number };
+  duration: number; dir: string;
+  frames: [number, string][];
+  clicks: { t: number; label: string }[];
+  marks: { t: number; label: string; note: string }[];
+  timeline: TimelineDoc;
+  preview: string | null;
+  burn_default: boolean;
 }
 
 export function onEvent<T>(name: string, cb: (payload: T) => void): Promise<() => void> {

@@ -1,0 +1,102 @@
+{
+  "type": "object",
+  "properties": {
+    "mask_phone": {
+      "type": "boolean",
+      "title": "打码：手机号",
+      "default": true
+    },
+    "mask_idcard": {
+      "type": "boolean",
+      "title": "打码：身份证号",
+      "default": true
+    },
+    "mask_email": {
+      "type": "boolean",
+      "title": "打码：邮箱",
+      "default": true
+    },
+    "mask_bankcard": {
+      "type": "boolean",
+      "title": "打码：银行卡号",
+      "default": true
+    },
+    "mask_secret": {
+      "type": "boolean",
+      "title": "打码：密钥 / Token",
+      "default": true
+    },
+    "mask_selectors": {
+      "type": "string",
+      "title": "额外打码的元素（CSS 选择器，每行一个）",
+      "format": "textarea",
+      "default": ""
+    },
+    "mask_patterns": {
+      "type": "string",
+      "title": "额外打码的文字（正则，每行一个）",
+      "format": "textarea",
+      "default": ""
+    },
+    "mask_blur": {
+      "type": "number",
+      "title": "打码模糊强度（像素）",
+      "default": 10
+    },
+    "zoom_auto": {
+      "type": "boolean",
+      "title": "点击处自动放大",
+      "default": true
+    },
+    "zoom_scale": {
+      "type": "number",
+      "title": "放大倍数",
+      "default": 1.8
+    },
+    "cursor_scale": {
+      "type": "number",
+      "title": "光标大小倍数",
+      "default": 1.6
+    },
+    "fps": {
+      "type": "integer",
+      "title": "导出帧率",
+      "default": 30
+    },
+    "style": {
+      "type": "string",
+      "title": "画面风格",
+      "enum": [
+        "plain",
+        "padded"
+      ],
+      "default": "plain"
+    },
+    "burn_subtitles": {
+      "type": "boolean",
+      "title": "有解说时把字幕画进画面（同时总会生成 .srt）",
+      "default": true
+    },
+    "max_minutes": {
+      "type": "integer",
+      "title": "单次最长录制（分钟）",
+      "default": 30
+    },
+    "output_dir": {
+      "type": "string",
+      "title": "导出目录（留空为 视频/拾光录屏）",
+      "default": ""
+    },
+    "ffmpeg_path": {
+      "type": "string",
+      "title": "ffmpeg.exe 路径（留空自动查找或下载）",
+      "default": ""
+    },
+    "ffmpeg_urls": {
+      "type": "string",
+      "title": "ffmpeg 下载地址（每行一个，按顺序尝试；支持 .zip / .tgz）",
+      "format": "textarea",
+      "default": "https://registry.npmmirror.com/@ffmpeg-installer/win32-x64/-/win32-x64-4.1.0.tgz\nhttps://registry.npmjs.org/@ffmpeg-installer/win32-x64/-/win32-x64-4.1.0.tgz"
+    }
+  }
+}

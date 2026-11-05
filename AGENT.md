@@ -24,7 +24,7 @@ LLM 走 OpenAI 兼容接口（默认 DeepSeek），Function Calling + SSE 流式
   - 按画面定位：`target.visual` → 视口截图 → Jev Box + 是否存在 → 视口坐标 → 引擎真实鼠标（`point`）。只看可见区域。
 - `system_one.rs`：`ask()` 一次多题（choice/noul/score/box）+ 图片资产，用量按 `system_one_<来源>` 记录；新判断尽量合并进已有请求（各题并行，几乎不增加耗时）。TypeSafe 对部分地区直连返回 451，桌面端依赖系统代理。
   - `tasks.rs` 后台命令；`machine.rs` 本机信息；`lookup_cache.rs` 外部对照数据缓存；`skills.rs` + `builtin_skills.rs` Agent Skills；`reader.rs` / `writer.rs`；`ocr.rs`；`retention.rs` 工具结果头尾保留与落盘；`repeat_guard.rs` 重复工具劝告；`ask_user.rs` 聊天内选择题；`session_todo.rs` 会话内任务进度（与提醒待办分表）；`compact.rs` 对话摘要压缩；`web.rs` 公开网页搜索与抓取
-- `src-tauri/src/plugins/` 插件宿主；`src-tauri/plugins/` 17 个内置插件（工具定义、提示词、内部 Skills、浏览器页面脚本、界面挂载点），改完即生效不用编译。架构与约定见 `docs/PLUGINS.md`，规范见 `plugins/core/PLUGIN_GUIDE.md`
+- `src-tauri/src/plugins/` 插件宿主；`src-tauri/plugins/` 18 个内置插件（工具定义、提示词、内部 Skills、浏览器页面脚本、界面挂载点），改完即生效不用编译。架构与约定见 `docs/PLUGINS.md`，规范见 `plugins/core/PLUGIN_GUIDE.md`
 - `src/plugins/` 前端插件注册表：主窗口标签页、窗口路由、工具文案、斜杠命令、工具结果卡片都由插件声明；iframe 宿主 + SDK、声明式视图、「插件」管理页
 - `src-tauri/sidecars/` 独立辅助程序 Cargo 包：两个 bin 复用 `src/bin/` 源码，索引助手仅编译 `ntfs_helper` 的协议/执行部分和 `ntfs_usn`；不依赖桌面库，也不运行 Tauri build.rs。`scripts/build-index-helper.mjs` 使用 `target/sidecars/` 独立缓存，内容变化才同步到 `binaries/` 和主程序同级。主包的默认 `desktop-client` feature 启用 NTFS 提权客户端。发版修改版本时同步 sidecars/Cargo.toml。
 

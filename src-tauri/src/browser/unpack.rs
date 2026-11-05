@@ -18,10 +18,17 @@ pub struct ExtensionInfo {
 
 pub fn ensure_unpacked(app: &AppHandle) -> Result<PathBuf> {
     let dest = install_dir_dest(app).unwrap_or_else(dev_extension_dir);
+    let zip = find_zip(app);
     if dest.join("manifest.json").is_file() {
+        // 程序升级带来新扩展时重新解压（按压缩包内容比对），用户在浏览器里点「重新加载」即可生效
+        if let Some(zip) = zip.as_ref().filter(|z| is_stale(z, &dest)) {
+            if let Err(e) = extract_zip(zip, &dest) {
+                log::warn!("更新浏览器扩展目录失败（继续使用旧版）: {e:#}");
+            }
+        }
         return Ok(dest);
     }
-    if let Some(zip) = find_zip(app) {
+    if let Some(zip) = zip {
         extract_zip(&zip, &dest)?;
         return Ok(dest);
     }
@@ -105,12 +112,22 @@ pub fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
     if !dest.join("manifest.json").is_file() {
         anyhow::bail!("压缩包里没有 manifest.json，无法作为浏览器扩展使用");
     }
-    let fingerprint = zip_path
-        .metadata()
-        .map(|m| m.len().to_string())
-        .unwrap_or_default();
-    let _ = std::fs::write(dest.join(MARKER), fingerprint);
+    let _ = std::fs::write(dest.join(MARKER), fingerprint(zip_path));
     Ok(())
+}
+
+fn fingerprint(zip_path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    std::fs::read(zip_path)
+        .map(|b| format!("{:x}", Sha256::digest(&b)))
+        .unwrap_or_default()
+}
+
+/// 解压目录不是由这个压缩包解出来的（或是旧版本留下的）
+fn is_stale(zip_path: &Path, dest: &Path) -> bool {
+    let current = std::fs::read_to_string(dest.join(MARKER)).unwrap_or_default();
+    let fp = fingerprint(zip_path);
+    !fp.is_empty() && current.trim() != fp
 }
 
 #[cfg(test)]
@@ -144,6 +161,13 @@ mod tests {
         assert!(dest.join("manifest.json").is_file());
         assert!(dest.join("background.js").is_file());
         assert!(!dir.join("escape.txt").is_file());
+        assert!(!is_stale(&zip_path, &dest));
+        // 新版压缩包：判定为过期并覆盖
+        std::fs::write(&zip_path, make_zip(&[("manifest.json", r#"{"version":"2"}"#)])).unwrap();
+        assert!(is_stale(&zip_path, &dest));
+        extract_zip(&zip_path, &dest).unwrap();
+        assert!(std::fs::read_to_string(dest.join("manifest.json")).unwrap().contains("\"2\""));
+        assert!(!is_stale(&zip_path, &dest));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

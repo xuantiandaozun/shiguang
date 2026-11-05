@@ -28,6 +28,8 @@ struct Inner {
     /// 扩展连上后落一个标记文件：这台机器装过扩展。
     /// Hub 据此决定浏览器未启动时值得拉起默认浏览器等扩展，而不是直接开独立实例。
     seen_marker: Option<PathBuf>,
+    /// 扩展主动推送的消息（带 event 字段，如录屏画面帧）交给当前订阅者
+    events: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Value>>>,
 }
 
 #[derive(Clone)]
@@ -45,6 +47,7 @@ impl ExtServer {
                 connected: AtomicBool::new(false),
                 listening: AtomicBool::new(false),
                 seen_marker,
+                events: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -113,6 +116,13 @@ impl ExtServer {
                     continue;
                 }
                 if let Ok(v) = serde_json::from_str::<Value>(t.as_str()) {
+                    if v.get("event").is_some() {
+                        let mut sink = self.inner.events.lock().unwrap();
+                        if sink.as_ref().is_some_and(|tx| tx.send(v).is_err()) {
+                            *sink = None;
+                        }
+                        continue;
+                    }
                     let id = v.get("id").and_then(|x| x.as_u64()).unwrap_or(0);
                     if let Some(tx) = self.inner.pending.lock().await.remove(&id) {
                         let _ = tx.send(v);
@@ -122,7 +132,21 @@ impl ExtServer {
         }
         self.inner.connected.store(false, Ordering::SeqCst);
         *self.inner.writer.lock().await = None;
+        if let Some(tx) = self.inner.events.lock().unwrap().as_ref() {
+            let _ = tx.send(json!({"event": "rec_end", "reason": "浏览器扩展已断开"}));
+        }
         log::info!("浏览器扩展已断开");
+    }
+
+    /// 订阅扩展主动推送的消息；新订阅会替换旧的（同一时间只有一个录制）。
+    pub fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        *self.inner.events.lock().unwrap() = Some(tx);
+        rx
+    }
+
+    pub fn unsubscribe(&self) {
+        *self.inner.events.lock().unwrap() = None;
     }
 
     pub fn connected(&self) -> bool {

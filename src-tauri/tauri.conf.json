@@ -69,6 +69,7 @@
         "style-src": "'self' 'unsafe-inline'",
         "img-src": "'self' asset: http://asset.localhost data: blob: https: http:",
         "font-src": "'self' data:",
+        "media-src": "'self' asset: http://asset.localhost",
         "connect-src": "'self' ipc: http://ipc.localhost",
         "frame-src": "plugin: http://plugin.localhost",
         "object-src": "'none'",

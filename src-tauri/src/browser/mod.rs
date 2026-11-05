@@ -156,6 +156,50 @@ impl Hub {
         self.call_cdp(action, params).await
     }
 
+    /// 开始录屏。扩展已连接走扩展 debugger，否则走独立 CDP。
+    /// 返回 (结果, 推送消息接收端, 通道名)。params 需含 session 与 script（页面脚本 + 安装调用）。
+    pub async fn record_start(
+        &self,
+        params: Value,
+    ) -> Result<(Value, tokio::sync::mpsc::UnboundedReceiver<Value>, &'static str)> {
+        self.ensure_default_browser("record_start", &params).await;
+        if self.ext.connected() {
+            // 扩展连着时录的就是用户正在用的浏览器，失败也不换到另一个浏览器实例，免得录错地方
+            let rx = self.ext.subscribe();
+            return match self.ext.call("record_start", params).await {
+                Ok(v) => Ok((v, rx, "extension")),
+                Err(e) => {
+                    self.ext.unsubscribe();
+                    if e.to_string().contains("未知动作") {
+                        bail!("浏览器扩展版本太旧，不支持录屏。请在浏览器的扩展管理页重新加载「拾光浏览器桥」后再试");
+                    }
+                    Err(anyhow!("无法录制当前标签页：{e}（浏览器内置页面如设置页、扩展商店不能录）"))
+                }
+            };
+        }
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut guard = self.cdp.lock().await;
+        if guard.is_none() {
+            *guard = Some(cdp::CdpClient::connect_or_launch().await?);
+        }
+        let client = guard.as_mut().expect("cdp client just set");
+        let v = client.record_start(&params, tx).await?;
+        Ok((v, rx, "cdp"))
+    }
+
+    pub async fn record_stop(&self, channel: &str, session: &str) -> Result<()> {
+        if channel == "extension" {
+            let r = self.ext.call("record_stop", json!({"session": session})).await;
+            self.ext.unsubscribe();
+            r.map(|_| ())
+        } else {
+            if let Some(c) = self.cdp.lock().await.as_mut() {
+                c.record_stop().await;
+            }
+            Ok(())
+        }
+    }
+
     async fn call_cdp(&self, action: &str, params: Value) -> Result<Value> {
         let mut guard = self.cdp.lock().await;
         if guard.is_none() {

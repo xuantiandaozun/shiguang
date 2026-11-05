@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test:browser-operations": "node --test scripts/test-page-operations.mjs",
     "test:browser-runtime": "node --test scripts/test-browser-runtime.mjs",
+    "test:recorder-page": "node --test scripts/test-page-recorder.mjs",
     "test:browser-e2e": "node --test --test-timeout=30000 scripts/test-browser-runtime-e2e.mjs",
     "sidecar:dev": "node scripts/build-index-helper.mjs dev",
     "sidecar:build": "node scripts/build-index-helper.mjs release",

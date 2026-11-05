@@ -20,6 +20,14 @@ pub struct CdpClient {
     _driver: JoinHandle<()>,
     page: Option<Page>,
     origin: String,
+    rec: Option<CdpRecording>,
+}
+
+/// 独立 CDP 通道上的录屏：转发任务 + 导航后重新安装的脚本 id
+struct CdpRecording {
+    page: Page,
+    tasks: Vec<JoinHandle<()>>,
+    script_id: Option<chromiumoxide::cdp::browser_protocol::page::ScriptIdentifier>,
 }
 
 impl CdpClient {
@@ -31,6 +39,104 @@ impl CdpClient {
             return Ok(c);
         }
         launch_managed().await
+    }
+
+    /// 开始录屏：画面帧与页面事件转成与扩展相同的 {event:...} 消息发到 tx。
+    pub async fn record_start(
+        &mut self,
+        params: &Value,
+        tx: tokio::sync::mpsc::UnboundedSender<Value>,
+    ) -> Result<Value> {
+        use chromiumoxide::cdp::browser_protocol::page::{
+            AddScriptToEvaluateOnNewDocumentParams, EventScreencastFrame, ScreencastFrameAckParams,
+            StartScreencastFormat, StartScreencastParams,
+        };
+        use chromiumoxide::cdp::js_protocol::runtime::{AddBindingParams, EventBindingCalled};
+        self.record_stop().await;
+        let session = params["session"].as_str().unwrap_or_default().to_string();
+        let script = params["script"].as_str().ok_or_else(|| anyhow!("缺少录制脚本"))?.to_string();
+        let page = self.current_page().await?;
+        let _ = page.bring_to_front().await;
+        page.execute(AddBindingParams::new("__sgRec"))
+            .await
+            .map_err(|e| anyhow!("注册录制通道失败: {e}"))?;
+        let added = page
+            .execute(AddScriptToEvaluateOnNewDocumentParams::new(script.clone()))
+            .await
+            .map_err(|e| anyhow!("注册录制脚本失败: {e}"))?;
+        let mut frames = page
+            .event_listener::<EventScreencastFrame>()
+            .await
+            .map_err(|e| anyhow!("监听画面失败: {e}"))?;
+        let mut bindings = page
+            .event_listener::<EventBindingCalled>()
+            .await
+            .map_err(|e| anyhow!("监听页面事件失败: {e}"))?;
+        let frame_page = page.clone();
+        let (s1, tx1) = (session.clone(), tx.clone());
+        let t1 = tokio::spawn(async move {
+            while let Some(ev) = frames.next().await {
+                let _ = frame_page.execute(ScreencastFrameAckParams::new(ev.session_id)).await;
+                let msg = json!({
+                    "event": "rec_frame", "session": s1,
+                    "data": AsRef::<str>::as_ref(&ev.data),
+                    "metadata": serde_json::to_value(&ev.metadata).unwrap_or(Value::Null),
+                });
+                if tx1.send(msg).is_err() {
+                    return;
+                }
+            }
+            let _ = tx1.send(json!({"event": "rec_end", "session": s1, "reason": "页面已关闭"}));
+        });
+        let (s2, tx2) = (session.clone(), tx);
+        let t2 = tokio::spawn(async move {
+            while let Some(ev) = bindings.next().await {
+                if ev.name == "__sgRec"
+                    && tx2
+                        .send(json!({"event": "rec_event", "session": s2, "payload": ev.payload}))
+                        .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        page.evaluate(script.as_str())
+            .await
+            .map_err(|e| anyhow!("安装录制脚本失败: {e}"))?;
+        let mut start = StartScreencastParams::builder()
+            .format(StartScreencastFormat::Jpeg)
+            .quality(params["quality"].as_i64().unwrap_or(85))
+            .max_width(params["max_width"].as_i64().unwrap_or(1920))
+            .max_height(params["max_height"].as_i64().unwrap_or(1080))
+            .build();
+        start.every_nth_frame = Some(1);
+        page.execute(start)
+            .await
+            .map_err(|e| anyhow!("开始录屏失败: {e}"))?;
+        let url = page.url().await.ok().flatten().unwrap_or_default();
+        self.rec = Some(CdpRecording { page, tasks: vec![t1, t2], script_id: Some(added.result.identifier) });
+        Ok(json!({"ok": true, "url": url}))
+    }
+
+    pub async fn record_stop(&mut self) -> bool {
+        use chromiumoxide::cdp::browser_protocol::page::{
+            RemoveScriptToEvaluateOnNewDocumentParams, StopScreencastParams,
+        };
+        use chromiumoxide::cdp::js_protocol::runtime::RemoveBindingParams;
+        let Some(rec) = self.rec.take() else { return false };
+        let _ = rec.page.execute(StopScreencastParams::default()).await;
+        if let Some(id) = rec.script_id {
+            let _ = rec.page.execute(RemoveScriptToEvaluateOnNewDocumentParams::new(id)).await;
+        }
+        let _ = rec.page.execute(RemoveBindingParams::new("__sgRec")).await;
+        let _ = rec
+            .page
+            .evaluate("window.__sgRecUninstall&&window.__sgRecUninstall()")
+            .await;
+        for t in rec.tasks {
+            t.abort();
+        }
+        true
     }
 
     pub fn describe(&self) -> String {
@@ -397,6 +503,7 @@ async fn connect_ws(ws: &str, origin: &str) -> Result<CdpClient> {
         _driver: driver,
         page: None,
         origin: origin.to_string(),
+        rec: None,
     })
 }
 

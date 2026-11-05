@@ -22,6 +22,7 @@ pub mod ocr;
 pub mod organizer;
 pub mod plugins;
 pub mod reader;
+pub mod recorder;
 pub mod repeat_guard;
 pub mod retention;
 pub mod session_todo;
@@ -71,6 +72,8 @@ pub struct AppState {
     pub delegations: delegation::DelegationHub,
     /// 外派给 Claude Code / Codex 的编码任务
     pub agents: agents::AgentHub,
+    /// 操作录屏（录制会话与导出）
+    pub recorder: recorder::RecorderHub,
 }
 
 pub fn notify_user(app: &tauri::AppHandle, title: &str, body: &str) {
@@ -165,6 +168,7 @@ pub fn run() {
                 subagents: llm::subagent::SubagentHub::new(),
                 delegations: delegation::DelegationHub::default(),
                 agents: agents::AgentHub::default(),
+                recorder: recorder::RecorderHub::default(),
             });
             {
                 // 插件变化：补齐注册表、同步 MCP 服务、通知前端刷新界面。
@@ -217,6 +221,16 @@ pub fn run() {
         .register_uri_scheme_protocol("plugin", |_ctx, request| plugins::protocol::handle(request))
         .invoke_handler(tauri::generate_handler![
             plugins::ipc::list_plugins,
+            recorder::recorder_status,
+            recorder::recorder_list,
+            recorder::recorder_start,
+            recorder::recorder_stop,
+            recorder::recorder_export,
+            recorder::recorder_cancel_export,
+            recorder::recorder_project,
+            recorder::recorder_save_timeline,
+            recorder::recorder_delete,
+            recorder::recorder_reveal,
             plugins::ipc::reload_plugins,
             plugins::ipc::set_plugin_enabled,
             plugins::ipc::get_plugin_settings,

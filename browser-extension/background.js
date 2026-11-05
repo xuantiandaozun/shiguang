@@ -73,6 +73,8 @@ const networkWatch = new Map();
 const tabExec = new Map();
 // 每个标签一个真实输入运行时（网络/导航/原生对话框状态随调试会话保存）。
 const runtimes = new Map();
+// 正在录屏的标签：tabId → {session, scriptId}。画面帧与事件主动推给桌面端（{event:...} 消息）。
+const recordings = new Map();
 // 记录新开的标签，动作后告诉 AI「点击打开了新标签」。
 const createdTabs = [];
 chrome.tabs.onCreated.addListener((tab) => {
@@ -81,6 +83,11 @@ chrome.tabs.onCreated.addListener((tab) => {
 });
 chrome.debugger.onDetach.addListener((source) => {
   if (source && source.tabId) {
+    const rec = recordings.get(source.tabId);
+    if (rec) {
+      recordings.delete(source.tabId);
+      send({ event: "rec_end", session: rec.session, reason: "调试器已断开（标签页关闭或用户取消了调试）" });
+    }
     attachedTabs.delete(source.tabId);
     tabExec.delete(source.tabId);
     networkWatch.delete(source.tabId);
@@ -112,6 +119,8 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   const tabId = source && source.tabId;
   const rt = tabId != null ? runtimes.get(tabId) : null;
   if (rt) rt.onEvent(method, params);
+  const rec = tabId != null ? recordings.get(tabId) : null;
+  if (rec) onRecordEvent(tabId, rec, method, params);
   const watch = tabId != null ? networkWatch.get(tabId) : null;
   if (!watch) return;
   if (method === "Network.requestWillBeSent" && params && params.request) {
@@ -233,6 +242,58 @@ async function runEngine(tab, payload, channel) {
   tabExec.set(tab.id, "debugger");
   const result = Array.isArray(payload.steps) ? await rt.run(payload.steps) : await rt.act(payload);
   return { ...result, engine: "trusted-input" };
+}
+
+// ---- 录屏（Page.startScreencast + Runtime.addBinding）----
+const REC_BINDING = "__sgRec";
+
+function onRecordEvent(tabId, rec, method, params) {
+  if (method === "Page.screencastFrame") {
+    send({ event: "rec_frame", session: rec.session, data: params.data, metadata: params.metadata });
+    chrome.debugger.sendCommand({ tabId }, "Page.screencastFrameAck", { sessionId: params.sessionId }).catch(() => {});
+  } else if (method === "Runtime.bindingCalled" && params.name === REC_BINDING) {
+    send({ event: "rec_event", session: rec.session, payload: params.payload });
+  }
+}
+
+async function recordStart(p) {
+  if (!p.session || !p.script) throw new Error("缺少录制参数");
+  const t = await activeTab();
+  if (recordings.has(t.id)) await recordStop({ tab_id: t.id }).catch(() => {});
+  await ensureDebugger(t.id);
+  const cmd = (m, params) => chrome.debugger.sendCommand({ tabId: t.id }, m, params || {});
+  await cmd("Page.enable");
+  await cmd("Runtime.enable");
+  await cmd("Runtime.addBinding", { name: REC_BINDING });
+  const added = await cmd("Page.addScriptToEvaluateOnNewDocument", { source: p.script });
+  const rec = { session: p.session, scriptId: added && added.identifier };
+  recordings.set(t.id, rec);
+  await debuggerEval(t.id, p.script);
+  await cmd("Page.startScreencast", {
+    format: "jpeg",
+    quality: p.quality || 85,
+    maxWidth: p.max_width || 1920,
+    maxHeight: p.max_height || 1080,
+    everyNthFrame: 1,
+  });
+  tabExec.set(t.id, "debugger");
+  return { ok: true, tab_id: t.id, url: t.url || "", title: t.title || "" };
+}
+
+async function recordStop(p) {
+  let tabId = p.tab_id;
+  if (tabId == null) {
+    for (const [id, rec] of recordings) if (!p.session || rec.session === p.session) tabId = id;
+  }
+  const rec = tabId != null ? recordings.get(tabId) : null;
+  if (!rec) return { ok: true, stopped: false };
+  recordings.delete(tabId);
+  const cmd = (m, params) => chrome.debugger.sendCommand({ tabId }, m, params || {}).catch(() => {});
+  await cmd("Page.stopScreencast");
+  if (rec.scriptId) await cmd("Page.removeScriptToEvaluateOnNewDocument", { identifier: rec.scriptId });
+  await cmd("Runtime.removeBinding", { name: REC_BINDING });
+  await debuggerEval(tabId, "window.__sgRecUninstall&&window.__sgRecUninstall()").catch(() => {});
+  return { ok: true, stopped: true, session: rec.session };
 }
 
 async function handleMessage(raw) {
@@ -643,6 +704,10 @@ async function handle(action, p) {
         return runScript();
       }
     }
+    case "record_start":
+      return recordStart(p);
+    case "record_stop":
+      return recordStop(p);
     case "info": {
       const t = await activeTab();
       return runInTabAuto(t.id, "info", [], p.channel);

@@ -8,7 +8,7 @@ import { startPluginRegistry, usePluginStore, usePluginTabs } from "../plugins/r
 import type { MountedItem } from "../plugins/registry";
 import PluginMount from "../plugins/PluginMount";
 
-const ICONS = new Set<string>(["plus", "history", "close", "maximize", "files", "ai", "clear", "plug", "refresh", "upload", "up", "send", "stop", "tab", "todo", "server", "skill", "usage", "settings"]);
+const ICONS = new Set<string>(["plus", "history", "close", "maximize", "files", "ai", "clear", "plug", "refresh", "upload", "up", "send", "stop", "tab", "todo", "server", "skill", "usage", "settings", "video"]);
 const iconOf = (item: MountedItem): IconName => (item.icon && ICONS.has(item.icon) ? (item.icon as IconName) : "plug");
 
 /** 标签页都由插件声明（plugin.json 的 ui.tabs）；同一 group 的页在顶部显示切换链接。 */

@@ -20,6 +20,7 @@ const paths = {
   skill: "M12 3 3 8l9 5 9-5zM3 12l9 5 9-5M3 16l9 5 9-5",
   usage: "M4 20V10M12 20V4M20 20v-7",
   settings: "M4 7h16M4 17h16M8 4v6M16 14v6",
+  video: "M3 6h12v12H3zM15 10l6-3v10l-6-3",
 } as const;
 export type IconName = keyof typeof paths;
 export default function Icon({ name, className = "", style }: { name: IconName; className?: string; style?: CSSProperties }) {

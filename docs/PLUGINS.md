@@ -36,6 +36,7 @@ Rust 内核（src-tauri/src）           插件（src-tauri/plugins + 用户目�
 | files / commands / browser / web / system | 文件、命令与后台任务、浏览器、网页、本机信息 |
 | organize / todos / profile | 桌面整理（默认 Skill）、待办提醒、个人信息 |
 | servers / workspaces / agents / delegation | 服务器、工作区、编码智能体外派、子代理与委托 |
+| recorder | 操作录屏：工具（录制/时间线编辑/导出）、设置（打码规则/放大/字幕/ffmpeg）、页面录制脚本、录制与配音 Skill、「录屏」页与编辑器；内核 `src/recorder/` 只做录制写盘与渲染编码，设计见 `docs/RECORDING.md` |
 | skills / usage / settings | Skills 管理、用量、设置页 |
 | plugins | 插件管理工具、plugin-authoring Skill、「插件」页 |
 
