@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden}
+body{background:{{color1|#14161c}};display:flex;align-items:center;padding-left:220px;box-sizing:border-box;color:#fff;font-family:"ZCOOL QingKe HuangYou","ZCOOL KuaiLe","Microsoft YaHei",sans-serif}
+.bar{position:absolute;left:0;top:0;bottom:0;width:0;background:{{color2|#ffb300}};animation:bar .6s cubic-bezier(.65,0,.35,1) forwards}
+.n{font-size:220px;line-height:1;color:{{color2|#ffb300}};opacity:0;animation:slide .6s cubic-bezier(.22,1,.36,1) .25s forwards}
+.t{margin-left:60px;font-size:120px;opacity:0;animation:slide .6s cubic-bezier(.22,1,.36,1) .45s forwards}
+.line{position:absolute;left:220px;bottom:34%;height:10px;width:0;background:#fff;border-radius:5px;animation:grow .8s cubic-bezier(.22,1,.36,1) .7s forwards}
+@keyframes bar{to{width:90px}}
+@keyframes slide{from{opacity:0;transform:translateX(-120px)}to{opacity:1;transform:none}}
+@keyframes grow{to{width:520px}}
+</style></head><body>
+<div class="bar"></div>
+<div class="n">{{number|01}}</div>
+<div class="t">{{title}}</div>
+<div class="line"></div>
+</body></html>

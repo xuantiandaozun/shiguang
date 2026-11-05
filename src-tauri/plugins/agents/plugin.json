@@ -2,7 +2,7 @@
   "id": "agents",
   "name": "编码智能体",
   "version": "1.0.0",
-  "description": "把代码修改外派给 Claude Code / Codex。",
+  "description": "把代码修改外派给 Claude Code / Codex / Cursor CLI / Pi。",
   "order": 75,
   "tools": [
     "tools.json"

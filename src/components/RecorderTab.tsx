@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { ipc, onEvent } from "../lib/ipc";
-import RecorderEditor from "./RecorderEditor";
 import ScreenshotPanel from "./ScreenshotPanel";
 import type { RecorderExportOpts, RecorderExportProgress, RecorderStatus, Recording } from "../lib/ipc";
 
@@ -19,6 +18,8 @@ function progressText(p: RecorderExportProgress | null) {
   const total = p.total ?? 0;
   const done = p.done ?? 0;
   if (p.phase === "audio") return "处理配音…";
+  if (p.phase === "font") return `首次下载字幕字体：${total > 0 ? Math.round((done / total) * 100) : 0}%`;
+  if (p.phase === "scene") return `渲染代码片段 ${p.scene ?? ""}/${p.scenes ?? ""}：${total > 0 ? Math.round((done / total) * 100) : 0}%`;
   if (p.phase === "ffmpeg") {
     return total > 0 ? `首次准备 ffmpeg：${(done / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MB` : `首次准备 ffmpeg：${(done / 1048576).toFixed(1)} MB`;
   }
@@ -38,7 +39,6 @@ export default function RecorderTab() {
   const [zoom, setZoom] = useState<"" | "on" | "off">("");
   const [playing, setPlaying] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
-  const [editing, setEditing] = useState<string | null>(null);
   const [source, setSource] = useState<"browser" | "screen" | "select">(() => {
     try { const v = localStorage.getItem("recorder.source"); return v === "screen" || v === "select" ? v : "browser"; } catch { return "browser"; }
   });
@@ -112,8 +112,6 @@ export default function RecorderTab() {
 
   const oldExtension = /版本太旧/.test(error);
 
-  if (editing) return <RecorderEditor id={editing} onClose={() => { setEditing(null); void refresh(); }} />;
-
   return <div className="space-y-6 text-sm">
     <ScreenshotPanel />
     <section className="space-y-3">
@@ -153,7 +151,7 @@ export default function RecorderTab() {
           <div className="flex items-center justify-between gap-3">
             <p className="text-[11px] text-slate-500">{source === "browser"
               ? "密码、手机号、身份证、邮箱、银行卡、密钥在页面上就被模糊，录到的画面里没有明文。录制中不要切换标签页，否则画面会停住。"
-              : `${source === "select" ? "开始后框选一块区域或单击一个窗口。" : "录鼠标所在的那块屏幕。"}桌面软件不能自动打码，录完在「编辑」里框选打码。快捷键 Ctrl+Alt+R 随时开始/停止（可在插件设置里改）。`}</p>
+              : `${source === "select" ? "开始后框选一块区域或单击一个窗口。" : "录鼠标所在的那块屏幕。"}桌面软件不能自动打码，录完可以让拾光或在「编辑」里打码。快捷键 Ctrl+Alt+R 随时开始/停止（可在插件设置里改）。`}</p>
             <button type="button" disabled={busy} onClick={() => void start()} className="shrink-0 rounded-md bg-sky-600 px-3 py-1.5 text-xs text-white hover:bg-sky-500 disabled:opacity-50">开始录制</button>
           </div>
         </div>}
@@ -198,7 +196,7 @@ export default function RecorderTab() {
                   </div>
                 </div>
                 <div className="flex shrink-0 gap-1.5">
-                  <button type="button" disabled={!!exporting || status.id === r.id} onClick={() => setEditing(r.id)} className={btn}>编辑</button>
+                  <button type="button" disabled={!!exporting || status.id === r.id} onClick={() => void ipc.openPluginWindow("recorder", "recorder-editor", `id=${encodeURIComponent(r.id)}`).catch((e) => setError(String(e)))} className={btn}>编辑</button>
                   {isExporting
                     ? <button type="button" onClick={() => void ipc.recorderCancelExport()} className={btn}>取消导出</button>
                     : <button type="button" disabled={!!exporting || status.id === r.id} onClick={() => void exportOne(r.id)} className={btn}>{r.exported ? "重新导出" : "导出 MP4"}</button>}

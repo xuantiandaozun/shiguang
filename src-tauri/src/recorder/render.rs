@@ -1,7 +1,10 @@
-//! 逐帧合成：源画面（打码区域马赛克）→ 镜头变换 → 合成光标与点击波纹 → 原始 RGBA 交给 ffmpeg 编码。
+//! 逐帧合成：源画面（打码区域马赛克）→ 镜头变换 → 合成光标与点击波纹 → 叠加片段 → 字幕 → 原始 RGBA 交给 ffmpeg 编码。
+//! 插入片段的时间窗口里整帧换成片段画面。
 //! 多个 worker 按帧号取模并行渲染，主线程按顺序写给 ffmpeg。
 
 use super::narration::Cue;
+use super::scene::Rendered;
+use super::subtitle::Prepared;
 use super::timeline::Compiled;
 #[cfg(test)]
 use super::timeline::FrameState;
@@ -62,6 +65,10 @@ pub struct Job {
     pub frame_map: Vec<(usize, f64)>,
     /// 画进画面的字幕（输出时间）；空表示不画
     pub cues: Vec<Cue>,
+    /// 字幕样式与字体（cues 非空时需要）
+    pub subtitle: Option<Arc<Prepared>>,
+    /// 渲染好的代码片段（输出时间窗口）
+    pub scenes: Vec<Rendered>,
     /// 混好的配音 WAV
     pub audio: Option<PathBuf>,
     /// 快速预览：编码更快、质量更低
@@ -186,7 +193,8 @@ struct Renderer {
     content: Rect,
     clip: Option<Mask>,
     unit: f32,
-    font: Option<&'static ab_glyph::FontVec>,
+    /// 每个片段最近读入的一帧
+    scene_cache: Vec<Option<(PathBuf, Pixmap)>>,
 }
 
 impl Renderer {
@@ -211,8 +219,7 @@ impl Renderer {
                 (rect, Some(mask))
             }
         };
-        let font = if job.cues.is_empty() { None } else { subtitle_font() };
-        Renderer { cache: None, base, content, clip, unit, font }
+        Renderer { cache: None, base, content, clip, unit, scene_cache: vec![None; job.scenes.len()] }
     }
 
     fn source(&mut self, job: &Job, t: f64) -> Result<&Pixmap> {
@@ -238,8 +245,47 @@ impl Renderer {
         Ok(&self.cache.as_ref().unwrap().1)
     }
 
+    /// 片段的一帧（带透明度的 PNG 转成预乘）
+    fn scene_frame(&mut self, job: &Job, k: usize, t: f64) -> Result<Option<&Pixmap>> {
+        let Some(path) = job.scenes[k].frame_at(t) else { return Ok(None) };
+        if self.scene_cache[k].as_ref().map(|c| &c.0) != Some(path) {
+            let img = image::open(path).with_context(|| format!("读取片段画面 {}", path.display()))?.to_rgba8();
+            let (w, h) = img.dimensions();
+            let mut raw = img.into_raw();
+            for px in raw.chunks_exact_mut(4) {
+                let a = px[3] as u16;
+                if a < 255 {
+                    for c in &mut px[..3] {
+                        *c = ((*c as u16 * a + 127) / 255) as u8;
+                    }
+                }
+            }
+            let pm = Pixmap::from_vec(raw, tiny_skia::IntSize::from_wh(w, h).unwrap()).ok_or_else(|| anyhow!("片段画面尺寸无效"))?;
+            self.scene_cache[k] = Some((path.clone(), pm));
+        }
+        Ok(self.scene_cache[k].as_ref().map(|c| &c.1))
+    }
+
+    fn draw_scene(&mut self, job: &Job, k: usize, t: f64, canvas: &mut Pixmap) -> Result<()> {
+        let (cw, ch) = (canvas.width() as f32, canvas.height() as f32);
+        if let Some(pm) = self.scene_frame(job, k, t)? {
+            let tf = Transform::from_scale(cw / pm.width() as f32, ch / pm.height() as f32);
+            canvas.draw_pixmap(0, 0, pm.as_ref(), &PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() }, tf, None);
+        }
+        Ok(())
+    }
+
     fn render(&mut self, job: &Job, i: usize) -> Result<Vec<u8>> {
         let (si, out_t) = job.frame_map[i];
+        // 插入片段：整帧换成片段画面，再叠加层和字幕
+        if let Some(k) = job.scenes.iter().position(|s| !s.overlay && s.contains(out_t)) {
+            let mut canvas = Pixmap::new(job.width, job.height).expect("画布尺寸有效");
+            canvas.fill(Color::BLACK);
+            self.draw_scene(job, k, out_t, &mut canvas)?;
+            let full = Rect::from_xywh(0.0, 0.0, job.width as f32, job.height as f32).unwrap();
+            self.finish(job, out_t, &mut canvas, full)?;
+            return Ok(canvas.take());
+        }
         let f = job.compiled.frames[si.min(job.compiled.frames.len() - 1)];
         let mut canvas = self.base.clone();
         let content = self.content;
@@ -283,81 +329,21 @@ impl Renderer {
                 draw_cursor(&mut canvas, px, py, size);
             }
         }
-        if let (Some(font), Some(cue)) = (self.font, job.cues.iter().find(|c| out_t >= c.start && out_t < c.end)) {
-            draw_subtitle(&mut canvas, font, &cue.text, content, self.unit);
-        }
+        self.finish(job, out_t, &mut canvas, content)?;
         Ok(canvas.take())
     }
-}
 
-/// 字幕字体：Windows 自带的中文字体，找不到就不画字幕（SRT 仍会生成）
-fn subtitle_font() -> Option<&'static ab_glyph::FontVec> {
-    static FONT: std::sync::OnceLock<Option<ab_glyph::FontVec>> = std::sync::OnceLock::new();
-    FONT.get_or_init(|| {
-        let dir = std::env::var_os("WINDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows")).join("Fonts");
-        ["msyh.ttc", "msyhbd.ttc", "simhei.ttf", "simsun.ttc", "arial.ttf"].iter().find_map(|name| {
-            let bytes = std::fs::read(dir.join(name)).ok()?;
-            ab_glyph::FontVec::try_from_vec_and_index(bytes, 0).ok()
-        })
-    })
-    .as_ref()
-}
-
-/// 底部居中字幕：半透明圆角底 + 白字，按宽度自动换行（最多 2 行）
-fn draw_subtitle(pm: &mut Pixmap, font: &ab_glyph::FontVec, text: &str, content: Rect, unit: f32) {
-    use ab_glyph::{Font, PxScale, ScaleFont};
-    let size = 40.0 * unit;
-    let scaled = font.as_scaled(PxScale::from(size));
-    let max_w = content.width() * 0.82;
-    let mut lines: Vec<(String, f32)> = vec![(String::new(), 0.0)];
-    for c in text.chars() {
-        let adv = scaled.h_advance(font.glyph_id(c));
-        let (line, w) = lines.last_mut().unwrap();
-        if *w + adv > max_w && !line.is_empty() {
-            if lines.len() == 2 {
-                break;
+    /// 叠加片段与字幕
+    fn finish(&mut self, job: &Job, out_t: f64, canvas: &mut Pixmap, content: Rect) -> Result<()> {
+        for k in 0..job.scenes.len() {
+            if job.scenes[k].overlay && job.scenes[k].contains(out_t) {
+                self.draw_scene(job, k, out_t, canvas)?;
             }
-            lines.push((c.to_string(), adv));
-        } else {
-            line.push(c);
-            *w += adv;
         }
-    }
-    let line_h = size * 1.35;
-    let pad = 14.0 * unit;
-    let block_w = lines.iter().map(|l| l.1).fold(0.0, f32::max) + pad * 2.0;
-    let block_h = line_h * lines.len() as f32 + pad;
-    let x0 = content.x() + (content.width() - block_w) / 2.0;
-    let y0 = content.bottom() - block_h - 36.0 * unit;
-    if let Some(bg) = Rect::from_xywh(x0, y0, block_w, block_h).and_then(|r| rounded_rect(r, 10.0 * unit)) {
-        let mut p = Paint::default();
-        p.anti_alias = true;
-        p.set_color_rgba8(0, 0, 0, 150);
-        pm.fill_path(&bg, &p, FillRule::Winding, Transform::identity(), None);
-    }
-    let (w, h) = (pm.width() as i32, pm.height() as i32);
-    let data = pm.data_mut();
-    for (li, (line, lw)) in lines.iter().enumerate() {
-        let mut x = content.x() + (content.width() - lw) / 2.0;
-        let baseline = y0 + pad / 2.0 + line_h * li as f32 + (line_h + scaled.ascent() + scaled.descent()) / 2.0;
-        for c in line.chars() {
-            let id = font.glyph_id(c);
-            let glyph = id.with_scale_and_position(PxScale::from(size), ab_glyph::point(x, baseline));
-            x += scaled.h_advance(id);
-            let Some(outlined) = font.outline_glyph(glyph) else { continue };
-            let b = outlined.px_bounds();
-            outlined.draw(|gx, gy, cov| {
-                let (px, py) = (b.min.x as i32 + gx as i32, b.min.y as i32 + gy as i32);
-                if px < 0 || py < 0 || px >= w || py >= h {
-                    return;
-                }
-                let o = ((py * w + px) * 4) as usize;
-                let a = cov.clamp(0.0, 1.0);
-                for ch in 0..3 {
-                    data[o + ch] = (255.0 * a + data[o + ch] as f32 * (1.0 - a)) as u8;
-                }
-            });
+        if let (Some(sub), Some(cue)) = (&job.subtitle, job.cues.iter().find(|c| out_t >= c.start && out_t < c.end)) {
+            super::subtitle::draw(canvas, sub, &cue.text, out_t - cue.start, cue.end - out_t, content, self.unit);
         }
+        Ok(())
     }
 }
 
@@ -537,16 +523,6 @@ mod tests {
         draw_ripple(&mut pm, 100.0, 100.0, 0.3, 1.0);
         draw_cursor(&mut pm, 100.0, 100.0, 40.0);
         assert!(pm.pixel(102, 110).unwrap().alpha() > 0);
-    }
-
-    #[test]
-    fn subtitle_draws_white_text_when_font_available() {
-        let Some(font) = subtitle_font() else { return };
-        let mut pm = Pixmap::new(640, 360).unwrap();
-        pm.fill(Color::BLACK);
-        draw_subtitle(&mut pm, font, "测试字幕 Subtitle", Rect::from_xywh(0.0, 0.0, 640.0, 360.0).unwrap(), 0.6);
-        let bright = pm.pixels().iter().filter(|p| p.red() > 200).count();
-        assert!(bright > 50, "{bright}");
     }
 
     #[test]

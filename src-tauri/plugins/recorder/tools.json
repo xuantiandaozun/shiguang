@@ -238,7 +238,7 @@
   {
     "name": "record_edit",
     "label": "编辑录屏",
-    "description": "修改录制的时间线，给了哪个字段就整体替换哪个字段（先用 record_timeline 读出现有内容再改）。narration：解说列表，at 为挂在第几秒（一般用步骤或标记的时间），text 为解说词（也用作字幕），audio 为配音文件（相对录制目录如 audio/01.mp3，或绝对路径；没有就只出字幕）。masks：手动打码 [{start,end,rect:[x,y,宽,高]}]，rect 用 0–1 的画面比例。cuts：剪掉的时间段 [{start,end}]。zooms：放大段 [{start,end,scale,focus?:[x,y]}]，传 \"auto\" 恢复自动。burn_subtitles：是否把字幕画进画面。music：背景音乐 {path, volume?(0–1，默认 0.25), duck?(解说时音乐再乘的系数，默认 0.35)}，或直接给路径字符串，null 去掉；从 record_timeline 的 music_library 里挑。tighten：紧凑节奏，导出时自动剪掉画面静止且没有解说的空档。",
+    "description": "修改录制的时间线，给了哪个字段就整体替换哪个字段（先用 record_timeline 读出现有内容再改）。narration：解说列表，at 为挂在第几秒（一般用步骤或标记的时间），text 为解说词（也用作字幕），audio 为配音文件（相对录制目录如 audio/01.mp3，或绝对路径；没有就只出字幕）。masks：手动打码 [{start,end,rect:[x,y,宽,高]}]，rect 用 0–1 的画面比例。cuts：剪掉的时间段 [{start,end}]。zooms：放大段 [{start,end,scale,focus?:[x,y]}]，传 \"auto\" 恢复自动。burn_subtitles：是否把字幕画进画面。music：背景音乐 {path, volume?(0–1，默认 0.25), duck?(解说时音乐再乘的系数，默认 0.35)}，或直接给路径字符串，null 去掉；从 record_timeline 的 music_library 里挑。tighten：紧凑节奏，导出时自动剪掉画面静止且没有解说的空档。subtitle_style：字幕样式，预设名字符串（classic 经典白字黑底 / variety 综艺花字 / minimal 简约描边 / karaoke 卡拉 OK 逐字变色），或对象 {preset, font?, size?, position?, fill?, strokes?, shadow?, highlight?, box_color?, animation?} 在预设上覆盖；null 恢复经典。解说词里用【】括起的词按 highlight 颜色突出（字幕文件里自动去掉括号）。scenes：代码片段列表（整体替换，保留的片段也要带上），每项 {id, kind: insert|overlay, at, duration, template+vars 或 html}：insert 插在源时间 at 处独占画面（片头/章节卡/片尾），原画面在该点暂停；overlay 从 at 起叠在录制画面上（名牌条/标注/贴纸），背景透明。template 用内置模板（record_timeline 的 scene_templates），html 是自己写的完整网页。改过的片段先用 record_scene_preview 看效果。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -321,8 +321,89 @@
         "tighten": {
           "type": "boolean",
           "description": "紧凑节奏（自动剪掉静止空档）"
+        },
+        "subtitle_style": {
+          "description": "字幕样式：预设名字符串，或 {preset, font, size(字号倍数), position(bottom|top|center), fill([颜色]，2 个以上为上下渐变), strokes([{width, color}] 从外到内), shadow({dx, dy, color}), highlight([颜色]), box_color(底框，空字符串不要), animation(pop|fade|slide|typewriter|karaoke|none)}；颜色写 #RRGGBB 或 #RRGGBBAA；null 恢复经典"
+        },
+        "scenes": {
+          "type": "array",
+          "description": "代码片段（整体替换）",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "字母、数字、- _，如 intro、ch2、tag1"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "insert",
+                  "overlay"
+                ],
+                "description": "insert 插入独占画面；overlay 叠加（透明背景）。用模板时可省略"
+              },
+              "at": {
+                "type": "number",
+                "description": "源时间（秒）：insert 插在这里；overlay 从这里开始。片头用 0，片尾用录制时长"
+              },
+              "duration": {
+                "type": "number",
+                "description": "时长（秒），片头 3–5、章节卡 2–3、叠加 2–5"
+              },
+              "title": {
+                "type": "string",
+                "description": "给人看的名字"
+              },
+              "template": {
+                "type": "string",
+                "description": "内置模板：title、chapter、bullets、ending、code、lower_third、callout、sticker"
+              },
+              "vars": {
+                "type": "object",
+                "description": "模板参数，见 record_timeline 的 scene_templates[].vars；颜色 #RRGGBB；callout/sticker 的 x,y 为 0–1 画面比例"
+              },
+              "html": {
+                "type": "string",
+                "description": "自己写的完整网页（不用模板时）。画布宽 1920 CSS px、高按画面比例（一般 1080）；用 CSS 动画或 window.renderFrame(t秒)；overlay 页面背景要透明"
+              }
+            },
+            "required": [
+              "id",
+              "at",
+              "duration"
+            ]
+          }
         }
       }
+    }
+  },
+  {
+    "name": "record_scene_preview",
+    "label": "预览代码片段",
+    "description": "把一个代码片段在几个时间点渲染成截图，拼成一张图返回路径（用 read_image 看）。用 record_edit 加或改了片段后先看一遍效果再导出。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "录制 id，默认最近一次"
+        },
+        "scene": {
+          "type": "string",
+          "description": "片段 id"
+        },
+        "times": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "截图的时间点（片段内的秒数，最多 6 个），默认开头、1/3、2/3、结尾"
+        }
+      },
+      "required": [
+        "scene"
+      ]
     }
   }
 ]

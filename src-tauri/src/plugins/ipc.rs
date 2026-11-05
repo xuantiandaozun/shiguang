@@ -108,7 +108,8 @@ pub async fn plugin_call_tool(app: AppHandle, plugin_id: String, tool: String, a
 
 /// 打开插件声明的独立窗口（ui.windows 里的 route）。普通系统标题栏，便于用户关闭。
 #[tauri::command]
-pub fn open_plugin_window(app: AppHandle, plugin_id: String, route: String, query: Option<String>) -> Result<(), String> {
+/// 必须是 async：同步命令跑在主线程上，在里面建 WebView 窗口会卡住（窗口出来了但页面不加载）。
+pub async fn open_plugin_window(app: AppHandle, plugin_id: String, route: String, query: Option<String>) -> Result<(), String> {
     let snapshot = super::snapshot();
     let plugin = snapshot.plugin(&plugin_id).filter(|p| p.enabled).ok_or("插件不存在或未启用")?;
     let item = plugin
@@ -119,7 +120,14 @@ pub fn open_plugin_window(app: AppHandle, plugin_id: String, route: String, quer
         .and_then(|items| items.iter().find(|w| w.get("route").and_then(Value::as_str) == Some(route.as_str())))
         .ok_or_else(|| format!("插件 {plugin_id} 没有窗口 {route}"))?;
     let safe: String = route.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
-    let label = format!("plugin-{}-{safe}", plugin_id.replace('_', "-"));
+    let mut label = format!("plugin-{}-{safe}", plugin_id.replace('_', "-"));
+    // multi: 每个不同的 query 一个窗口（比如每份录屏一个编辑窗口）
+    if item.get("multi").and_then(Value::as_bool) == Some(true) {
+        let key: String = query.as_deref().unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(48).collect();
+        if !key.is_empty() {
+            label = format!("{label}-{key}");
+        }
+    }
     if let Some(window) = app.get_webview_window(&label) {
         let _ = window.show();
         let _ = window.unminimize();

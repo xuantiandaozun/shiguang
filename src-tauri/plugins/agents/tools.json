@@ -2,7 +2,7 @@
   {
     "name": "delegate_to_agent",
     "label": "外派编码任务",
-    "description": "把工作区里的代码修改外派给 Claude Code 或 Codex（用户自己的订阅）。适合多文件改动、需要读懂项目再动手的任务；查数据、浏览器、跑 CLI、一两行小改仍自己做。task 写清目标、范围、背景和不要做的事；acceptance 写可核对的验收标准。智能体不能提交/推送，过程中会通过你回问（status=asking），你回答后它继续。默认挂起等到它提问或本轮结束。",
+    "description": "把工作区里的代码修改外派给 Claude Code、Codex、Cursor CLI 或 Pi（用户自己的订阅）。适合多文件改动、需要读懂项目再动手的任务；查数据、浏览器、跑 CLI、一两行小改仍自己做。task 写清目标、范围、背景和不要做的事；acceptance 写可核对的验收标准。智能体不能提交/推送，过程中会通过你回问（status=asking），你回答后它继续。默认挂起等到它提问或本轮结束。",
     "parameters": {
       "properties": {
         "acceptance": {
@@ -10,11 +10,13 @@
           "type": "string"
         },
         "agent": {
-          "description": "默认 auto：工作区默认 → Claude Code → Codex",
+          "description": "默认 auto：工作区默认 → Claude Code → Codex → Cursor → Pi。Cursor 和 Pi 不能中途回问你，有疑问会写在本轮总结里",
           "enum": [
             "auto",
             "claude_code",
-            "codex"
+            "codex",
+            "cursor",
+            "pi"
           ],
           "type": "string"
         },

@@ -2,6 +2,8 @@
 //! 时间都是源时间（相对第一帧的秒数），坐标都是归一化坐标。
 
 use super::narration::{Narration, AUDIO_EXT};
+use super::scene::Scene;
+use super::subtitle::SubtitleStyle;
 use super::render::MaskRegion;
 use super::timeline::ZoomSegment;
 use anyhow::{bail, Result};
@@ -66,6 +68,12 @@ pub struct TimelineDoc {
     /// 紧凑节奏：导出时自动剪掉画面静止且没有解说的空档；None 用插件设置
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tighten: Option<bool>,
+    /// 字幕样式；None 为经典白字黑底
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle_style: Option<SubtitleStyle>,
+    /// 代码片段（插入的片头/章节卡，或叠加的角标/贴纸）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scenes: Vec<Scene>,
 }
 
 pub fn load(dir: &Path) -> TimelineDoc {
@@ -154,6 +162,30 @@ pub fn normalize(doc: &mut TimelineDoc, duration: f64, dir: &Path) -> Result<()>
         }
     }
     doc.narration.sort_by(|a, b| a.at.total_cmp(&b.at));
+    if let Some(st) = &doc.subtitle_style {
+        st.resolve()?;
+    }
+    let mut ids = std::collections::HashSet::new();
+    for sc in &mut doc.scenes {
+        if !super::scene::valid_id(&sc.id) {
+            bail!("片段 id 只能用字母、数字、- 和 _（现在是 {}）", sc.id);
+        }
+        if !ids.insert(sc.id.clone()) {
+            bail!("片段 id 重复：{}", sc.id);
+        }
+        if !matches!(sc.kind.as_str(), "insert" | "overlay") {
+            bail!("片段 {} 的 kind 只能是 insert（插在中间、独占画面）或 overlay（叠在录制画面上）", sc.id);
+        }
+        sc.at = clamp_t(sc.at);
+        if !(0.3..=120.0).contains(&sc.duration) {
+            bail!("片段 {} 的时长要在 0.3–120 秒之间", sc.id);
+        }
+        let path = dir.join(&sc.file);
+        if !path.is_file() {
+            bail!("片段 {} 的网页文件不存在：{}", sc.id, path.display());
+        }
+    }
+    doc.scenes.sort_by(|a, b| a.at.total_cmp(&b.at));
     if let Some(m) = doc.music.as_mut() {
         m.path = m.path.trim().trim_matches('"').to_string();
         let path = super::narration::resolve_audio(dir, &m.path);
@@ -212,6 +244,19 @@ pub fn apply_patch(doc: &mut TimelineDoc, args: &Value) -> Result<Vec<&'static s
     if let Some(v) = args.get("tighten") {
         doc.tighten = v.as_bool();
         changed.push("tighten");
+    }
+    // subtitle_style：预设名字符串或对象；null 恢复经典
+    if let Some(v) = args.get("subtitle_style") {
+        doc.subtitle_style = match v {
+            Value::Null => None,
+            Value::String(p) => Some(SubtitleStyle { preset: p.clone(), ..Default::default() }),
+            other => Some(serde_json::from_value(other.clone()).map_err(|e| anyhow::anyhow!("subtitle_style 格式不对：{e}"))?),
+        };
+        changed.push("subtitle_style");
+    }
+    if let Some(v) = parse("scenes")? {
+        doc.scenes = serde_json::from_value(v).map_err(|e| anyhow::anyhow!("scenes 格式不对：{e}"))?;
+        changed.push("scenes");
     }
     // 显式传 null 表示恢复「按插件设置」
     if let Some(v) = args.get("burn_subtitles") {

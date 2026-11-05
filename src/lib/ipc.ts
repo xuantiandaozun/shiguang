@@ -180,7 +180,7 @@ export interface WorkspaceData {
   links?: (WorkspaceLink | string)[];
   rules?: string[];
   notes?: string[];
-  default_agent?: "claude_code" | "codex" | "";
+  default_agent?: CodeAgentKind | "";
   agent_mode?: "plan" | "edit" | "full" | "";
 }
 export interface Workspace {
@@ -192,8 +192,10 @@ export interface Workspace {
   created_at: string;
   updated_at: string;
 }
+export type CodeAgentKind = "claude_code" | "codex" | "cursor" | "pi";
+export const CODE_AGENT_LABELS: Record<CodeAgentKind, string> = { claude_code: "Claude Code", codex: "Codex", cursor: "Cursor", pi: "Pi" };
 export interface CodeAgentInfo {
-  kind: "claude_code" | "codex";
+  kind: CodeAgentKind;
   label: string;
   path: string | null;
   version: string | null;
@@ -204,7 +206,7 @@ export interface CodeAgentInfo {
 export type AgentRunStatus = "running" | "asking" | "idle" | "error" | "cancelled" | "closed";
 export interface AgentRun {
   id: string;
-  agent: "claude_code" | "codex";
+  agent: CodeAgentKind;
   workspace_id: number | null;
   session_id: number;
   title: string;
@@ -693,7 +695,7 @@ export interface Recording {
 /** 录制来源：browser 网页标签页；screen 整块屏幕；select 让用户框选区域或点选窗口；window 按名称找窗口 */
 export interface RecorderStartOpts { source?: "browser" | "screen" | "window" | "region" | "select"; window?: string; monitor?: number; include_self?: boolean }
 export interface RecorderExportOpts { zoom?: boolean; style?: "plain" | "padded"; zoom_scale?: number; cursor_scale?: number; fps?: number; preview?: boolean; burn_subtitles?: boolean; tighten?: boolean }
-export interface RecorderExportProgress { id: string; phase: "ffmpeg" | "audio" | "render" | "done"; done?: number; total?: number; ok?: boolean }
+export interface RecorderExportProgress { id: string; phase: "ffmpeg" | "audio" | "font" | "scene" | "render" | "done"; done?: number; total?: number; ok?: boolean; scene?: number; scenes?: number; font?: string }
 export interface ScreenshotResult { path: string; width: number; height: number; copied: boolean }
 export interface ScreenWindow { hwnd: number; pid: number; title: string; process: string; rect: [number, number, number, number]; minimized: boolean }
 export interface ZoomSeg { start: number; end: number; scale: number; focus?: [number, number] }
@@ -701,9 +703,12 @@ export interface MaskSeg { start: number; end: number; rect: [number, number, nu
 export interface CutSeg { start: number; end: number }
 export interface NarrationItem { at: number; text: string; audio?: string }
 export interface MusicTrack { path: string; volume: number; duck: number; fade_in: number; fade_out: number }
+export interface SubtitleStyle { preset?: string; [k: string]: unknown }
+export interface SceneItem { id: string; kind: "insert" | "overlay"; at: number; duration: number; file: string; title?: string; template?: string; vars?: Record<string, unknown> }
 export interface TimelineDoc {
   zooms_edited: boolean; zooms: ZoomSeg[]; masks: MaskSeg[]; cuts: CutSeg[]; narration: NarrationItem[]; burn_subtitles?: boolean | null;
   music?: MusicTrack | null; tighten?: boolean | null;
+  subtitle_style?: SubtitleStyle | null; scenes?: SceneItem[];
 }
 export interface RecorderProject {
   meta: { id: string; title: string; width: number; height: number };
@@ -717,6 +722,8 @@ export interface RecorderProject {
   tighten_default: boolean;
   music_library: string[];
   music_dir: string;
+  subtitle_presets?: { id: string; label: string }[];
+  scene_templates?: { id: string; label: string; overlay: boolean }[];
 }
 
 export function onEvent<T>(name: string, cb: (payload: T) => void): Promise<() => void> {

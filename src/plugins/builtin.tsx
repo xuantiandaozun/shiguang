@@ -15,6 +15,7 @@ import ServersTab from "../components/ServersTab";
 import DelegationsTab from "../components/DelegationsTab";
 import WorkspacesTab from "../components/WorkspacesTab";
 import RecorderTab from "../components/RecorderTab";
+import RecorderEditor from "../components/RecorderEditor";
 import SkillsTab from "../components/SkillsTab";
 import UsageTab from "../components/UsageTab";
 import SettingsTab from "../components/SettingsTab";
@@ -39,6 +40,7 @@ const table = (): Record<string, React.ComponentType> => ({
   DelegationsTab,
   WorkspacesTab,
   RecorderTab,
+  RecorderEditor,
   SkillsTab,
   UsageTab,
   SettingsTab,

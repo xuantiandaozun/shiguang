@@ -30,6 +30,8 @@ pub fn label(kind: &str) -> &'static str {
     match kind {
         "claude_code" => "Claude Code",
         "codex" => "Codex",
+        "cursor" => "Cursor",
+        "pi" => "Pi",
         _ => "智能体",
     }
 }
@@ -37,8 +39,16 @@ pub fn label(kind: &str) -> &'static str {
 fn binary(kind: &str) -> &'static str {
     match kind {
         "claude_code" => "claude",
+        "cursor" => "cursor-agent",
+        "pi" => "pi",
         _ => "codex",
     }
+}
+
+/// 能通过 shiguang-mcp 中途回问拾光（ask_main / report_checkpoint）。Cursor、Pi 的 MCP 只认它们自己的配置文件，
+/// 不改用户的全局配置，所以它们有疑问时写在本轮总结里，由拾光下一轮回答。
+fn can_ask(kind: &str) -> bool {
+    matches!(kind, "claude_code" | "codex")
 }
 
 // ---------- 探测与配置 ----------
@@ -59,6 +69,7 @@ struct Launcher {
     program: PathBuf,
     prefix: Vec<String>,
     display: String,
+    env: Vec<(String, String)>,
 }
 
 fn config(db: &crate::db::Db) -> Value {
@@ -93,16 +104,103 @@ fn launcher(db: &crate::db::Db, kind: &str) -> Option<Launcher> {
     }
     let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     if ext == "cmd" || ext == "bat" {
-        let text = std::fs::read_to_string(&path).ok()?;
         let dir = path.parent()?;
+        if let Some(l) = cursor_launcher(dir, &resolved) {
+            return Some(l);
+        }
+        let text = std::fs::read_to_string(&path).ok()?;
         let entry = dir.join(adapters::npm_shim_entry(&text)?);
         let node = if dir.join("node.exe").is_file() { dir.join("node.exe") } else { PathBuf::from(crate::tasks::resolve_program("node")) };
         if !entry.is_file() || !node.is_file() {
             return None;
         }
-        return Some(Launcher { program: node, prefix: vec![entry.to_string_lossy().to_string()], display: resolved });
+        return Some(Launcher { program: node, prefix: vec![entry.to_string_lossy().to_string()], display: resolved, env: Vec::new() });
     }
-    Some(Launcher { program: path, prefix: Vec::new(), display: resolved })
+    Some(Launcher { program: path, prefix: Vec::new(), display: resolved, env: Vec::new() })
+}
+
+/// Cursor CLI 在 Windows 上是 .cmd → PowerShell 脚本 → versions/<最新>/node.exe index.js。
+/// 直接起最新版本的 node，避免参数经 cmd/PowerShell 两层转义。
+fn cursor_launcher(dir: &Path, display: &str) -> Option<Launcher> {
+    let versions = dir.join("versions");
+    if !versions.is_dir() {
+        return None;
+    }
+    // 版本目录名 YYYY.MM.DD[-HH-MM-SS]-commit，按日期（和可选时间）比较
+    let key = |name: &str| -> Option<(u32, u32, u32, String)> {
+        let (date, rest) = name.split_once('-')?;
+        let mut p = date.split('.').map(|x| x.parse::<u32>().ok());
+        let (y, m, d) = (p.next()??, p.next()??, p.next()??);
+        let time: String = rest.split('-').take_while(|s| s.len() == 2 && s.chars().all(|c| c.is_ascii_digit())).collect();
+        Some((y, m, d, time))
+    };
+    let best = std::fs::read_dir(&versions)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().join("node.exe").is_file() && e.path().join("index.js").is_file())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            key(&name).map(|k| (k, e.path()))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))?
+        .1;
+    Some(Launcher {
+        program: best.join("node.exe"),
+        prefix: vec![best.join("index.js").to_string_lossy().to_string()],
+        display: display.to_string(),
+        env: vec![("CURSOR_INVOKED_AS".into(), "cursor-agent".into())],
+    })
+}
+
+/// 拾光从桌面启动时通常没有 HTTPS_PROXY 等环境变量（用户只在终端里设了），而智能体 CLI 不一定读系统代理：
+/// Codex 的 WebSocket 就会一直超时重连。没设时把 Windows 系统代理传给子进程。
+/// 本进程没有代理环境变量时的 Windows 系统代理 URL（下载字体等也用）
+pub(crate) fn fallback_proxy() -> Option<String> {
+    let has = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"].iter().any(|k| std::env::var_os(k).is_some());
+    if has {
+        return None;
+    }
+    adapters::proxy_url(&system_proxy()?)
+}
+
+fn proxy_env() -> Vec<(String, String)> {
+    match fallback_proxy() {
+        Some(u) => ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"]
+            .iter()
+            .map(|k| (k.to_string(), u.clone()))
+            .chain([("NO_PROXY".to_string(), "localhost,127.0.0.1,::1".to_string())])
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+#[cfg(windows)]
+fn system_proxy() -> Option<String> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RRF_RT_REG_SZ};
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let key = wide(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings");
+    unsafe {
+        let mut enabled: u32 = 0;
+        let mut size = 4u32;
+        let name = wide("ProxyEnable");
+        if RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), RRF_RT_REG_DWORD, std::ptr::null_mut(), &mut enabled as *mut u32 as *mut _, &mut size) != 0 || enabled == 0 {
+            return None;
+        }
+        let name = wide("ProxyServer");
+        let mut buf = vec![0u16; 1024];
+        let mut size = (buf.len() * 2) as u32;
+        if RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr() as *mut _, &mut size) != 0 {
+            return None;
+        }
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        let s = String::from_utf16_lossy(&buf[..len]).trim().to_string();
+        (!s.is_empty()).then_some(s)
+    }
+}
+
+#[cfg(not(windows))]
+fn system_proxy() -> Option<String> {
+    None
 }
 
 static VERSIONS: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
@@ -110,6 +208,8 @@ static VERSIONS: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(Non
 fn command(l: &Launcher) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(&l.program);
     cmd.args(&l.prefix);
+    cmd.envs(l.env.iter().cloned());
+    cmd.envs(proxy_env());
     #[cfg(windows)]
     cmd.creation_flags(crate::tasks::CREATE_NO_WINDOW);
     cmd
@@ -275,16 +375,21 @@ fn work_root(run: &AgentRunRow) -> PathBuf {
 
 // ---------- 开始外派 ----------
 
-fn contract(run_id: &str, ws: Option<&crate::db::WorkspaceRow>, root: &Path, mode: &str) -> String {
+fn contract(run_id: &str, ws: Option<&crate::db::WorkspaceRow>, root: &Path, mode: &str, agent: &str) -> String {
     let mut lines = vec![
         format!("你是被「拾光」（用户的桌面助手）外派来的编码智能体，外派编号 {run_id}。工作目录：{}", root.display()),
         "规则：".into(),
         "1. 只做下面交代的任务，不顺手改无关的东西。".into(),
         "2. 不要 git commit / push / reset / stash，也不要丢弃已有改动；提交由拾光在用户确认后执行。".into(),
-        "3. 需求不清、需要扩大改动范围、要动线上数据、要装新依赖、或者需要线上/浏览器实测结果时，调用 MCP 工具 ask_main 提问并等回答，不要猜。".into(),
-        "4. 任务里约定了关键节点的，到了就调用 report_checkpoint 汇报并等回复。".into(),
-        "5. 结束时用中文简短总结：改了哪些文件、为什么、怎么验证的、还有什么风险或没做完的。".into(),
     ];
+    if can_ask(agent) {
+        lines.push("3. 需求不清、需要扩大改动范围、要动线上数据、要装新依赖、或者需要线上/浏览器实测结果时，调用 MCP 工具 ask_main 提问并等回答，不要猜。".into());
+        lines.push("4. 任务里约定了关键节点的，到了就调用 report_checkpoint 汇报并等回复。".into());
+    } else {
+        lines.push("3. 需求不清、需要扩大改动范围、要动线上数据、要装新依赖、或者需要线上/浏览器实测结果时，先停下，把问题写在本轮回复的最后（以「需要确认：」开头），不要猜。拾光会在同一会话的下一条消息里回答。".into());
+        lines.push("4. 任务里约定了关键节点的，到了就停下汇报，等拾光回复再继续。".into());
+    }
+    lines.push("5. 结束时用中文简短总结：改了哪些文件、为什么、怎么验证的、还有什么风险或没做完的。".into());
     if mode == "plan" {
         lines.push("6. 本次是只读方案模式：只分析并给出修改方案，不要改文件。".into());
     }
@@ -317,7 +422,7 @@ fn pick_agent(app: &AppHandle, requested: Option<&str>, ws: Option<&crate::db::W
     let usable = |k: &str| enabled(db, k) && launcher(db, k).is_some();
     if let Some(k) = requested.filter(|s| !s.is_empty() && *s != "auto") {
         if !KINDS.contains(&k) {
-            bail!("agent 只能是 claude_code 或 codex");
+            bail!("agent 只能是 claude_code、codex、cursor 或 pi");
         }
         if !usable(k) {
             bail!("{} 不可用：未安装、未在 PATH 中或已在工作区页停用", label(k));
@@ -327,7 +432,7 @@ fn pick_agent(app: &AppHandle, requested: Option<&str>, ws: Option<&crate::db::W
     if let Some(k) = ws.map(|w| crate::workspaces::text(w, "default_agent")).filter(|k| !k.is_empty() && usable(k)) {
         return Ok(k.into());
     }
-    KINDS.iter().find(|k| usable(k)).map(|k| k.to_string()).ok_or_else(|| anyhow!("没有可用的编码智能体（需要安装 Claude Code 或 Codex CLI）"))
+    KINDS.iter().find(|k| usable(k)).map(|k| k.to_string()).ok_or_else(|| anyhow!("没有可用的编码智能体（需要安装 Claude Code、Codex、Cursor CLI 或 Pi 之一）"))
 }
 
 pub async fn start(app: &AppHandle, args: &Value, session_id: i64) -> Result<Value> {
@@ -399,7 +504,7 @@ pub async fn start(app: &AppHandle, args: &Value, session_id: i64) -> Result<Val
     if let Some(w) = &ws {
         let _ = db.workspace_touch(w.id);
     }
-    let mut message = contract(&id, ws.as_ref(), &effective_root, &mode);
+    let mut message = contract(&id, ws.as_ref(), &effective_root, &mode, &agent);
     message.push_str(&format!("\n\n## 任务\n{task}"));
     if !acceptance.is_empty() {
         message.push_str(&format!("\n\n## 验收标准\n{acceptance}"));
@@ -427,7 +532,7 @@ async fn send_turn(app: &AppHandle, id: &str, message: &str) -> Result<()> {
     })?;
     match run.agent.as_str() {
         "claude_code" => claude_turn(app, &run, message).await,
-        _ => codex_turn(app, &run, message).await,
+        _ => oneshot_turn(app, &run, message).await,
     }
 }
 
@@ -471,26 +576,37 @@ async fn claude_turn(app: &AppHandle, run: &AgentRunRow, message: &str) -> Resul
         inner.generation += 1;
         inner.generation
     };
-    tauri::async_runtime::spawn(supervise(app.clone(), run.id.clone(), child, cancel, generation, true));
+    tauri::async_runtime::spawn(supervise(app.clone(), run.id.clone(), child, cancel, generation, run.agent.clone()));
     Ok(())
 }
 
-async fn codex_turn(app: &AppHandle, run: &AgentRunRow, message: &str) -> Result<()> {
+/// Codex / Cursor / Pi：每轮起一个进程，跑完退出；续接靠各自的会话 id。
+async fn oneshot_turn(app: &AppHandle, run: &AgentRunRow, message: &str) -> Result<()> {
     let h = handle(app, &run.id);
     let db = &app.state::<crate::AppState>().db;
-    let l = launcher(db, "codex").ok_or_else(|| anyhow!("找不到 Codex（codex 命令）"))?;
+    let kind = run.agent.as_str();
+    let name = label(kind);
+    let l = launcher(db, kind).ok_or_else(|| anyhow!("找不到 {name}（{} 命令）", binary(kind)))?;
     let resume = run.data.get("external_session").and_then(Value::as_str);
+    // (参数, 从 stdin 传的正文)
+    let (args, stdin_text) = match kind {
+        "cursor" => (adapters::cursor_args(&run.mode, resume, message), None),
+        "pi" => (adapters::pi_args(&run.mode, &run.id), Some(message)),
+        _ => (adapters::codex_args(&run.mode, resume, &mcp_exe()?, &run.id, &data_dir(app)), Some(message)),
+    };
     let mut cmd = command(&l);
-    cmd.args(adapters::codex_args(&run.mode, resume, &mcp_exe()?, &run.id, &data_dir(app)))
+    cmd.args(args)
         .current_dir(work_root(run))
-        .stdin(Stdio::piped())
+        .stdin(if stdin_text.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| anyhow!("启动 Codex 失败：{e}"))?;
-    let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("无法写入 Codex"))?;
-    stdin.write_all(message.as_bytes()).await?;
-    drop(stdin);
+    let mut child = cmd.spawn().map_err(|e| anyhow!("启动 {name} 失败：{e}"))?;
+    if let Some(text) = stdin_text {
+        let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("无法写入 {name}"))?;
+        stdin.write_all(text.as_bytes()).await?;
+        drop(stdin);
+    }
     let cancel = CancellationToken::new();
     let generation = {
         let mut inner = h.inner.lock().unwrap();
@@ -498,11 +614,12 @@ async fn codex_turn(app: &AppHandle, run: &AgentRunRow, message: &str) -> Result
         inner.generation += 1;
         inner.generation
     };
-    tauri::async_runtime::spawn(supervise(app.clone(), run.id.clone(), child, cancel, generation, false));
+    tauri::async_runtime::spawn(supervise(app.clone(), run.id.clone(), child, cancel, generation, run.agent.clone()));
     Ok(())
 }
 
-async fn supervise(app: AppHandle, id: String, mut child: tokio::process::Child, cancel: CancellationToken, generation: u64, claude: bool) {
+async fn supervise(app: AppHandle, id: String, mut child: tokio::process::Child, cancel: CancellationToken, generation: u64, kind: String) {
+    let claude = kind == "claude_code";
     let stderr_tail = Arc::new(Mutex::new(String::new()));
     if let Some(stderr) = child.stderr.take() {
         let tail = stderr_tail.clone();
@@ -529,9 +646,14 @@ async fn supervise(app: AppHandle, id: String, mut child: tokio::process::Child,
                 }
                 line = lines.next_line() => match line {
                     Ok(Some(line)) => {
-                        let parsed = if claude { adapters::parse_claude(&line) } else { adapters::parse_codex(&line) };
+                        let parsed = match kind.as_str() {
+                            "claude_code" => adapters::parse_claude(&line),
+                            "cursor" => adapters::parse_cursor(&line),
+                            "pi" => adapters::parse_pi(&line),
+                            _ => adapters::parse_codex(&line),
+                        };
                         for p in parsed {
-                            on_parsed(&app, &id, p, generation).await;
+                            on_parsed(&app, &id, p, generation, claude).await;
                         }
                     }
                     _ => break,
@@ -574,7 +696,8 @@ async fn supervise(app: AppHandle, id: String, mut child: tokio::process::Child,
     notify_background(&app, &id);
 }
 
-async fn on_parsed(app: &AppHandle, id: &str, p: Parsed, generation: u64) {
+/// persistent：Claude 进程常驻，一轮结束看 result 事件；其余每轮一进程，正常退出才算一轮结束。
+async fn on_parsed(app: &AppHandle, id: &str, p: Parsed, generation: u64, persistent: bool) {
     match p {
         Parsed::Session(s) => {
             let _ = update(app, id, |r| {
@@ -594,6 +717,7 @@ async fn on_parsed(app: &AppHandle, id: &str, p: Parsed, generation: u64) {
             }
         }
         Parsed::ToolFailed(detail) => event(app, id, "tool_error", &detail),
+        Parsed::Notice(msg) => event(app, id, "notice", &msg),
         Parsed::Error(msg) => {
             event(app, id, "error", &msg);
             let _ = update(app, id, |r| r.data["last_error"] = json!(msg));
@@ -610,7 +734,7 @@ async fn on_parsed(app: &AppHandle, id: &str, p: Parsed, generation: u64) {
                     r.data["error"] = json!(clip(&reason, 1500));
                 });
                 notify_background(app, id);
-            } else {
+            } else if persistent {
                 finish_turn(app, id).await;
                 schedule_idle_close(app.clone(), id.to_string(), generation);
             }

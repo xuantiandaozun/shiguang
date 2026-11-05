@@ -1,0 +1,29 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden}
+body{background:radial-gradient(circle at 50% 40%,{{color1|#3a3d98}},{{color2|#111226}});color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:"Microsoft YaHei",sans-serif}
+.t{font-family:"ZCOOL KuaiLe","ZCOOL QingKe HuangYou","Microsoft YaHei",sans-serif;font-size:130px;opacity:0;animation:zoom .8s cubic-bezier(.34,1.56,.64,1) .1s forwards;text-shadow:0 12px 40px rgba(0,0,0,.35)}
+.s{margin-top:34px;font-size:48px;opacity:0;animation:fade .6s ease-out .7s forwards}
+.l{margin-top:50px;font-size:40px;padding:18px 44px;border-radius:999px;background:rgba(255,255,255,.14);border:2px solid rgba(255,255,255,.35);opacity:0;animation:fade .6s ease-out 1.1s forwards}
+.l:empty{display:none}
+.star{position:absolute;width:10px;height:10px;border-radius:50%;background:#fff;opacity:.0;animation:tw 1.6s ease-in-out infinite}
+@keyframes zoom{from{opacity:0;transform:scale(.4)}to{opacity:1;transform:none}}
+@keyframes fade{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
+@keyframes tw{50%{opacity:.8}}
+</style></head><body>
+<div class="t">{{title|感谢观看}}</div>
+<div class="s">{{subtitle}}</div>
+<div class="l">{{link}}</div>
+<script>
+for (let i = 0; i < 28; i++) {
+  const s = document.createElement('div');
+  s.className = 'star';
+  // 固定的伪随机，保证每次渲染一致
+  const r = (n) => ((Math.sin(i * 12.9898 + n * 78.233) * 43758.5453) % 1 + 1) % 1;
+  s.style.left = (r(1) * 100) + '%';
+  s.style.top = (r(2) * 100) + '%';
+  s.style.animationDelay = (r(3) * 1.6) + 's';
+  document.body.appendChild(s);
+}
+</script>
+</body></html>

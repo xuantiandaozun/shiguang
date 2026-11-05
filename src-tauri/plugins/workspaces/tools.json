@@ -74,7 +74,9 @@
           "description": "默认外派给谁",
           "enum": [
             "claude_code",
-            "codex"
+            "codex",
+            "cursor",
+            "pi"
           ],
           "type": "string"
         },

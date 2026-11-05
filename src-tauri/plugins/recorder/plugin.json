@@ -2,7 +2,7 @@
   "id": "recorder",
   "name": "录屏与截图",
   "version": "1.0.0",
-  "description": "操作录屏与截图：录网页操作（自动放大、平滑光标、源头打码、时间线编辑、配音字幕）；框选/窗口/全屏截图，全局快捷键。",
+  "description": "操作录屏与截图：录网页操作（自动放大、平滑光标、源头打码、时间线编辑、配音、综艺字幕、代码生成的片头/标题卡/叠加贴纸）；框选/窗口/全屏截图，全局快捷键。",
   "order": 75,
   "tools": [
     "tools.json"
@@ -22,12 +22,21 @@
         "record_timeline",
         "record_edit",
         "record_export",
-        "record_delete"
+        "record_delete",
+        "record_scene_preview"
       ]
     }
   },
   "assets": {
-    "page_recorder": "assets/page-recorder.js"
+    "page_recorder": "assets/page-recorder.js",
+    "scene_title": "assets/scenes/title.html",
+    "scene_chapter": "assets/scenes/chapter.html",
+    "scene_bullets": "assets/scenes/bullets.html",
+    "scene_ending": "assets/scenes/ending.html",
+    "scene_code": "assets/scenes/code.html",
+    "scene_lower_third": "assets/scenes/lower_third.html",
+    "scene_callout": "assets/scenes/callout.html",
+    "scene_sticker": "assets/scenes/sticker.html"
   },
   "settings": "settings.schema.json",
   "skills": "skills",
@@ -39,6 +48,16 @@
         "icon": "video",
         "order": 35,
         "component": "builtin:RecorderTab"
+      }
+    ],
+    "windows": [
+      {
+        "route": "recorder-editor",
+        "title": "录屏编辑",
+        "component": "builtin:RecorderEditor",
+        "width": 1080,
+        "height": 800,
+        "multi": true
       }
     ]
   }

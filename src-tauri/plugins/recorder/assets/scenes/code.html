@@ -1,0 +1,43 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden}
+body{background:linear-gradient(135deg,#1d2b64,#0b1020);display:flex;align-items:center;justify-content:center;font-family:"Microsoft YaHei",sans-serif}
+.win{width:1500px;max-height:86vh;border-radius:22px;background:#1e1e2e;box-shadow:0 40px 120px rgba(0,0,0,.5);overflow:hidden}
+.bar{height:64px;display:flex;align-items:center;padding:0 26px;background:#181825;color:#a6adc8;font-size:26px}
+.bar i{width:18px;height:18px;border-radius:50%;margin-right:12px;display:inline-block}
+.bar span{margin-left:18px}
+pre{margin:0;padding:40px 50px;font:34px/1.55 "Cascadia Code",Consolas,monospace;color:#cdd6f4;white-space:pre-wrap;word-break:break-all}
+.cur{display:inline-block;width:18px;height:40px;background:#f5c2e7;vertical-align:-6px}
+.k{color:#cba6f7}.s{color:#a6e3a1}.c{color:#6c7086}.n{color:#fab387}
+</style></head><body>
+<div class="win">
+  <div class="bar"><i style="background:#f38ba8"></i><i style="background:#f9e2af"></i><i style="background:#a6e3a1"></i><span>{{title|main}}{{lang|}}</span></div>
+  <pre id="code"></pre>
+</div>
+<script>
+const code = {{{code}}};
+const el = document.getElementById('code');
+const speed = Math.max(24, code.length / 3.5); // 每秒打几个字，最长约 3.5 秒打完
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+// 简单高亮（一次扫描，避免规则互相匹配到已插入的标签）：注释、字符串、关键字、数字
+const re = /(\/\/[^\n]*|#[^\n]*)|("(?:[^"\\\n]|\\.)*"?|'(?:[^'\\\n]|\\.)*'?|`[^`]*`?)|\b(const|let|var|function|return|if|else|for|while|import|from|export|class|async|await|def|fn|pub|use|struct|impl|new)\b|\b(\d+(?:\.\d+)?)\b/g;
+const hl = (s) => {
+  let out = '', last = 0, m;
+  re.lastIndex = 0;
+  while ((m = re.exec(s))) {
+    out += esc(s.slice(last, m.index));
+    const cls = m[1] ? 'c' : m[2] ? 's' : m[3] ? 'k' : 'n';
+    out += '<span class="' + cls + '">' + esc(m[0]) + '</span>';
+    last = m.index + m[0].length;
+    if (m[0].length === 0) re.lastIndex++;
+  }
+  return out + esc(s.slice(last));
+};
+window.renderFrame = (t) => {
+  const n = Math.min(code.length, Math.floor(Math.max(0, t - 0.3) * speed));
+  const blink = Math.floor(t * 2) % 2 === 0 || n < code.length;
+  el.innerHTML = hl(code.slice(0, n)) + (blink ? '<span class="cur"></span>' : '');
+};
+window.renderFrame(0);
+</script>
+</body></html>

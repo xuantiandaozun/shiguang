@@ -291,14 +291,15 @@ pub struct TimeMap {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Piece {
     Play(f64, f64),
-    Hold(f64, f64),
+    /// (源时间, 时长, 标记)：标记是 TimeMap::tagged 传进来的编号（插入的代码片段）
+    Hold(f64, f64, Option<usize>),
 }
 
 impl Piece {
     fn len(&self) -> f64 {
         match *self {
             Piece::Play(a, b) => b - a,
-            Piece::Hold(_, d) => d,
+            Piece::Hold(_, d, _) => d,
         }
     }
 }
@@ -306,6 +307,12 @@ impl Piece {
 impl TimeMap {
     /// cuts：要剪掉的源时间段；freezes：(源时间, 定格秒数)
     pub fn new(duration: f64, cuts: &[(f64, f64)], freezes: &[(f64, f64)]) -> TimeMap {
+        let tagged: Vec<(f64, f64, Option<usize>)> = freezes.iter().map(|&(t, d)| (t, d, None)).collect();
+        TimeMap::tagged(duration, cuts, &tagged)
+    }
+
+    /// 同 new，定格可以带编号，之后用 tagged_holds 查它们落在输出时间轴的哪里。同一时刻的多个定格按传入顺序排。
+    pub fn tagged(duration: f64, cuts: &[(f64, f64)], freezes: &[(f64, f64, Option<usize>)]) -> TimeMap {
         let mut cuts: Vec<(f64, f64)> = cuts
             .iter()
             .map(|&(a, b)| (a.clamp(0.0, duration), b.clamp(0.0, duration)))
@@ -328,12 +335,12 @@ impl TimeMap {
         }
         // 定格点落在剪切段里：挪到下一个保留段的开头
         let last_end = kept.last().map(|k| k.1).unwrap_or(0.0);
-        let mut holds: Vec<(f64, f64)> = freezes
+        let mut holds: Vec<(f64, f64, Option<usize>)> = freezes
             .iter()
             .filter(|f| f.1 > 0.0)
-            .map(|&(t, d)| {
+            .map(|&(t, d, tag)| {
                 let t = kept.iter().find(|k| t <= k.1).map(|k| t.max(k.0)).unwrap_or(last_end);
-                (t, d)
+                (t, d, tag)
             })
             .collect();
         holds.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -342,12 +349,12 @@ impl TimeMap {
         for (a, b) in kept {
             let mut start = a;
             while hi < holds.len() && holds[hi].0 <= b {
-                let (t, d) = holds[hi];
+                let (t, d, tag) = holds[hi];
                 if t > start {
                     pieces.push(Piece::Play(start, t));
                     start = t;
                 }
-                pieces.push(Piece::Hold(t, d));
+                pieces.push(Piece::Hold(t, d, tag));
                 hi += 1;
             }
             if b > start {
@@ -355,6 +362,19 @@ impl TimeMap {
             }
         }
         TimeMap { pieces }
+    }
+
+    /// 带编号的定格在输出时间轴上的 (编号, 开始, 时长)
+    pub fn tagged_holds(&self) -> Vec<(usize, f64, f64)> {
+        let mut acc = 0.0;
+        let mut out = Vec::new();
+        for p in &self.pieces {
+            if let Piece::Hold(_, d, Some(tag)) = *p {
+                out.push((tag, acc, d));
+            }
+            acc += p.len();
+        }
+        out
     }
 
     pub fn output_duration(&self) -> f64 {
@@ -369,14 +389,14 @@ impl TimeMap {
             if t < acc + len {
                 return match *p {
                     Piece::Play(a, _) => a + (t - acc),
-                    Piece::Hold(s, _) => s,
+                    Piece::Hold(s, _, _) => s,
                 };
             }
             acc += len;
         }
         match self.pieces.last() {
             Some(Piece::Play(_, b)) => *b,
-            Some(Piece::Hold(s, _)) => *s,
+            Some(Piece::Hold(s, _, _)) => *s,
             None => 0.0,
         }
     }
@@ -391,7 +411,7 @@ impl TimeMap {
                         return acc + (src - a).max(0.0);
                     }
                 }
-                Piece::Hold(s, _) => {
+                Piece::Hold(s, _, _) => {
                     if src < s {
                         return acc;
                     }

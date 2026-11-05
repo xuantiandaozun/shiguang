@@ -101,21 +101,69 @@ pub(crate) fn own_hwnds(app: &AppHandle) -> Vec<isize> {
         .collect()
 }
 
-/// 把拾光的窗口排除出（或恢复到）屏幕采集；桌面录屏全程使用
-pub(crate) fn set_self_excluded(app: &AppHandle, on: bool) {
-    win::set_exclude(&own_hwnds(app), on);
+/// 已被设为「不被采集」的拾光窗口
+static EXCLUDED: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+/// 桌面录屏期间要求排除（截图结束时不能把它恢复掉）
+static RECORD_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 截图期间临时排除
+static SHOT_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 让拾光窗口的「不被采集」状态与需要一致，返回这次新排除的窗口数。
+/// 只改可见窗口：对隐藏窗口调用 SetWindowDisplayAffinity，Windows 会把它画成一块关不掉的白板（提醒窗、主窗口都中过）。
+/// 隐藏窗口的状态留到它下次可见时再同步。
+fn sync_self_excluded(app: &AppHandle) -> usize {
+    use std::sync::atomic::Ordering;
+    let want = RECORD_HOLD.load(Ordering::SeqCst) || SHOT_HOLD.load(Ordering::SeqCst);
+    let own = own_hwnds(app);
+    let mut ex = EXCLUDED.lock().unwrap();
+    ex.retain(|h| own.contains(h));
+    let mut added = 0;
+    for h in own {
+        if !win::is_visible(h) {
+            continue;
+        }
+        let has = ex.contains(&h);
+        if want && !has {
+            win::set_exclude(&[h], true);
+            ex.push(h);
+            added += 1;
+        } else if !want && has {
+            win::set_exclude(&[h], false);
+            ex.retain(|x| *x != h);
+        }
+    }
+    added
 }
 
-/// 在 f 执行期间把拾光的窗口排除出屏幕采集（include_self 时什么都不做）
+/// 桌面录屏全程把拾光的窗口排除出画面（录制中新打开的窗口每秒补一次）；off 时恢复
+pub(crate) fn set_self_excluded(app: &AppHandle, on: bool) {
+    use std::sync::atomic::Ordering;
+    let was = RECORD_HOLD.swap(on, Ordering::SeqCst);
+    sync_self_excluded(app);
+    if on && !was {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            while RECORD_HOLD.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if RECORD_HOLD.load(Ordering::SeqCst) {
+                    sync_self_excluded(&app);
+                }
+            }
+        });
+    }
+}
+
+/// 在 f 执行期间把拾光的窗口排除出屏幕采集（include_self 时只把之前没恢复的窗口恢复）
 fn with_self_hidden<T>(app: &AppHandle, include_self: bool, f: impl FnOnce() -> T) -> T {
-    let hwnds = if include_self { Vec::new() } else { own_hwnds(app) };
-    win::set_exclude(&hwnds, true);
+    use std::sync::atomic::Ordering;
+    SHOT_HOLD.store(!include_self, Ordering::SeqCst);
     // 设置后合成器要一帧才生效
-    if !hwnds.is_empty() {
+    if sync_self_excluded(app) > 0 {
         std::thread::sleep(std::time::Duration::from_millis(60));
     }
     let r = f();
-    win::set_exclude(&hwnds, false);
+    SHOT_HOLD.store(false, Ordering::SeqCst);
+    sync_self_excluded(app);
     r
 }
 
@@ -772,6 +820,10 @@ pub(crate) mod win {
         out
     }
 
+    pub fn is_visible(hwnd: isize) -> bool {
+        unsafe { IsWindowVisible(hwnd as HWND) != 0 }
+    }
+
     pub fn set_exclude(hwnds: &[isize], on: bool) {
         for &h in hwnds {
             unsafe {
@@ -920,6 +972,9 @@ pub(crate) mod win {
     }
     pub fn list_windows() -> Vec<WinInfo> {
         Vec::new()
+    }
+    pub fn is_visible(_: isize) -> bool {
+        false
     }
     pub fn set_exclude(_: &[isize], _: bool) {}
     pub fn clipboard_set_image(_: &RgbaImage) -> Result<()> {

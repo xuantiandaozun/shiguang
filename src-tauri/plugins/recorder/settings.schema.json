@@ -144,6 +144,11 @@
       "title": "ffmpeg 下载地址（每行一个，按顺序尝试；支持 .zip / .tgz）",
       "format": "textarea",
       "default": "https://registry.npmmirror.com/@ffmpeg-installer/win32-x64/-/win32-x64-4.1.0.tgz\nhttps://registry.npmjs.org/@ffmpeg-installer/win32-x64/-/win32-x64-4.1.0.tgz"
+    },
+    "scene_browser": {
+      "type": "string",
+      "title": "渲染代码片段用的浏览器路径（留空自动找 Edge / Chrome）",
+      "default": ""
     }
   }
 }

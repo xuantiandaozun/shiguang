@@ -381,6 +381,11 @@ export default function ChatPanel() {
       addMessage({ role: "system", content: "已取消该整理方案。" });
     });
     add("sessions-changed", refreshSessions);
+    // 别的窗口（如录屏编辑）把要求填进输入框，由用户确认后发送
+    add<{ text: string }>("chat-prefill", (p) => {
+      setInput(p.text);
+      window.setTimeout(() => inputRef.current?.focus(), 80);
+    });
 
     const hydrate = (attempt = 0) => {
       ipc

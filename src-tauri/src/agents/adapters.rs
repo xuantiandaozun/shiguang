@@ -1,4 +1,4 @@
-//! 命令行参数与事件解析：Claude Code（stream-json 常驻）与 Codex（exec --json 每轮一进程）。
+//! 命令行参数与事件解析：Claude Code（stream-json 常驻）；Codex（exec --json）、Cursor（-p stream-json）、Pi（--mode json）每轮一进程。
 //! 纯函数，便于测试；进程管理在 mod.rs。
 use serde_json::{json, Value};
 
@@ -13,6 +13,8 @@ pub enum Parsed {
     /// Claude 一轮结束（进程仍在）。
     TurnDone { cost_usd: Option<f64>, is_error: bool, text: Option<String> },
     Error(String),
+    /// 不影响结果的过程提示（如网络重连），界面淡色显示，不算出错。
+    Notice(String),
 }
 
 /// 禁止外派智能体自己提交、推送或丢弃改动；提交由拾光在用户确认后执行。
@@ -76,12 +78,19 @@ fn toml_literal(s: &str) -> String {
     }
 }
 
-pub fn codex_args(mode: &str, resume: Option<&str>, mcp_exe: &str, run_id: &str, data_dir: &str) -> Vec<String> {
-    let sandbox = match mode {
+/// Codex 沙箱。Windows 上 workspace-write 沙箱会拒绝改项目里已有的文件、也断网（实测），
+/// 智能体只能来回求助，所以 Windows 上 edit 不开沙箱；禁止提交靠约定 + 拾光每轮核对 HEAD。
+pub fn codex_sandbox(mode: &str) -> &'static str {
+    match mode {
         "plan" => "read-only",
         "full" => "danger-full-access",
+        _ if cfg!(windows) => "danger-full-access",
         _ => "workspace-write",
-    };
+    }
+}
+
+pub fn codex_args(mode: &str, resume: Option<&str>, mcp_exe: &str, run_id: &str, data_dir: &str) -> Vec<String> {
+    let sandbox = codex_sandbox(mode);
     let mut args: Vec<String> = vec!["exec".into()];
     if let Some(id) = resume.filter(|s| !s.is_empty()) {
         args.extend(["resume".into(), id.into()]);
@@ -251,11 +260,210 @@ pub fn parse_codex(line: &str) -> Vec<Parsed> {
         }
         "error" => {
             let msg = v.get("message").and_then(Value::as_str).unwrap_or("出错");
+            if is_transient(msg) {
+                out.push(Parsed::Notice(network_notice(msg)));
+            } else {
+                out.push(Parsed::Error(clip(msg, 600)));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Codex 连 OpenAI 时的自动重连 / 改走 HTTPS：它自己会恢复，不是任务出错。
+fn is_transient(msg: &str) -> bool {
+    let m = msg.trim_start();
+    m.starts_with("Reconnecting") || m.starts_with("Falling back from WebSockets") || m.contains("stream disconnected - retrying")
+}
+
+fn network_notice(msg: &str) -> String {
+    let m = msg.trim();
+    if m.starts_with("Falling back") {
+        "网络：WebSocket 连不上，已改用 HTTPS 继续".into()
+    } else {
+        format!("网络重连中：{}", clip(m, 120))
+    }
+}
+
+// ---------- Cursor CLI（cursor-agent -p --output-format stream-json） ----------
+
+pub fn cursor_args(mode: &str, resume: Option<&str>, message: &str) -> Vec<String> {
+    let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--trust"].iter().map(|s| s.to_string()).collect();
+    if mode == "plan" {
+        args.extend(["--mode".into(), "plan".into()]);
+    } else {
+        // --force：命令直接执行不逐条确认；Cursor 的沙箱在 Windows 上同样会挡正常改动，关掉
+        args.extend(["--force".into(), "--sandbox".into(), "disabled".into()]);
+    }
+    if let Some(id) = resume.filter(|s| !s.is_empty()) {
+        args.extend(["--resume".into(), id.into()]);
+    }
+    args.push(message.into());
+    args
+}
+
+pub fn parse_cursor(line: &str) -> Vec<Parsed> {
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return Vec::new() };
+    let mut out = Vec::new();
+    let session = || v.get("session_id").and_then(Value::as_str).map(|s| Parsed::Session(s.into()));
+    match v.get("type").and_then(Value::as_str).unwrap_or("") {
+        "system" => out.extend(session()),
+        "assistant" => {
+            for block in v.pointer("/message/content").and_then(Value::as_array).into_iter().flatten() {
+                if block.get("type").and_then(Value::as_str) == Some("text") {
+                    let text = block.get("text").and_then(Value::as_str).unwrap_or("").trim();
+                    if !text.is_empty() {
+                        out.push(Parsed::Text(text.into()));
+                    }
+                }
+            }
+        }
+        "tool_call" => {
+            // {"subtype":"started"|"completed","tool_call":{"shellToolCall":{"args":{...},"result":{...}}}}
+            let Some((key, call)) = v.get("tool_call").and_then(Value::as_object).and_then(|o| o.iter().next()) else { return out };
+            let name = match key.as_str() {
+                "function" => call.get("name").and_then(Value::as_str).unwrap_or("工具").to_string(),
+                k => cursor_tool_name(k),
+            };
+            match v.get("subtype").and_then(Value::as_str) {
+                Some("started") => {
+                    let args = call.get("args").or_else(|| call.get("arguments")).unwrap_or(&Value::Null);
+                    let args = match args {
+                        Value::String(s) => serde_json::from_str(s).unwrap_or(Value::Null),
+                        other => other.clone(),
+                    };
+                    out.push(Parsed::Tool { name, detail: tool_detail(&args) });
+                }
+                Some("completed") => {
+                    let result = call.get("result").unwrap_or(&Value::Null);
+                    for bad in ["error", "failure", "rejected"] {
+                        if let Some(e) = result.get(bad) {
+                            let text = e
+                                .get("error")
+                                .or_else(|| e.get("message"))
+                                .or_else(|| e.get("stderr"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                                .unwrap_or_else(|| e.to_string());
+                            out.push(Parsed::ToolFailed(format!("{name}：{}", clip(&text, 400))));
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        "result" => {
+            out.extend(session());
+            let is_error = v.get("is_error").and_then(Value::as_bool).unwrap_or(false)
+                || v.get("subtype").and_then(Value::as_str).is_some_and(|s| s != "success");
+            out.push(Parsed::TurnDone { cost_usd: None, is_error, text: v.get("result").and_then(Value::as_str).map(str::to_string) });
+        }
+        "error" => {
+            let msg = v.get("message").or_else(|| v.get("error")).and_then(Value::as_str).unwrap_or("出错");
             out.push(Parsed::Error(clip(msg, 600)));
         }
         _ => {}
     }
     out
+}
+
+fn cursor_tool_name(key: &str) -> String {
+    match key.trim_end_matches("ToolCall") {
+        "shell" => "命令".into(),
+        "edit" | "write" | "delete" => "改文件".into(),
+        "read" => "读文件".into(),
+        "grep" | "glob" | "ls" => "查找".into(),
+        other => other.to_string(),
+    }
+}
+
+// ---------- Pi（pi --mode json） ----------
+
+/// 会话直接用外派编号：--session-id 不存在就创建、存在就续接，不用另外记 id。
+pub fn pi_args(mode: &str, session_id: &str) -> Vec<String> {
+    let mut args: Vec<String> = vec!["--mode".into(), "json".into(), "--session-id".into(), session_id.into()];
+    if mode == "plan" {
+        args.extend(["--tools".into(), "read,grep,find,ls".into()]);
+    }
+    // 任务正文从 stdin 传（Pi 把 stdin 拼在第一条提示前面）
+    args.extend(["--".into(), "按上面的说明执行。".into()]);
+    args
+}
+
+pub fn parse_pi(line: &str) -> Vec<Parsed> {
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return Vec::new() };
+    let mut out = Vec::new();
+    match v.get("type").and_then(Value::as_str).unwrap_or("") {
+        "message_end" => {
+            let msg = v.get("message").unwrap_or(&Value::Null);
+            if msg.get("role").and_then(Value::as_str) != Some("assistant") {
+                return out;
+            }
+            for block in msg.get("content").and_then(Value::as_array).into_iter().flatten() {
+                if block.get("type").and_then(Value::as_str) == Some("text") {
+                    let text = block.get("text").and_then(Value::as_str).unwrap_or("").trim();
+                    if !text.is_empty() {
+                        out.push(Parsed::Text(text.into()));
+                    }
+                }
+            }
+            if msg.get("stopReason").and_then(Value::as_str) == Some("error") {
+                let e = msg.get("errorMessage").and_then(Value::as_str).unwrap_or("模型调用出错");
+                out.push(Parsed::Error(clip(e, 600)));
+            }
+        }
+        "tool_execution_start" => out.push(Parsed::Tool {
+            name: match v.get("toolName").and_then(Value::as_str).unwrap_or("工具") {
+                "bash" | "powershell" => "命令".into(),
+                "edit" | "write" => "改文件".into(),
+                "read" => "读文件".into(),
+                other => other.into(),
+            },
+            detail: tool_detail(v.get("args").unwrap_or(&Value::Null)),
+        }),
+        "tool_execution_end" => {
+            if v.get("isError").and_then(Value::as_bool) == Some(true) {
+                let text: Vec<&str> = v
+                    .pointer("/result/content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| c.get("text").and_then(Value::as_str))
+                    .collect();
+                let name = v.get("toolName").and_then(Value::as_str).unwrap_or("工具");
+                out.push(Parsed::ToolFailed(format!("{name}：{}", clip(&text.join("
+"), 400))));
+            }
+        }
+        "auto_retry_start" => {
+            let e = v.get("errorMessage").and_then(Value::as_str).unwrap_or("");
+            out.push(Parsed::Notice(format!("模型调用失败，自动重试 {}/{}：{}", v["attempt"], v["maxAttempts"], clip(e, 120))));
+        }
+        "auto_retry_end" => {
+            if v.get("success").and_then(Value::as_bool) == Some(false) {
+                out.push(Parsed::Error(clip(v.get("finalError").and_then(Value::as_str).unwrap_or("重试失败"), 600)));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Windows 系统代理（注册表 ProxyServer）转成代理 URL：`host:port` 或 `http=..;https=..` 两种写法。
+pub fn proxy_url(server: &str) -> Option<String> {
+    let s = server.trim();
+    let pick = if s.contains('=') {
+        let parts: Vec<(&str, &str)> = s.split(';').filter_map(|p| p.split_once('=')).map(|(k, v)| (k.trim(), v.trim())).collect();
+        ["https", "http"].iter().find_map(|want| parts.iter().find(|(k, _)| k.eq_ignore_ascii_case(want)).map(|(_, v)| *v))?
+    } else {
+        s.split(';').next()?.trim()
+    };
+    if pick.is_empty() {
+        return None;
+    }
+    Some(if pick.contains("://") { pick.to_string() } else { format!("http://{pick}") })
 }
 
 /// npm 全局命令在 Windows 是 .cmd 包装：解析出 `node <入口.js>`，避免参数经 cmd.exe 转义。
@@ -315,6 +523,60 @@ mod tests {
     }
 
     #[test]
+    fn codex_reconnects_are_notices_not_errors() {
+        let r = parse_codex(r#"{"type":"error","message":"Reconnecting... 2/5 (request timed out)"}"#);
+        assert!(matches!(&r[..], [Parsed::Notice(m)] if m.contains("2/5")));
+        let r = parse_codex(r#"{"type":"error","message":"Falling back from WebSockets to HTTPS transport. request timed out"}"#);
+        assert!(matches!(&r[..], [Parsed::Notice(_)]));
+        assert!(matches!(&parse_codex(r#"{"type":"error","message":"quota exceeded"}"#)[..], [Parsed::Error(_)]));
+    }
+
+    #[test]
+    fn cursor_events() {
+        assert_eq!(parse_cursor(r#"{"type":"system","subtype":"init","session_id":"c1","model":"x"}"#), vec![Parsed::Session("c1".into())]);
+        assert_eq!(
+            parse_cursor(r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"好的"}]},"session_id":"c1"}"#),
+            vec![Parsed::Text("好的".into())]
+        );
+        assert_eq!(
+            parse_cursor(r#"{"type":"tool_call","subtype":"started","call_id":"1","tool_call":{"shellToolCall":{"args":{"command":"npm test"}}}}"#),
+            vec![Parsed::Tool { name: "命令".into(), detail: "npm test".into() }]
+        );
+        let failed = r#"{"type":"tool_call","subtype":"completed","tool_call":{"editToolCall":{"args":{"path":"a.ts"},"result":{"error":{"error":"denied"}}}}}"#;
+        assert_eq!(parse_cursor(failed), vec![Parsed::ToolFailed("改文件：denied".into())]);
+        assert!(parse_cursor(r#"{"type":"tool_call","subtype":"completed","tool_call":{"readToolCall":{"args":{},"result":{"success":{}}}}}"#).is_empty());
+        assert_eq!(parse_cursor(r#"{"type":"result","subtype":"success","is_error":false,"result":"完成","session_id":"c1"}"#), vec![
+            Parsed::Session("c1".into()),
+            Parsed::TurnDone { cost_usd: None, is_error: false, text: Some("完成".into()) },
+        ]);
+        let args = cursor_args("edit", Some("c1"), "做事");
+        assert!(args.contains(&"--force".to_string()) && args.windows(2).any(|w| w == ["--resume", "c1"]));
+        assert_eq!(args.last().unwrap(), "做事");
+        assert!(cursor_args("plan", None, "看看").windows(2).any(|w| w == ["--mode", "plan"]));
+    }
+
+    #[test]
+    fn pi_events() {
+        let end = r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"..."},{"type":"text","text":"改好了"},{"type":"toolCall","id":"t","name":"edit","arguments":{}}],"stopReason":"toolUse"}}"#;
+        assert_eq!(parse_pi(end), vec![Parsed::Text("改好了".into())]);
+        assert!(parse_pi(r#"{"type":"message_end","message":{"role":"user","content":"hi"}}"#).is_empty());
+        assert_eq!(
+            parse_pi(r#"{"type":"tool_execution_start","toolCallId":"1","toolName":"bash","args":{"command":"ls"}}"#),
+            vec![Parsed::Tool { name: "命令".into(), detail: "ls".into() }]
+        );
+        let bad = r#"{"type":"tool_execution_end","toolCallId":"1","toolName":"edit","result":{"content":[{"type":"text","text":"no match"}]},"isError":true}"#;
+        assert_eq!(parse_pi(bad), vec![Parsed::ToolFailed("edit：no match".into())]);
+        let err = r#"{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"401"}}"#;
+        assert_eq!(parse_pi(err), vec![Parsed::Error("401".into())]);
+        assert!(matches!(
+            &parse_pi(r#"{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":2000,"errorMessage":"529"}"#)[..],
+            [Parsed::Notice(_)]
+        ));
+        let args = pi_args("plan", "ar-1");
+        assert!(args.windows(2).any(|w| w == ["--session-id", "ar-1"]) && args.contains(&"read,grep,find,ls".to_string()));
+    }
+
+    #[test]
     fn claude_edit_mode_denies_commits_and_plan_mode_is_read_only() {
         let edit = claude_args("edit", Some("s1"), "{}");
         assert!(edit.windows(2).any(|w| w == ["--permission-mode", "acceptEdits"]));
@@ -332,11 +594,19 @@ mod tests {
         let args = codex_args("edit", Some("t-1"), r"C:\app\shiguang-mcp.exe", "ar-1", r"C:\data");
         assert_eq!(&args[..3], ["exec", "resume", "t-1"]);
         assert!(args.contains(&r"mcp_servers.shiguang.command='C:\app\shiguang-mcp.exe'".to_string()));
-        assert!(args.contains(&"sandbox_mode=\"workspace-write\"".to_string()));
+        assert!(args.contains(&format!("sandbox_mode=\"{}\"", codex_sandbox("edit"))));
         assert_eq!(args.last().unwrap(), "-");
         let plan = codex_args("plan", None, "x", "ar-1", "d");
         assert_eq!(plan[1], "--json");
         assert!(plan.contains(&"sandbox_mode=\"read-only\"".to_string()));
+    }
+
+    #[test]
+    fn system_proxy_strings() {
+        assert_eq!(proxy_url("127.0.0.1:7897").as_deref(), Some("http://127.0.0.1:7897"));
+        assert_eq!(proxy_url("http=1.2.3.4:80;https=1.2.3.4:443").as_deref(), Some("http://1.2.3.4:443"));
+        assert_eq!(proxy_url("socks5://127.0.0.1:1080").as_deref(), Some("socks5://127.0.0.1:1080"));
+        assert_eq!(proxy_url(" "), None);
     }
 
     #[test]

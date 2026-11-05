@@ -9,7 +9,7 @@ const LIST_FIELDS: &[&str] = &["aliases", "verify_commands", "rules", "notes", "
 const TEXT_FIELDS: &[&str] = &["summary", "deploy", "tools", "default_agent", "agent_mode"];
 const MAX_ITEMS: usize = 30;
 const MAX_TEXT: usize = 1200;
-pub const AGENT_KINDS: &[&str] = &["claude_code", "codex"];
+pub const AGENT_KINDS: &[&str] = &["claude_code", "codex", "cursor", "pi"];
 
 fn clip(text: &str, max: usize) -> String {
     text.trim().chars().take(max).collect()
@@ -28,7 +28,7 @@ pub fn normalize_data(input: &Value) -> Result<Value> {
     }
     if let Some(agent) = out.get("default_agent").and_then(Value::as_str) {
         if !AGENT_KINDS.contains(&agent) {
-            bail!("default_agent 只能是 claude_code 或 codex");
+            bail!("default_agent 只能是 claude_code、codex、cursor 或 pi");
         }
     }
     if let Some(mode) = out.get("agent_mode").and_then(Value::as_str) {

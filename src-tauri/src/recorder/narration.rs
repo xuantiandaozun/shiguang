@@ -34,6 +34,8 @@ pub struct Plan {
     /// 每段解说在输出时间轴上的开始时间与时长（与输入顺序一致，跳过的为 None）
     pub slots: Vec<Option<(f64, f64)>>,
     pub cues: Vec<Cue>,
+    /// 插入的代码片段在输出时间轴上的 (开始, 时长)，与传入的 inserts 顺序一致
+    pub inserts: Vec<Option<(f64, f64)>>,
 }
 
 pub const AUDIO_EXT: &[&str] = &["mp3", "wav", "m4a", "aac", "ogg", "opus", "flac"];
@@ -54,7 +56,15 @@ pub fn estimate(text: &str) -> f64 {
 }
 
 /// 排期：返回时间映射（剪切 + 定格）、每段的位置和字幕。durations[i] 为第 i 段的时长（无音频时用估计值）。
-pub fn plan(duration: f64, cuts: &[(f64, f64)], items: &[Narration], durations: &[f64]) -> Plan {
+/// inserts：插入的代码片段 (源时间, 时长)，画面在该点让给片段；挂在同一时刻的解说排在片段之后，
+/// 想让解说盖在片段上就把 at 设得比片段早一点点。
+pub fn plan(duration: f64, cuts: &[(f64, f64)], items: &[Narration], durations: &[f64], inserts: &[(f64, f64)]) -> Plan {
+    let base: Vec<(f64, f64, Option<usize>)> = inserts.iter().enumerate().map(|(i, &(t, d))| (t, d, Some(i))).collect();
+    let map_with = |freezes: &[(f64, f64)]| {
+        let mut all = base.clone();
+        all.extend(freezes.iter().map(|&(t, d)| (t, d, None)));
+        TimeMap::tagged(duration, cuts, &all)
+    };
     let mut order: Vec<usize> = (0..items.len()).collect();
     order.sort_by(|&a, &b| items[a].at.total_cmp(&items[b].at));
     let mut freezes: Vec<(f64, f64)> = Vec::new();
@@ -67,7 +77,7 @@ pub fn plan(duration: f64, cuts: &[(f64, f64)], items: &[Narration], durations: 
             continue;
         }
         let at = it.at.clamp(0.0, duration);
-        let anchor = TimeMap::new(duration, cuts, &freezes).to_output(at);
+        let anchor = map_with(&freezes).to_output(at);
         let start = if anchor < prev_end {
             freezes.push((at, prev_end - anchor));
             prev_end
@@ -78,11 +88,17 @@ pub fn plan(duration: f64, cuts: &[(f64, f64)], items: &[Narration], durations: 
         prev_end = start + d + GAP;
     }
     // 最后一段说完之前不结束
-    let out_dur = TimeMap::new(duration, cuts, &freezes).output_duration();
+    let out_dur = map_with(&freezes).output_duration();
     if prev_end - GAP + 0.5 > out_dur {
         freezes.push((duration, prev_end - GAP + 0.5 - out_dur));
     }
-    let map = TimeMap::new(duration, cuts, &freezes);
+    let map = map_with(&freezes);
+    let mut placed = vec![None; inserts.len()];
+    for (tag, start, d) in map.tagged_holds() {
+        if let Some(slot) = placed.get_mut(tag) {
+            *slot = Some((start, d));
+        }
+    }
     let mut cues = Vec::new();
     for (i, slot) in slots.iter().enumerate() {
         if let Some((start, d)) = slot {
@@ -90,7 +106,7 @@ pub fn plan(duration: f64, cuts: &[(f64, f64)], items: &[Narration], durations: 
         }
     }
     cues.sort_by(|a, b| a.start.total_cmp(&b.start));
-    Plan { map, slots, cues }
+    Plan { map, slots, cues, inserts: placed }
 }
 
 /// 把一段解说按句子切成多条字幕，时长按字数分配；每条不超过约 24 个字。
@@ -175,7 +191,7 @@ pub fn srt(cues: &[Cue]) -> String {
     };
     cues.iter()
         .enumerate()
-        .map(|(i, c)| format!("{}\n{} --> {}\n{}\n", i + 1, ts(c.start), ts(c.end), c.text))
+        .map(|(i, c)| format!("{}\n{} --> {}\n{}\n", i + 1, ts(c.start), ts(c.end), super::subtitle::plain(&c.text)))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -277,6 +293,21 @@ pub fn write_mix(path: &Path, total_secs: f64, clips: &[(f64, &[i16])], music: O
 }
 
 #[cfg(test)]
+mod insert_tests {
+    use super::*;
+
+    #[test]
+    fn inserts_take_output_time_and_push_narration_after() {
+        let items = vec![Narration { at: 2.0, text: "片段之后".into(), audio: None }];
+        let p = plan(10.0, &[], &items, &[1.0], &[(2.0, 3.0), (0.0, 2.0)]);
+        assert_eq!(p.inserts, vec![Some((4.0, 3.0)), Some((0.0, 2.0))]);
+        assert!((p.map.output_duration() - 15.0).abs() < 1e-9);
+        // 2 秒处的解说在片段（输出 4–7 秒）结束后开始
+        assert_eq!(p.slots[0].map(|s| s.0), Some(7.0));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -288,7 +319,7 @@ mod tests {
     fn long_narration_freezes_video_until_done() {
         // 第一段 1 秒处说 5 秒；第二段锚在 3 秒处，要等第一段说完
         let items = [n(1.0, "第一段"), n(3.0, "第二段")];
-        let p = plan(10.0, &[], &items, &[5.0, 2.0]);
+        let p = plan(10.0, &[], &items, &[5.0, 2.0], &[]);
         assert_eq!(p.slots[0], Some((1.0, 5.0)));
         let (s2, _) = p.slots[1].unwrap();
         assert!((s2 - 6.3).abs() < 1e-9);
@@ -300,13 +331,13 @@ mod tests {
 
     #[test]
     fn narration_past_end_extends_video() {
-        let p = plan(4.0, &[], &[n(3.0, "收尾")], &[3.0]);
+        let p = plan(4.0, &[], &[n(3.0, "收尾")], &[3.0], &[]);
         assert!((p.map.output_duration() - 6.5).abs() < 1e-9);
     }
 
     #[test]
     fn cut_shifts_narration_earlier() {
-        let p = plan(10.0, &[(1.0, 3.0)], &[n(5.0, "剪切后")], &[1.0]);
+        let p = plan(10.0, &[(1.0, 3.0)], &[n(5.0, "剪切后")], &[1.0], &[]);
         assert_eq!(p.slots[0], Some((3.0, 1.0)));
     }
 

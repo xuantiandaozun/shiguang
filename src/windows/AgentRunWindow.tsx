@@ -56,6 +56,8 @@ function EventRow({ e, agent }: { e: AgentRunEvent; agent: string }) {
     }
     case "tool_error":
       return <div className="whitespace-pre-wrap break-words px-1 text-[11px] text-[#bd3038]">✕ {e.content}</div>;
+    case "notice":
+      return <div className="px-1 text-[11px] text-[#8f959e]">· {e.content}</div>;
     case "error":
       return <div className="whitespace-pre-wrap break-words rounded-lg border border-[#f0c4c6] bg-[#fdf0f0] px-3 py-2 text-xs text-[#bd3038]">{e.content}</div>;
     default:
@@ -80,8 +82,13 @@ export default function AgentRunWindow() {
       setRun(view.run);
       setAgentLabel(view.agent_label);
       if (view.events.length) {
-        lastId.current = view.events[view.events.length - 1].id;
-        setEvents((prev) => [...prev, ...view.events]);
+        lastId.current = Math.max(lastId.current, view.events[view.events.length - 1].id);
+        // 几个「有更新」通知同时到时会并发刷新、拿到同一批事件：按 id 去重，避免回复显示两遍
+        setEvents((prev) => {
+          const seen = new Set(prev.map((e) => e.id));
+          const fresh = view.events.filter((e) => !seen.has(e.id));
+          return fresh.length ? [...prev, ...fresh] : prev;
+        });
       }
       setError("");
     } catch (e) { setError(`加载失败：${String(e)}`); }
@@ -142,7 +149,7 @@ export default function AgentRunWindow() {
     </div>
 
     <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto px-3 py-3 scrollbar-thin">
-      {events.map((e) => <EventRow key={e.id} e={e} agent={agentLabel} />)}
+      {events.filter((e, i) => !(e.kind === "notice" && events[i + 1]?.kind === "notice")).map((e) => <EventRow key={e.id} e={e} agent={agentLabel} />)}
       {status === "running" && <div className="text-center text-xs text-[#646a73]">执行中…</div>}
       {status === "idle" && result && <details className="rounded-lg border border-[#e2e5e9] bg-[#f7f8fa] px-3 py-2 text-xs">
         <summary className="cursor-pointer">拾光核对：{result.changed_total ?? 0} 个文件有改动{result.head_changed ? "，智能体自己提交了 commit" : ""}</summary>

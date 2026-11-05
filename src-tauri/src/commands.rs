@@ -885,8 +885,9 @@ pub fn stop_agent_run(app: AppHandle, id: String) -> Result<serde_json::Value, S
     crate::agents::stop(&app, &id).map_err(|e| e.to_string())
 }
 
+/// 必须是 async：同步命令在主线程上建 WebView 窗口会卡住，窗口出来但页面空白（无边框窗口连关闭按钮都没有）。
 #[tauri::command]
-pub fn show_agent_run_window(app: AppHandle, id: String) -> Result<(), String> {
+pub async fn show_agent_run_window(app: AppHandle, id: String) -> Result<(), String> {
     crate::windows::show_agent_run(&app, &id).map_err(|e| e.to_string())
 }
 

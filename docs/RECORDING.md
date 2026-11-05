@@ -2,6 +2,19 @@
 
 > 状态：2026-11-05 P1、P2、截图、背景音乐已提交；P3 桌面录屏代码完成（未提交），等真机测试。
 
+## 字幕样式与代码片段（2026-11-05）
+
+- **字幕样式**（`recorder/subtitle.rs`）：timeline.json 的 `subtitle_style`，预设 classic / variety（综艺花字）/ minimal / karaoke，可覆盖字体、字号、位置、渐变填充、多层描边、投影、重点词颜色、底框、动画（pop / fade / slide / typewriter / karaoke）。字形轮廓转成 tiny-skia 路径再描边、填充，逐帧计算，不依赖浏览器。解说词里【】括起的词按重点词颜色画，`.srt` 里去掉括号。主字体缺字时退回微软雅黑粗体。
+- **字体**：内置清单是 Google Fonts 收录的 OFL 免费可商用中文字体（站酷快乐体、站酷庆科黄油体、站酷小薇、马善政毛笔），首次用到时下载到 `app_data/fonts`（GitHub 失败退 jsDelivr；本进程没有代理环境变量时用 Windows 系统代理）。用户也可以把 .ttf/.otf 放进这个目录。下载失败时退回系统字体，导出照常，结果里有 `warnings`。
+- **代码片段**（`recorder/scene.rs`）：timeline.json 的 `scenes[]`，每项 `{id, kind: insert|overlay, at, duration, file}`，文件在录制目录的 `scenes/`。
+  - insert：作为带编号的定格放进 TimeMap（`TimeMap::tagged`），画面在该源时间让给片段；`narration::plan` 先放片段再排解说，同一时刻的解说排在片段之后。
+  - overlay：从 `map.to_output(at)` 开始叠在画面上，PNG 透明，读入时转预乘。
+  - 渲染：后台 `--headless=new` 的 Edge/Chrome（设置 `scene_browser` 可指定），自写的小 CDP 客户端。注入脚本接管 rAF / setTimeout / setInterval / Date / performance，并把所有 Web Animations 暂停后设 `currentTime`，所以逐帧确定。页面可定义 `window.renderFrame(t)`；`window.SG_DURATION` 是片段时长。设计宽度固定 1920 CSS px，用 deviceScaleFactor 缩放到输出分辨率。插入片段截 JPEG、叠加片段截 PNG，缓存在 `scene_cache/<id>-<内容哈希>/`，内容和尺寸不变就复用。
+  - 内置模板（插件资源 `assets/scenes/*.html`，`{{变量|默认值}}` 转义填入，`{{{变量}}}` 作为 JSON 字符串给脚本）：title、chapter、bullets、ending、code（insert）；lower_third、callout、sticker（overlay）。
+  - `record_edit` 的 scenes 项可给 `template + vars` 或 `html`，由 `edit_timeline` 落成文件后只存 `file`；`record_scene_preview` 把片段在几个时间点截图拼成一张图给模型看。
+- 编辑窗口：时间线多一条「代码片段」轨，手动调整里能删片段；导出选项多「字幕样式」；常用要求加了「加片头片尾」「字幕换综艺花字」「加贴纸或标注」。
+- 测试：`cargo test --release --lib recorder::scene::tests::headless -- --ignored`（真实浏览器、时间受控）；`SG_SAMPLE_DIR=目录 … recorder::scene::tests::render_samples -- --ignored`（各字幕预设和每个模板出图）；`SG_E2E_DIR=目录 … recorder::e2e::export_with_scenes -- --ignored`（片头 + 贴纸 + 综艺字幕导出 MP4 并截帧）。
+
 ## P3 桌面录屏（`src/recorder/desktop.rs`，2026-11-05）
 
 和设计稿的差异：采集先用 GDI BitBlt，不用 WGC。原因是不加新依赖、画面本来就不含系统光标、`WDA_EXCLUDEFROMCAPTURE` 对 BitBlt 同样生效。代价是录窗口时录的是它在屏幕上的位置，被挡住的部分会录到挡在前面的窗口。以后需要「被遮挡也能录」再换 WGC。
@@ -66,10 +79,10 @@
   - `record_timeline`：返回标记、点击/输入/页面步骤、当前时间线和 `audio_dir`；
   - `record_edit`：给了哪个字段就整体替换，先校验，通过才保存。
 - 配音不内置服务商：Skill 指导拾光通过 run_command 调用户的配音 CLI（比如火山），先看 `--help`，凭据由 CLI 自己管理。音频放进 `audio_dir`，再用 `record_edit` 挂上。
-- 界面：「录屏」页每条录制有「编辑」，打开 `RecorderEditor`：
-  - 拖动时间轴看原始画面；
-  - 画面上框选打码，点选放大焦点；
-  - 解说、放大、打码、剪切四个列表，可以快速预览和导出。
+- 界面：「录屏」页每条录制有「编辑」，打开独立的录屏编辑窗口（插件窗口 `recorder-editor`，`multi: true`，每份录屏一个窗口），组件 `RecorderEditor`：
+  - 编辑以拾光为主：顶部写一句要求（或点常用要求）→ 填进聊天框由用户确认发送，拾光用 `record_edit` 改完，`recorder-timeline-changed` 事件让编辑窗口自动刷新；
+  - 编辑台只保留轻量手动功能：拖动时间轴看原始画面、画面上框选打码、改/删解说文字、删打码/剪切/手动放大段、恢复自动放大、配乐/字幕/节奏选项；改动自动保存；
+  - 精细的数值调整（时间点、放大倍数和焦点、配音文件、配乐音量）交给拾光。
 - 已知限制：
   - 编辑器显示的是原始画面，放大和光标效果要靠快速预览看；
   - 还没有背景音乐；

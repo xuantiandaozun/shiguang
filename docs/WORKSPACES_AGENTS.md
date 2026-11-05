@@ -3,7 +3,7 @@
 ## 目标
 
 - **工作区**：记住固定项目「在哪、怎么验证、怎么上线、有什么规矩」，说「改博客」就知道改哪里，不用每次报路径。
-- **外派**：拾光把工作区里的代码修改交给 Claude Code / Codex CLI，用各自的订阅额度；拾光负责交代任务、回答它的问题、核对结果、征得同意后提交。
+- **外派**：拾光把工作区里的代码修改交给 Claude Code / Codex / Cursor CLI / Pi，用各自的订阅额度；拾光负责交代任务、回答它的问题、核对结果、征得同意后提交。
 - 方向区分：现有「委托」（`delegation.rs`）是**外部智能体把活交给拾光**；本功能是**拾光把活外派出去**。
 
 ## 工作区（`workspaces.rs`）
@@ -38,7 +38,9 @@
 ## 外派（`agents/`）
 
 ### 智能体探测
-启动或打开标签页时按 PATH/PATHEXT 找 `claude`、`codex`，读 `--version`。设置键 `code_agents` 存启用状态与路径覆盖。
+启动或打开标签页时按 PATH/PATHEXT 找 `claude`、`codex`、`cursor-agent`、`pi`，读 `--version`。设置键 `code_agents` 存启用状态与路径覆盖。npm 的 .cmd 包装解析成 `node 入口.js`；Cursor 的 .cmd → PowerShell 脚本 → `versions/<最新>/node.exe index.js`，直接起最新版本（环境变量 `CURSOR_INVOKED_AS`）。
+
+拾光从桌面启动时通常没有 `HTTPS_PROXY`（用户只在终端里设了），Codex 的 WebSocket 会一直 `Reconnecting… request timed out` 再退回 HTTPS。启动智能体时若本进程没有代理环境变量、而 Windows 系统代理开着，就把系统代理作为 `HTTPS_PROXY`/`HTTP_PROXY` 传给子进程。
 
 ### 适配器
 | | Claude Code | Codex |
@@ -46,11 +48,22 @@
 | 启动 | `claude -p --input-format stream-json --output-format stream-json --verbose`，常驻进程，每句话写一行 JSON 到 stdin | `codex exec --json --skip-git-repo-check -c sandbox_mode=…`，每轮一个进程 |
 | 续接 | 进程在就直接写 stdin；进程没了用 `--resume <session_id>` | `codex exec resume <thread_id> --json` |
 | 权限 plan | `--permission-mode plan` | `sandbox_mode="read-only"` |
-| 权限 edit（默认） | `acceptEdits`；允许只读 git 和工作区验证命令；禁止 git commit/push/reset | `sandbox_mode="workspace-write"`（无网络，push 不可能） |
+| 权限 edit（默认） | `acceptEdits`；允许只读 git 和工作区验证命令；禁止 git commit/push/reset | 非 Windows：`sandbox_mode="workspace-write"`。Windows：`danger-full-access`——实测 Windows 沙箱拒绝改项目里已有文件、也断网，智能体只能来回求助；禁止提交靠约定 + 每轮核对 HEAD |
 | 回调 | `--mcp-config` 注入 `shiguang-mcp.exe`（`SHIGUANG_AGENT_RUN` 环境变量进入外派模式） | `-c mcp_servers.shiguang.*` 同上，`tool_timeout_sec=1800` |
 | 事件 | `system/init`、`assistant`（text / tool_use）、`user`（tool_result）、`result` | `thread.started`、`item.*`（agent_message / command_execution / file_change / mcp_tool_call…）、`turn.completed` |
 
 空闲 30 分钟的 Claude 进程自动关闭，之后有追问再 `--resume`。
+
+Codex 的 `Reconnecting… / Falling back from WebSockets` 是它自己的网络重试，记为 `notice`（运行窗口淡色显示、连续多条只显示最后一条），不算出错。
+
+| | Cursor CLI | Pi |
+|---|---|---|
+| 启动 | `cursor-agent -p --output-format stream-json --trust <正文>`，每轮一个进程 | `pi --mode json --session-id <外派编号> -- 按上面的说明执行。`，正文从 stdin 传（Pi 拼在提示前） |
+| 续接 | `--resume <session_id>`（init / result 里的 session_id） | 同一个 `--session-id`：不存在就创建，存在就续接 |
+| 权限 plan | `--mode plan` | `--tools read,grep,find,ls` |
+| 权限 edit | `--force --sandbox disabled`（理由同 Codex） | 默认工具（Pi 本身没有权限确认） |
+| 回调 | 无：两者的 MCP 只读自己的配置文件，不改用户全局配置。约定里改成「有疑问写在本轮回复最后（`需要确认：`），拾光下一轮回答」 | 同左 |
+| 事件 | `system/init`、`assistant`、`tool_call`（started/completed，`shellToolCall` 等）、`result` | `message_end`（assistant 的 text 块、`stopReason=error`）、`tool_execution_start/end`、`auto_retry_*` |
 
 ### 连续沟通
 - **主 AI → 智能体**：`agent_reply`。智能体在等回答就作为回答；一轮已结束就作为新一轮追问（同一会话）。
@@ -77,7 +90,7 @@
 - `discard`：`git worktree remove --force` 并删分支。
 
 ### 自动选择
-未指定 agent 时：工作区 `default_agent` → 已启用的 Claude Code → Codex。
+未指定 agent 时：工作区 `default_agent` → 已启用的 Claude Code → Codex → Cursor → Pi。
 
 ## 何时外派
 工作区里涉及多文件的代码修改优先外派；查数据、浏览器、跑 CLI、小改一两行仍由拾光自己做。

@@ -7,7 +7,9 @@ pub mod doc;
 pub mod ffmpeg;
 pub mod narration;
 pub mod render;
+pub mod scene;
 pub mod screenshot;
+pub mod subtitle;
 pub mod timeline;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -30,6 +32,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "record_delete",
     "record_timeline",
     "record_edit",
+    "record_scene_preview",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -728,6 +731,7 @@ async fn export_inner(app: &AppHandle, id: &str, overrides: &Value, cancel: Arc<
         let (ff, d) = (ffmpeg.clone(), dir.clone());
         let music = tl.music.clone();
         let tighten = opts.tighten;
+        let inserts: Vec<(f64, f64)> = tl.scenes.iter().filter(|s| !s.is_overlay()).map(|s| (s.at, s.duration)).collect();
         // 紧凑节奏用到的「有动静」的时间点：画面帧与操作事件（不含纯鼠标移动）
         let frame_times: Vec<f64> = sources.iter().filter(|f| !f.minor).map(|f| f.t).collect();
         let event_times: Vec<f64> = events.iter().filter(|e| e.kind != "move").map(|e| e.t).collect();
@@ -751,7 +755,7 @@ async fn export_inner(app: &AppHandle, id: &str, overrides: &Value, cancel: Arc<
                 auto_cut = extra.iter().map(|c| c.1 - c.0).sum();
                 cuts.extend(extra);
             }
-            let plan = narration::plan(duration, &cuts, &items, &durations);
+            let plan = narration::plan(duration, &cuts, &items, &durations, &inserts);
             let clips: Vec<(f64, &[i16])> = plan
                 .slots
                 .iter()
@@ -827,20 +831,72 @@ async fn export_inner(app: &AppHandle, id: &str, overrides: &Value, cancel: Arc<
             (((plan.map.to_source(t) * fps).round() as usize).min(last), t)
         })
         .collect();
+    let (out_w, out_h) = (w - w % 2, h - h % 2);
+    let fonts_dir = fonts_dir(app)?;
+    let mut warnings: Vec<String> = Vec::new();
+    // 字幕样式：需要内置字体时先下载；下载失败退回系统字体，导出照常
+    let subtitle = if opts.burn && !plan.cues.is_empty() {
+        let look = tl.subtitle_style.clone().unwrap_or_default().resolve()?;
+        let font_path = match look.font.clone() {
+            Some(name) => match ensure_font(app, id, &fonts_dir, &name).await {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    warnings.push(format!("字幕字体不可用，改用系统字体：{e:#}"));
+                    None
+                }
+            },
+            None => None,
+        };
+        Some(Arc::new(subtitle::Prepared::new(look, font_path.as_deref())?))
+    } else {
+        None
+    };
+    // 代码片段：插入的按排期结果放，叠加的从源时间对应的输出时刻开始
+    let mut scenes = Vec::new();
+    if !tl.scenes.is_empty() {
+        let browser = scene::find_browser(s.get("scene_browser").and_then(Value::as_str).unwrap_or(""))
+            .ok_or_else(|| anyhow!("渲染代码片段需要 Edge 或 Chrome：没有找到，可以在「插件 → 录屏」设置里填浏览器路径"))?;
+        // 模板用到的字体，尽量备好（失败只是退回系统字体）
+        for f in ["kuaile", "huangyou"] {
+            let _ = ensure_font(app, id, &fonts_dir, f).await;
+        }
+        let css = scene::font_css(&fonts_dir);
+        let mut insert_idx = 0usize;
+        let total = tl.scenes.len();
+        for (n, sc) in tl.scenes.iter().enumerate() {
+            let start = if sc.is_overlay() {
+                plan.map.to_output(sc.at)
+            } else {
+                let slot = plan.inserts.get(insert_idx).copied().flatten();
+                insert_idx += 1;
+                match slot {
+                    Some((st, _)) => st,
+                    None => continue,
+                }
+            };
+            let (app4, id4) = (app.clone(), id.to_string());
+            let progress = move |done: usize, all: usize| {
+                let _ = app4.emit("recorder-export-progress", json!({"id": id4, "phase": "scene", "done": done, "total": all, "scene": n + 1, "scenes": total}));
+            };
+            scenes.push(scene::render(&browser, &dir, sc, start, out_w, out_h, opts.fps, &css, &cancel, &progress).await?);
+        }
+    }
     let zoom_count = compiled.zooms.len();
     let cue_count = plan.cues.len();
     let job = render::Job {
         ffmpeg,
         encoder: encoder.clone(),
         out: out.clone(),
-        width: w - w % 2,
-        height: h - h % 2,
+        width: out_w,
+        height: out_h,
         sources,
         compiled,
         masks: tl.masks.clone(),
         opts: render::RenderOpts { fps: opts.fps, cursor_scale: opts.cursor_scale, style: opts.style },
         frame_map,
         cues: if opts.burn { plan.cues } else { Vec::new() },
+        subtitle,
+        scenes,
         audio: audio_path.clone(),
         fast: opts.preview,
     };
@@ -870,8 +926,24 @@ async fn export_inner(app: &AppHandle, id: &str, overrides: &Value, cancel: Arc<
         "tightened_s": (auto_cut_secs * 10.0).round() / 10.0,
         "srt": if cue_count > 0 { Some(srt_path.to_string_lossy().to_string()) } else { None },
         "encoder": encoder.get(1),
+        "scenes": tl.scenes.len(),
+        "warnings": warnings,
         "note": if opts.preview { "这是低分辨率预览。" } else { "已导出。请用户看一遍成片，确认没有漏掉的敏感信息再对外发。" },
     }))
+}
+
+/// 字幕/片段字体目录：app_data/fonts（用户也可以把 .ttf/.otf 放进来）
+pub fn fonts_dir(app: &AppHandle) -> Result<PathBuf> {
+    Ok(app.path().app_data_dir()?.join("fonts"))
+}
+
+async fn ensure_font(app: &AppHandle, id: &str, fonts_dir: &Path, name: &str) -> Result<PathBuf> {
+    let (app2, id2, name2) = (app.clone(), id.to_string(), name.to_string());
+    let proxy = crate::agents::fallback_proxy();
+    subtitle::ensure(fonts_dir, name, proxy.as_deref(), &move |got, total| {
+        let _ = app2.emit("recorder-export-progress", json!({"id": id2, "phase": "font", "font": name2, "done": got, "total": total}));
+    })
+    .await
 }
 
 /// 配乐目录（插件设置 music_dir，默认 音乐/拾光配乐）
@@ -951,7 +1023,13 @@ pub fn timeline_summary(app: &AppHandle, id: &str) -> Result<Value> {
         "audio_dir": audio_dir.to_string_lossy(),
         "music_dir": music_dir(app).to_string_lossy(),
         "music_library": music_library(app),
-        "hint": "时间都是录制开始后的秒数。配音文件放进 audio_dir，再用 record_edit 的 narration[].audio 填相对路径（如 audio/01.mp3）。背景音乐从 music_library 里按视频风格挑一首，用 record_edit 的 music 设置。",
+        "subtitle_presets": subtitle::PRESETS.iter().map(|p| json!({"id": p.0, "label": p.1})).collect::<Vec<_>>(),
+        "fonts": {
+            "builtin": subtitle::FONTS.iter().map(|f| json!({"key": f.key, "label": f.label, "css_family": f.family})).collect::<Vec<_>>(),
+            "installed": fonts_dir(app).map(|d| subtitle::installed(&d)).unwrap_or_default(),
+        },
+        "scene_templates": scene::TEMPLATES.iter().map(|t| json!({"id": t.0, "label": t.1, "overlay": t.2, "vars": t.3})).collect::<Vec<_>>(),
+        "hint": "时间都是录制开始后的秒数。配音文件放进 audio_dir，再用 record_edit 的 narration[].audio 填相对路径（如 audio/01.mp3）。背景音乐从 music_library 里按视频风格挑一首，用 record_edit 的 music 设置。字幕样式用 subtitle_style，代码片段用 scenes（写完先 record_scene_preview 看效果）。",
     }))
 }
 
@@ -960,11 +1038,52 @@ pub fn edit_timeline(app: &AppHandle, id: &str, patch: &Value) -> Result<(doc::T
     let dir = recordings_dir(app)?.join(valid_id(id)?);
     let meta = load_meta(&dir)?;
     let mut tl = doc::load(&dir);
-    let changed = doc::apply_patch(&mut tl, patch)?;
+    let mut patch = patch.clone();
+    if let Some(list) = patch.get_mut("scenes").and_then(Value::as_array_mut) {
+        for item in list.iter_mut() {
+            materialize_scene(&dir, &tl, item)?;
+        }
+    }
+    let changed = doc::apply_patch(&mut tl, &patch)?;
     doc::normalize(&mut tl, meta.duration_ms / 1000.0, &dir)?;
     doc::save(&dir, &tl)?;
     emit_changed(app);
+    let _ = app.emit("recorder-timeline-changed", json!({ "id": id }));
     Ok((tl, changed))
+}
+
+/// record_edit 的 scenes[] 一项：给了 html 就写成 scenes/<id>.html；给了 template 就用内置模板 + vars 生成；
+/// 都没给就沿用同 id 已有片段的文件。之后 item 里只留 file。
+fn materialize_scene(dir: &Path, tl: &doc::TimelineDoc, item: &mut Value) -> Result<()> {
+    let obj = item.as_object_mut().ok_or_else(|| anyhow!("scenes 里每一项都要是对象"))?;
+    let sid = obj.get("id").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    if !scene::valid_id(&sid) {
+        bail!("片段 id 只能用字母、数字、- 和 _（现在是「{sid}」）");
+    }
+    let rel = format!("scenes/{sid}.html");
+    let write = |content: &str| -> Result<()> {
+        std::fs::create_dir_all(dir.join("scenes"))?;
+        std::fs::write(dir.join(&rel), content)?;
+        Ok(())
+    };
+    if let Some(html) = obj.remove("html").and_then(|v| v.as_str().map(str::to_string)) {
+        write(&html)?;
+        obj.insert("file".into(), json!(rel));
+        obj.remove("template");
+    } else if let Some(t) = obj.get("template").and_then(Value::as_str).map(str::to_string) {
+        let info = scene::template_info(&t).ok_or_else(|| {
+            anyhow!("没有模板 {t}，可用：{}", scene::TEMPLATES.iter().map(|t| t.0).collect::<Vec<_>>().join("、"))
+        })?;
+        let src = crate::plugins::snapshot().asset("recorder", &format!("scene_{t}"))?;
+        let vars = obj.get("vars").cloned().unwrap_or_else(|| json!({}));
+        write(&scene::fill_template(&src, &vars))?;
+        obj.insert("file".into(), json!(rel));
+        obj.entry("kind").or_insert_with(|| json!(if info.2 { "overlay" } else { "insert" }));
+    } else if obj.get("file").and_then(Value::as_str).is_none_or(|f| f.trim().is_empty()) {
+        let old = tl.scenes.iter().find(|s| s.id == sid).ok_or_else(|| anyhow!("新片段 {sid} 需要 html 或 template"))?;
+        obj.insert("file".into(), json!(old.file));
+    }
+    Ok(())
 }
 
 /// 编辑器用：源帧时间表、点击与标记、时间线（未手动编辑时给出自动放大段）
@@ -1004,6 +1123,8 @@ pub fn project(app: &AppHandle, id: &str) -> Result<Value> {
         "tighten_default": settings(app).get("tighten").and_then(Value::as_bool).unwrap_or(true),
         "music_library": music_library(app),
         "music_dir": music_dir(app).to_string_lossy(),
+        "subtitle_presets": subtitle::PRESETS.iter().map(|p| json!({"id": p.0, "label": p.1})).collect::<Vec<_>>(),
+        "scene_templates": scene::TEMPLATES.iter().map(|t| json!({"id": t.0, "label": t.1, "overlay": t.2})).collect::<Vec<_>>(),
     }))
 }
 
@@ -1067,6 +1188,38 @@ pub async fn execute(
             };
             timeline_summary(app, &id)
         }
+        "record_scene_preview" => {
+            let id = match str_arg("id").filter(|s| !s.trim().is_empty()) {
+                Some(id) => valid_id(id)?.to_string(),
+                None => latest_id(app)?,
+            };
+            let dir = recordings_dir(app)?.join(&id);
+            let tl = doc::load(&dir);
+            let sid = str_arg("scene").unwrap_or("");
+            let sc = tl.scenes.iter().find(|s| s.id == sid).ok_or_else(|| {
+                anyhow!("没有片段 {sid}，现有：{}", tl.scenes.iter().map(|s| s.id.as_str()).collect::<Vec<_>>().join("、"))
+            })?;
+            let browser = scene::find_browser(settings(app).get("scene_browser").and_then(Value::as_str).unwrap_or(""))
+                .ok_or_else(|| anyhow!("需要 Edge 或 Chrome 来渲染片段"))?;
+            let fonts = fonts_dir(app)?;
+            for f in ["kuaile", "huangyou"] {
+                let _ = ensure_font(app, &id, &fonts, f).await;
+            }
+            let d = sc.duration;
+            let times: Vec<f64> = args
+                .get("times")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_f64).take(6).collect())
+                .filter(|v: &Vec<f64>| !v.is_empty())
+                .unwrap_or_else(|| vec![0.3_f64.min(d / 4.0), d * 0.35, d * 0.7, (d - 0.1).max(0.0)]);
+            std::fs::create_dir_all(dir.join("scene_cache"))?;
+            let out = dir.join("scene_cache").join(format!("preview-{sid}.png"));
+            let times = scene::snapshot(&browser, &dir, sc, &times, &scene::font_css(&fonts), &out).await?;
+            Ok(json!({
+                "image": out.to_string_lossy(), "times": times, "scene": sid, "kind": sc.kind,
+                "note": "按时间顺序拼成的截图（左上起，每行 2 张；叠加片段垫在深灰底上）。用 read_image 看这张图检查效果，不满意就改 html 再 record_edit。",
+            }))
+        }
         "record_edit" => {
             let id = match str_arg("id").filter(|s| !s.trim().is_empty()) {
                 Some(id) => id.to_string(),
@@ -1074,7 +1227,7 @@ pub async fn execute(
             };
             let (tl, changed) = edit_timeline(app, &id, args)?;
             if changed.is_empty() {
-                bail!("没有要修改的字段（可改 narration / music / tighten / masks / cuts / zooms / burn_subtitles）");
+                bail!("没有要修改的字段（可改 narration / music / tighten / masks / cuts / zooms / burn_subtitles / subtitle_style / scenes）");
             }
             Ok(json!({
                 "id": id, "changed": changed,
@@ -1082,6 +1235,8 @@ pub async fn execute(
                 "with_audio": tl.narration.iter().filter(|n| n.audio.is_some()).count(),
                 "masks": tl.masks.len(), "cuts": tl.cuts.len(), "zooms": tl.zooms.len(), "zooms_edited": tl.zooms_edited,
                 "music": tl.music.as_ref().map(|m| m.path.clone()), "tighten": tl.tighten,
+                "subtitle_style": tl.subtitle_style.as_ref().map(|s| if s.preset.is_empty() { "classic".to_string() } else { s.preset.clone() }),
+                "scenes": tl.scenes.iter().map(|s| json!({"id": s.id, "kind": s.kind, "at": s.at, "duration": s.duration})).collect::<Vec<_>>(),
                 "note": "已保存。可以用 record_export 的 preview: true 先出低分辨率预览。",
             }))
         }
@@ -1242,7 +1397,7 @@ mod e2e {
             let compiled = timeline::compile(&events, 6.0, timeline::Opts { fps: 30, zoom: true, zoom_scale: 2.0 }, None);
             // 2 秒处定格 1 秒、剪掉 4–5 秒，带字幕和一段 1 秒的配音
             let items = [narration::Narration { at: 2.0, text: "点击这里，打开设置。".into(), audio: Some("tone.wav".into()) }];
-            let plan = narration::plan(6.0, &[(4.0, 5.0)], &items, &[1.0]);
+            let plan = narration::plan(6.0, &[(4.0, 5.0)], &items, &[1.0], &[]);
             let tone: Vec<i16> = (0..narration::RATE as usize * 2).map(|i| (((i / 2) as f64 * 0.06).sin() * 8000.0) as i16).collect();
             let wav = root.join("narration.wav");
             let bgm: Vec<i16> = (0..narration::RATE as usize).map(|i| (((i / 2) as f64 * 0.02).sin() * 6000.0) as i16).collect();
@@ -1258,6 +1413,12 @@ mod e2e {
                 opts: render::RenderOpts { fps: 30, cursor_scale: 1.6, style },
                 frame_map,
                 cues: plan.cues.clone(),
+                subtitle: subtitle::SubtitleStyle { preset: "variety".into(), font: Some("msyhbd.ttc".into()), ..Default::default() }
+                    .resolve()
+                    .ok()
+                    .and_then(|look| subtitle::Prepared::new(look, None).ok())
+                    .map(Arc::new),
+                scenes: Vec::new(),
                 audio: Some(wav.clone()),
                 fast: false,
             };
@@ -1267,5 +1428,70 @@ mod e2e {
             eprintln!("{style:?}: {size} bytes in {:?} -> {}", t.elapsed(), out.display());
             assert!(size > 10_000);
         }
+    }
+
+    /// 插入片头 + 叠加贴纸 + 综艺字幕，导出成 MP4 并截出几帧（需要本机 ffmpeg、Edge/Chrome，会下载站酷快乐体）：
+    /// SG_E2E_DIR=目录 cargo test --release --lib recorder::e2e::export_with_scenes -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn export_with_scenes() {
+        let Some(root) = std::env::var_os("SG_E2E_DIR").map(PathBuf::from) else { return };
+        let Some(ff) = ffmpeg::find_local("", &root.join("tools")) else { return };
+        let Some(browser) = scene::find_browser("") else { return };
+        let frames_dir = root.join("frames");
+        std::fs::create_dir_all(&frames_dir).unwrap();
+        std::fs::create_dir_all(root.join("scenes")).unwrap();
+        let (w, h) = (1280u32, 720u32);
+        let mut sources = Vec::new();
+        for i in 0..30u32 {
+            let img = image::RgbImage::from_fn(w, h, |x, y| image::Rgb([30 + ((x + i * 20) % 200) as u8 / 2, 60 + (y % 120) as u8 / 2, 120]));
+            let file = frames_dir.join(format!("{:06}.jpg", i + 1));
+            img.save(&file).unwrap();
+            sources.push(render::SourceFrame { t: i as f64 * 0.2, file, minor: false });
+        }
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/recorder/assets/scenes");
+        let fill = |name: &str, vars: Value| {
+            let src = std::fs::read_to_string(assets.join(format!("{name}.html"))).unwrap();
+            std::fs::write(root.join("scenes").join(format!("{name}.html")), scene::fill_template(&src, &vars)).unwrap();
+        };
+        fill("title", json!({"title": "拾光演示", "subtitle": "代码生成的片头"}));
+        fill("sticker", json!({"text": "太强了！", "x": 0.7, "y": 0.3}));
+        let mk = |id: &str, kind: &str, at: f64, d: f64| scene::Scene { id: id.into(), kind: kind.into(), at, duration: d, file: format!("scenes/{id}.html"), title: String::new(), template: None, vars: None };
+        let scenes_doc = vec![mk("title", "insert", 0.0, 2.0), mk("sticker", "overlay", 3.0, 2.0)];
+        let fonts = root.join("fonts");
+        for f in ["kuaile", "huangyou"] {
+            subtitle::ensure(&fonts, f, crate::agents::fallback_proxy().as_deref(), &|_, _| {}).await.unwrap();
+        }
+        let compiled = timeline::compile(&[], 6.0, timeline::Opts { fps: 30, zoom: false, zoom_scale: 2.0 }, None);
+        let items = [narration::Narration { at: 1.0, text: "这个功能【超好用】，一句话就能派活。".into(), audio: None }];
+        let plan = narration::plan(6.0, &[], &items, &[2.5], &[(0.0, 2.0)]);
+        assert_eq!(plan.inserts, vec![Some((0.0, 2.0))]);
+        let css = scene::font_css(&fonts);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut rendered = Vec::new();
+        for sc in &scenes_doc {
+            let start = if sc.is_overlay() { plan.map.to_output(sc.at) } else { plan.inserts[0].unwrap().0 };
+            rendered.push(scene::render(&browser, &root, sc, start, w, h, 30, &css, &cancel, &|_, _| {}).await.unwrap());
+        }
+        let n_out = (plan.map.output_duration() * 30.0).ceil() as usize;
+        let frame_map = (0..n_out).map(|k| { let t = k as f64 / 30.0; (((plan.map.to_source(t) * 30.0).round() as usize).min(compiled.frames.len() - 1), t) }).collect();
+        let look = subtitle::SubtitleStyle { preset: "variety".into(), ..Default::default() }.resolve().unwrap();
+        let font = look.font.as_deref().and_then(|f| subtitle::locate(&fonts, f));
+        let out = root.join("scenes-demo.mp4");
+        let job = render::Job {
+            ffmpeg: ff.clone(), encoder: render::pick_encoder(&ff), out: out.clone(), width: w, height: h,
+            sources, compiled, masks: Vec::new(),
+            opts: render::RenderOpts { fps: 30, cursor_scale: 1.0, style: render::Style::Plain },
+            frame_map, cues: plan.cues.clone(),
+            subtitle: Some(Arc::new(subtitle::Prepared::new(look, font.as_deref()).unwrap())),
+            scenes: rendered, audio: None, fast: false,
+        };
+        tokio::task::spawn_blocking(move || render::run(job, Arc::new(AtomicBool::new(false)), |_, _| {})).await.unwrap().unwrap();
+        // 截出：片头中间、贴纸 + 字幕
+        for (name, t) in [("f_title", "1.2"), ("f_overlay", "5.3")] {
+            let st = std::process::Command::new(&ff).args(["-y", "-loglevel", "error", "-ss", t, "-i"]).arg(&out).args(["-frames:v", "1"]).arg(root.join(format!("{name}.png"))).status().unwrap();
+            assert!(st.success());
+        }
+        eprintln!("cues = {:?}", plan.cues);
     }
 }

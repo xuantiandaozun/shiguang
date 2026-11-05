@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ipc, onEvent } from "../lib/ipc";
+import { CODE_AGENT_LABELS, ipc, onEvent } from "../lib/ipc";
 import type { AgentRun, AgentRunStatus, CodeAgentInfo, Workspace, WorkspaceData, WorkspaceLink } from "../lib/ipc";
 
 const RUN_STATUS: Record<AgentRunStatus, string> = {
@@ -147,7 +147,7 @@ export default function WorkspacesTab() {
       <div className="flex items-start justify-between gap-3">
         <div>
           <h2 className="text-base font-semibold text-slate-100">工作区</h2>
-          <p className="mt-1 text-xs text-slate-400">登记固定项目的路径、部署方式、验证命令和规则。聊天里提到名称或别名，拾光就知道改哪里；代码修改可以外派给 Claude Code / Codex。</p>
+          <p className="mt-1 text-xs text-slate-400">登记固定项目的路径、部署方式、验证命令和规则。聊天里提到名称或别名，拾光就知道改哪里；代码修改可以外派给 Claude Code / Codex / Cursor / Pi。</p>
         </div>
         {!draft && <div className="flex shrink-0 gap-2">
           <button type="button" disabled={busy} onClick={() => void pickFolder(true)} className="rounded-md border border-slate-600 px-3 py-1.5 text-xs text-slate-200 hover:border-sky-500 disabled:opacity-50">从文件夹识别</button>
@@ -181,6 +181,8 @@ export default function WorkspacesTab() {
               <option value="">自动（Claude Code 优先）</option>
               <option value="claude_code">Claude Code</option>
               <option value="codex">Codex</option>
+              <option value="cursor">Cursor</option>
+              <option value="pi">Pi</option>
             </select>
           </Field>
           <Field label="外派权限">
@@ -225,7 +227,7 @@ export default function WorkspacesTab() {
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-sm font-semibold text-slate-100">编码智能体</h3>
-          <p className="mt-1 text-xs text-slate-400">外派使用你自己的 Claude / Codex 订阅额度。</p>
+          <p className="mt-1 text-xs text-slate-400">外派使用你自己的 Claude / Codex / Cursor / Pi 订阅额度。Cursor 和 Pi 不能中途回问，有疑问会写在每轮总结里。</p>
         </div>
         <button type="button" onClick={() => { setAgents(null); void loadAgents(); }} className="text-xs text-sky-400 hover:text-sky-300">重新检测</button>
       </div>
@@ -258,7 +260,7 @@ export default function WorkspacesTab() {
           {runs.map((r) => <button key={r.id} type="button" onClick={() => void ipc.showAgentRunWindow(r.id).catch((e) => setError(String(e)))} className="flex w-full items-center justify-between gap-4 px-4 py-3 text-left hover:bg-slate-700/40">
             <div className="min-w-0">
               <div className="truncate font-medium text-slate-100">{r.title}</div>
-              <div className="mt-1 text-xs text-slate-500">{r.agent === "claude_code" ? "Claude Code" : "Codex"} · {r.data.workspace_name ?? r.root} · {r.created_at}</div>
+              <div className="mt-1 text-xs text-slate-500">{CODE_AGENT_LABELS[r.agent] ?? r.agent} · {r.data.workspace_name ?? r.root} · {r.created_at}</div>
             </div>
             <div className="shrink-0 text-right">
               <div className={`text-xs ${r.status === "asking" ? "text-amber-300" : r.status === "error" ? "text-rose-300" : "text-slate-300"}`}>{RUN_STATUS[r.status] ?? r.status}</div>

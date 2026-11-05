@@ -121,8 +121,32 @@ description: >
 - 自动放大不理想时，用 `zooms` 指定放大段；`focus` 为固定焦点，不写则跟随光标。传 `"auto"` 恢复自动。
 - 这些也都可以让用户在「录屏截图 → 编辑」里调。
 
+## 字幕样式
+
+- `record_edit` 的 `subtitle_style`：直接给预设名，或在预设上覆盖个别参数。
+  - `classic`：白字 + 半透明黑底（默认，适合教程）
+  - `variety`：综艺花字——站酷快乐体、黄橙渐变、白色 + 深棕双层粗描边、投影、弹出动画（适合宣传、轻松风格）
+  - `minimal`：白字黑描边，无底框
+  - `karaoke`：随朗读进度逐字变黄
+- 想更花：`{"preset": "variety", "fill": ["#7CF7FF", "#2E8BFF"], "strokes": [{"width": 16, "color": "#0B1E4A"}, {"width": 7, "color": "#FFFFFF"}], "highlight": ["#FFE45C", "#FF9F1C"]}`。动画可选 pop / fade / slide / typewriter / karaoke / none。
+- 解说词里用【】括出重点词（如「这个功能【超好用】」），字幕里会换成 highlight 颜色；`.srt` 里自动去掉括号。每条解说 1–2 个重点词就够，别满屏都是。
+- 字体：`font` 可填 kuaile（站酷快乐体）、huangyou（站酷庆科黄油体）、xiaowei（站酷小薇）、mashan（马善政毛笔），首次导出时自动下载（免费可商用）；也可以填用户放进字体目录的文件名或系统字体文件名。
+
+## 代码片段（片头、章节卡、贴纸）
+
+成片不一定全是录制画面。用 `record_edit` 的 `scenes` 加网页做的片段，导出时逐帧渲染进视频：
+
+- **insert**：插在源时间 `at` 处、独占画面，原画面在那里暂停（片头 `at: 0`，片尾 `at` = 录制时长，章节卡放在新步骤开始的时间）。
+- **overlay**：从 `at` 开始叠在录制画面上，背景透明（名牌条、标注圆圈、综艺贴纸）。
+- 先用内置模板：`{"id": "intro", "template": "title", "at": 0, "duration": 4, "vars": {"title": "…", "subtitle": "…"}}`。模板清单和可填参数在 `record_timeline` 的 `scene_templates`。
+- 模板不够就自己写 `html`（完整网页）：画布宽 1920 CSS px、高按画面比例（通常 1080）；用 CSS 动画（`animation` + `animation-delay`，`forwards` 停在最后一帧）或定义 `window.renderFrame = (t) => {...}` 按秒画；`window.SG_DURATION` 是片段时长，做退场动画用；overlay 的页面背景必须透明。时间由导出接管，`setTimeout`、`requestAnimationFrame`、`Date.now()` 都按视频时间走，不要用随机数（每帧会不一样），要随机就用固定种子。字体可以直接用 `"ZCOOL KuaiLe"`、`"ZCOOL QingKe HuangYou"`。
+- **每次加或改片段后，先 `record_scene_preview` 再 `read_image` 看效果**，文字溢出、颜色难看就改，确认后再导出。
+- 解说想盖在插入片段上，把那条解说的 `at` 设得比片段的 `at` 早 0.05 秒；同一时刻的解说会排在片段之后。
+- `scenes` 是整体替换：改一个片段时，其它片段也要原样带上（`record_timeline` 里有现有列表，不带 html 和 template 的项沿用原来的文件）。
+- 节制使用：一条 1–2 分钟的视频，片头 + 片尾 + 2–3 个章节卡或贴纸就够了。
+
 ## 导出
 
-- `record_export`。宣传视频用 `style: "padded"`。字幕默认画进画面，同时生成同名 `.srt`。
+- `record_export`。宣传视频用 `style: "padded"`，字幕用 `variety`，配上片头片尾。有代码片段时首次导出要启动后台浏览器逐帧渲染，片段越长越慢（5 秒片头约 10–20 秒），渲染结果会缓存。字幕默认画进画面，同时生成同名 `.srt`。
 - 导出结果里的 `tightened_s` 是紧凑节奏剪掉的秒数，`duration_s` 是成片时长。成片超过 90 秒时，告诉用户可以删减哪几段。
 - 首次导出会准备 ffmpeg，可能需要下载几十 MB，提前告诉用户。
