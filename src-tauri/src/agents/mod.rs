@@ -799,15 +799,14 @@ fn schedule_idle_close(app: AppHandle, id: String, generation: u64) {
     });
 }
 
-/// 没有人在 await 时，把提问/结束写进会话，提醒主对话。
+/// 没有人在 await 时，把提问/结束通知主对话，让 AI 接着处理。
 fn notify_background(app: &AppHandle, id: &str) {
     let h = handle(app, id);
     if h.inner.lock().unwrap().awaiting > 0 {
         return;
     }
     let Ok(run) = load(app, id) else { return };
-    let state = app.state::<crate::AppState>();
-    if state.chat_busy.load(std::sync::atomic::Ordering::SeqCst) || run.session_id == 0 {
+    if run.session_id == 0 {
         return;
     }
     let who = label(&run.agent);
@@ -817,8 +816,8 @@ fn notify_background(app: &AppHandle, id: &str) {
         "error" => format!("外派任务「{}」（{who}）出错：{}", run.title, clip(run.data.get("error").and_then(Value::as_str).unwrap_or(""), 300)),
         _ => return,
     };
-    let _ = state.db.save_chat(run.session_id, "system", &line);
-    let _ = app.emit("subagent-chat", json!({"session_id": run.session_id, "content": line}));
+    // AI 正忙则带进当前回复，空闲则自动开一轮处理。
+    crate::chat_queue::post_event(app, run.session_id, &line);
 }
 
 // ---------- 智能体回问（MCP 桥） ----------

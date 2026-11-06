@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio_util::sync::CancellationToken;
 
 /// check_task 默认返回的尾部字符数
@@ -67,6 +67,8 @@ pub struct TaskInfo {
 struct TaskEntry {
     info: TaskInfo,
     success_exit_codes: Vec<i32>,
+    /// 结束后要通知的聊天会话。设置后用户停止聊天也不会结束该任务。
+    notify_session: Option<i64>,
 }
 
 type TaskMap = Arc<Mutex<HashMap<String, TaskEntry>>>;
@@ -232,6 +234,7 @@ impl TaskManager {
                 TaskEntry {
                     info: info.clone(),
                     success_exit_codes: accepted_exit_codes,
+                    notify_session: None,
                 },
             );
         emit_changed(app, &info);
@@ -252,7 +255,8 @@ impl TaskManager {
                     let Some(entry) = guard.get_mut(&id_cancel) else {
                         return;
                     };
-                    if entry.info.status != "running" {
+                    // 已改为「结束后通知」的任务脱离聊天轮次，用户停止回复时继续运行。
+                    if entry.info.status != "running" || entry.notify_session.is_some() {
                         false
                     } else {
                         entry.info.status = "cancelled".to_string();
@@ -318,7 +322,7 @@ impl TaskManager {
                 let _ = std::fs::remove_file(path);
             }
             let finished = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            let snapshot = {
+            let (snapshot, notify) = {
                 let Ok(mut guard) = tasks2.lock() else { return };
                 let Some(entry) = guard.get_mut(&id2) else {
                     return;
@@ -329,11 +333,27 @@ impl TaskManager {
                 }
                 entry.info.exit_code = code;
                 entry.info.finished_at = Some(finished);
-                entry.info.clone()
+                (entry.info.clone(), entry.notify_session.take())
             };
             emit_changed(&app2, &snapshot);
+            if let Some(session_id) = notify {
+                let tail = app2.state::<crate::AppState>().tasks.tail(&id2, 1500).unwrap_or_default();
+                crate::chat_queue::post_event(&app2, session_id, &finish_notice(&snapshot, &tail));
+            }
         });
         Ok(info)
+    }
+
+    /// 设置/取消「结束后通知」。任务已结束时返回 false（调用方直接给结果）。
+    pub fn set_notify(&self, id: &str, session_id: Option<i64>) -> Result<bool> {
+        let mut guard = self.tasks.lock().map_err(|e| anyhow!(e.to_string()))?;
+        let entry = guard.get_mut(id).ok_or_else(|| anyhow!("任务不存在: {}", id))?;
+        if entry.info.status != "running" {
+            entry.notify_session = None;
+            return Ok(false);
+        }
+        entry.notify_session = session_id;
+        Ok(true)
     }
 
     pub fn get(&self, id: &str) -> Option<TaskInfo> {
@@ -523,6 +543,28 @@ impl TaskManager {
             }
         }
     }
+}
+
+/// 任务结束通知正文：状态、退出码和日志末尾，够模型判断下一步。
+fn finish_notice(info: &TaskInfo, tail: &str) -> String {
+    let status = match info.status.as_str() {
+        "done" => "成功结束",
+        "failed" => "失败",
+        "cancelled" => "已被停止",
+        "timeout" => "超时",
+        other => other,
+    };
+    let code = info.exit_code.map(|c| format!("，退出码 {c}")).unwrap_or_default();
+    let tail = tail.trim();
+    let tail = if tail.is_empty() {
+        "（无输出）".to_string()
+    } else {
+        format!("\n```\n{tail}\n```")
+    };
+    format!(
+        "后台任务 {}「{}」{status}{code}。输出末尾：{tail}\n需要更多输出用 check_task（task_id={}）。",
+        info.id, info.label, info.id
+    )
 }
 
 /// 每个命令都在独立 cmd 子进程内执行，切换代码页不会影响用户自己的终端。

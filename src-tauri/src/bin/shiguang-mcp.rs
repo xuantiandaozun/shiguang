@@ -272,10 +272,18 @@ async fn bridge(payload: Value) -> Result<Value> {
     let info: Value = serde_json::from_slice(&std::fs::read(dir.join("mcp-bridge.json")).map_err(|_| anyhow!("拾光未运行，请先启动桌面应用"))?)?;
     let port = info.get("port").and_then(Value::as_u64).ok_or_else(|| anyhow!("桥接端口无效"))?;
     let token = info.get("token").and_then(Value::as_str).ok_or_else(|| anyhow!("桥接令牌无效"))?;
-    let response = reqwest::Client::new().post(format!("http://127.0.0.1:{port}/"))
+    // 本机桥接不能走代理：终端里的 HTTP_PROXY（如 Clash）会把 127.0.0.1 请求转出去，
+    // 代理一出问题就返回非 JSON 的 502，表现为“响应解析失败”。
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let response = client.post(format!("http://127.0.0.1:{port}/"))
         .header("x-shiguang-token", token).json(&payload).send().await
         .map_err(|_| anyhow!("无法连接拾光，请确认桌面应用正在运行"))?;
-    let value: Value = response.json().await?;
+    let status = response.status();
+    let body = response.text().await.map_err(|e| anyhow!("读取拾光响应失败（HTTP {status}）：{e}"))?;
+    let value: Value = serde_json::from_str(&body).map_err(|_| {
+        let head: String = body.chars().take(120).collect();
+        anyhow!("拾光返回的不是有效响应（HTTP {status}）：{head}。可能端口被其他程序占用，请重启拾光后重试")
+    })?;
     if let Some(e) = value.get("error").and_then(Value::as_str) { return Err(anyhow!(e.to_string())); }
     Ok(value)
 }

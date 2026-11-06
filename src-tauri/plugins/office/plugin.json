@@ -1,0 +1,25 @@
+{
+  "id": "office",
+  "name": "办公文档",
+  "version": "1.0.0",
+  "description": "Word / Excel / PDF / PPT 的结构化读取与编辑、新建 Word、PDF 合并拆分，借助本机 Office/WPS/LibreOffice 转换格式。",
+  "order": 12,
+  "tools": [
+    "tools.json"
+  ],
+  "skills": "skills",
+  "categories": {
+    "office": {
+      "label": "办公文档",
+      "description": "读取、新建、编辑 Word/Excel/PDF/PPT 文件：填写模板、替换文字、插入表格图片、改表格数据和样式、合并拆分 PDF、转 PDF 或其它格式",
+      "tools": [
+        "office_read",
+        "word_create",
+        "word_edit",
+        "excel_edit",
+        "pdf_edit",
+        "office_convert"
+      ]
+    }
+  }
+}

@@ -56,7 +56,7 @@ pub fn edit_file(
     )
 }
 
-fn backup_dir(app: &AppHandle) -> PathBuf {
+pub(crate) fn backup_dir(app: &AppHandle) -> PathBuf {
     app.path()
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir())
@@ -96,7 +96,7 @@ fn check_writable(path: &Path) -> Result<()> {
 }
 
 /// 把原文件复制到备份目录（文件名加时间戳前缀），返回备份路径
-fn backup_file(path: &Path, dir: &Path) -> Result<PathBuf> {
+pub(crate) fn backup_file(path: &Path, dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let fname = path
         .file_name()

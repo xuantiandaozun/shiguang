@@ -638,4 +638,15 @@ mod tests {
         assert!(resolve_inside(Path::new("x"), "a/b.js", false).is_ok());
         assert!(resolve_inside(Path::new("x"), "../y", true).is_ok());
     }
+
+    /// 仓库里的内置插件全部能无错加载
+    #[test]
+    fn repo_builtin_plugins_load_cleanly() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins");
+        let snap = build_snapshot(&Dirs { builtin: Some(dir), user: None }, &BTreeMap::new(), false, 1);
+        assert!(snap.errors.is_empty(), "{:?}", snap.errors.iter().map(|e| format!("{}: {}", e.plugin, e.message)).collect::<Vec<_>>());
+        for name in ["desktop_snapshot", "desktop_action", "office_read", "word_edit", "excel_edit", "pdf_edit", "office_convert"] {
+            assert!(snap.tool(name).is_some(), "缺少工具 {name}");
+        }
+    }
 }

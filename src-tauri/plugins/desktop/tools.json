@@ -1,0 +1,477 @@
+[
+  {
+    "name": "desktop_window",
+    "label": "桌面窗口",
+    "description": "管理桌面软件窗口。list：列出打开的窗口（标题、进程、hwnd、位置，标出前台窗口）；open：启动程序/打开文件或网址（target 写 notepad、calc、winword、excel、完整路径、ms-settings: 等），等待新窗口出现并返回它；focus 切到前台；minimize/maximize/restore；move 按 rect 移动缩放；close 发送关闭（相当于点 ×，有未保存内容时软件会自己弹确认）。拾光自己的窗口不会列出。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "open",
+            "focus",
+            "close",
+            "minimize",
+            "maximize",
+            "restore",
+            "move"
+          ],
+          "description": "默认 list"
+        },
+        "window": {
+          "description": "目标窗口：标题或进程名的一部分（如「记事本」「WINWORD」），或 desktop_window 列出的 hwnd（数字写成字符串）。不写则沿用上次操作的窗口，再没有就用最上层的窗口",
+          "type": "string"
+        },
+        "target": {
+          "type": "string",
+          "description": "open：程序名、可执行文件/文档完整路径、网址或 URI"
+        },
+        "args": {
+          "type": "string",
+          "description": "open：命令行参数"
+        },
+        "workdir": {
+          "type": "string",
+          "description": "open：工作目录"
+        },
+        "wait_ms": {
+          "type": "integer",
+          "description": "open：等待新窗口的最长毫秒数，默认 8000"
+        },
+        "rect": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "move：[x, y, 宽, 高]，屏幕物理像素"
+        }
+      }
+    }
+  },
+  {
+    "name": "desktop_snapshot",
+    "label": "读取窗口结构",
+    "description": "读取桌面软件窗口的无障碍（UI Automation）控件树：按层级列出按钮、输入框、菜单、列表、标签页、文字等，每项带编号 [n]、类型、名称和状态（值、勾选、展开、选中、不可用、焦点）。同进程弹出的菜单和对话框会作为单独区块附在后面。编号供 desktop_action 的 target.ref 使用，界面变化（打开菜单/对话框/切换页面）后要重新快照。query 只列出名称/值包含该文字的控件，适合大窗口。结果 sparse=true 表示这个软件没暴露控件结构，改用 desktop_screenshot。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "window": {
+          "description": "目标窗口：标题或进程名的一部分（如「记事本」「WINWORD」），或 desktop_window 列出的 hwnd（数字写成字符串）。不写则沿用上次操作的窗口，再没有就用最上层的窗口",
+          "type": "string"
+        },
+        "query": {
+          "type": "string",
+          "description": "只看名称、值或 id 包含这段文字的控件（带所在位置路径）"
+        },
+        "max_chars": {
+          "type": "integer",
+          "description": "快照最大字数，默认 5000"
+        },
+        "include_offscreen": {
+          "type": "boolean",
+          "description": "包含屏幕外（滚动区域外、折叠起来）的控件"
+        },
+        "max_depth": {
+          "type": "integer",
+          "description": "最大遍历深度"
+        }
+      }
+    }
+  },
+  {
+    "name": "desktop_action",
+    "label": "操作桌面软件",
+    "description": "在桌面软件里点击、输入、按键、选择、勾选、展开、滚动、拖拽、读取文字或等待。目标优先用 desktop_snapshot 的 ref，或 name+role 直接定位（不必先快照）；控件树读不到的界面用 target.text（本地 OCR 按文字点）、target.visual（Jev 看图定位）或 target.point（截图坐标）。默认先走控件接口（Invoke/Value/Toggle/Select/ExpandCollapse，不移动鼠标，窗口在后台也能操作），不支持时自动切到前台用真实鼠标键盘。read 读取控件或整个窗口的文字（文档/编辑器可读全文）。每步返回 method（实际用的方式）；结束后返回 effect：新弹出/关闭的窗口、前台窗口、标题变化——据此判断下一步，不必每步重新快照。多步用 steps 一次提交。保存、发送、删除、付款等操作仍需用户授权，effect 不等于业务成功，必要时读回核验。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "window": {
+          "description": "目标窗口：标题或进程名的一部分（如「记事本」「WINWORD」），或 desktop_window 列出的 hwnd（数字写成字符串）。不写则沿用上次操作的窗口，再没有就用最上层的窗口",
+          "type": "string"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "click",
+            "double_click",
+            "right_click",
+            "middle_click",
+            "hover",
+            "drag",
+            "type",
+            "press",
+            "select",
+            "set_checked",
+            "expand",
+            "collapse",
+            "scroll",
+            "focus",
+            "read",
+            "locate",
+            "wait"
+          ]
+        },
+        "target": {
+          "type": "object",
+          "description": "定位方式四选一：ref；name/role/automation_id/class（可组合，AND）；text（OCR）；visual（Jev）；point（坐标）。优先 ref 或 name+role，结构读不到时才用 text/visual/point",
+          "properties": {
+            "ref": {
+              "type": "integer",
+              "description": "desktop_snapshot 输出里的编号（同一窗口最近一次快照有效）"
+            },
+            "name": {
+              "type": "string",
+              "description": "控件名称（先精确匹配，再包含匹配）"
+            },
+            "role": {
+              "type": "string",
+              "description": "控件类型：button/edit/checkbox/radiobutton/combobox/list/listitem/menuitem/tabitem/treeitem/hyperlink/text/document/dataitem/slider，或中文 按钮/输入框/下拉框…"
+            },
+            "automation_id": {
+              "type": "string",
+              "description": "快照里的 id=…"
+            },
+            "class": {
+              "type": "string",
+              "description": "窗口类名，少用"
+            },
+            "index": {
+              "type": "integer",
+              "description": "多个匹配时取第几个（从 1 开始，按界面从上到下）"
+            },
+            "text": {
+              "type": "string",
+              "description": "按画面上的文字定位：截取窗口后本地 OCR 找这段文字，再用真实鼠标点它的中心。用于控件树读不到的自绘界面；单独使用"
+            },
+            "visual": {
+              "type": "string",
+              "description": "按画面定位：一句话描述目标外观和位置（如「左侧栏第二个图标」）。需在设置里启用 Jev；单独使用"
+            },
+            "point": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "description": "[x, y]：desktop_screenshot 截图上的像素坐标（窗口左上角为 0,0）；单独使用"
+            }
+          }
+        },
+        "to": {
+          "type": "object",
+          "description": "drag 的落点，写法同 target",
+          "properties": {
+            "ref": {
+              "type": "integer",
+              "description": "desktop_snapshot 输出里的编号（同一窗口最近一次快照有效）"
+            },
+            "name": {
+              "type": "string",
+              "description": "控件名称（先精确匹配，再包含匹配）"
+            },
+            "role": {
+              "type": "string",
+              "description": "控件类型：button/edit/checkbox/radiobutton/combobox/list/listitem/menuitem/tabitem/treeitem/hyperlink/text/document/dataitem/slider，或中文 按钮/输入框/下拉框…"
+            },
+            "automation_id": {
+              "type": "string",
+              "description": "快照里的 id=…"
+            },
+            "class": {
+              "type": "string",
+              "description": "窗口类名，少用"
+            },
+            "index": {
+              "type": "integer",
+              "description": "多个匹配时取第几个（从 1 开始，按界面从上到下）"
+            },
+            "text": {
+              "type": "string",
+              "description": "按画面上的文字定位：截取窗口后本地 OCR 找这段文字，再用真实鼠标点它的中心。用于控件树读不到的自绘界面；单独使用"
+            },
+            "visual": {
+              "type": "string",
+              "description": "按画面定位：一句话描述目标外观和位置（如「左侧栏第二个图标」）。需在设置里启用 Jev；单独使用"
+            },
+            "point": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "description": "[x, y]：desktop_screenshot 截图上的像素坐标（窗口左上角为 0,0）；单独使用"
+            }
+          }
+        },
+        "text": {
+          "type": "string",
+          "description": "type 要输入的文字（换行符会按回车键输入）"
+        },
+        "clear": {
+          "type": "boolean",
+          "description": "type 前清空原内容。输入框/下拉框默认 true；文档、富文本默认 false（在光标处输入）"
+        },
+        "key": {
+          "type": "string",
+          "description": "press 的按键：Enter、Esc、Tab、Ctrl+S、Ctrl+Shift+N、Alt+F4、F5、Win+D；空格分隔表示依次按，如 \"Alt F\""
+        },
+        "option": {
+          "type": "string",
+          "description": "select：下拉框/列表要选的选项文字"
+        },
+        "checked": {
+          "type": "boolean",
+          "description": "set_checked 的目标状态"
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "up",
+            "down",
+            "left",
+            "right"
+          ],
+          "description": "scroll 方向，默认 down"
+        },
+        "amount": {
+          "type": "integer",
+          "description": "scroll 步数，默认 3"
+        },
+        "page": {
+          "type": "boolean",
+          "description": "scroll 按整页"
+        },
+        "method": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "mouse",
+            "keys"
+          ],
+          "description": "auto（默认）：先用控件接口（不抢鼠标，窗口在后台也行），不行再用真实鼠标键盘；mouse：强制真实鼠标；keys：type 强制逐字键盘输入（有的程序只认键盘事件）"
+        },
+        "max_chars": {
+          "type": "integer",
+          "description": "read 返回的最大字数，默认 8000"
+        },
+        "gone": {
+          "type": "boolean",
+          "description": "wait：等目标消失（默认等出现）"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "description": "wait 超时，默认 5000，最大 30000"
+        },
+        "settle_ms": {
+          "type": "integer",
+          "description": "动作后等界面稳定的毫秒数，单步默认 400、多步每步 250"
+        },
+        "steps": {
+          "type": "array",
+          "description": "多步顺序执行（最多 20 步），字段同单步；遇到失败即停并说明停在哪步。给了 steps 就不要再给顶层 action",
+          "items": {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "click",
+                  "double_click",
+                  "right_click",
+                  "middle_click",
+                  "hover",
+                  "drag",
+                  "type",
+                  "press",
+                  "select",
+                  "set_checked",
+                  "expand",
+                  "collapse",
+                  "scroll",
+                  "focus",
+                  "read",
+                  "locate",
+                  "wait"
+                ]
+              },
+              "target": {
+                "type": "object",
+                "description": "定位方式四选一：ref；name/role/automation_id/class（可组合，AND）；text（OCR）；visual（Jev）；point（坐标）。优先 ref 或 name+role，结构读不到时才用 text/visual/point",
+                "properties": {
+                  "ref": {
+                    "type": "integer",
+                    "description": "desktop_snapshot 输出里的编号（同一窗口最近一次快照有效）"
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "控件名称（先精确匹配，再包含匹配）"
+                  },
+                  "role": {
+                    "type": "string",
+                    "description": "控件类型：button/edit/checkbox/radiobutton/combobox/list/listitem/menuitem/tabitem/treeitem/hyperlink/text/document/dataitem/slider，或中文 按钮/输入框/下拉框…"
+                  },
+                  "automation_id": {
+                    "type": "string",
+                    "description": "快照里的 id=…"
+                  },
+                  "class": {
+                    "type": "string",
+                    "description": "窗口类名，少用"
+                  },
+                  "index": {
+                    "type": "integer",
+                    "description": "多个匹配时取第几个（从 1 开始，按界面从上到下）"
+                  },
+                  "text": {
+                    "type": "string",
+                    "description": "按画面上的文字定位：截取窗口后本地 OCR 找这段文字，再用真实鼠标点它的中心。用于控件树读不到的自绘界面；单独使用"
+                  },
+                  "visual": {
+                    "type": "string",
+                    "description": "按画面定位：一句话描述目标外观和位置（如「左侧栏第二个图标」）。需在设置里启用 Jev；单独使用"
+                  },
+                  "point": {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    },
+                    "description": "[x, y]：desktop_screenshot 截图上的像素坐标（窗口左上角为 0,0）；单独使用"
+                  }
+                }
+              },
+              "to": {
+                "type": "object",
+                "description": "drag 的落点，写法同 target",
+                "properties": {
+                  "ref": {
+                    "type": "integer",
+                    "description": "desktop_snapshot 输出里的编号（同一窗口最近一次快照有效）"
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "控件名称（先精确匹配，再包含匹配）"
+                  },
+                  "role": {
+                    "type": "string",
+                    "description": "控件类型：button/edit/checkbox/radiobutton/combobox/list/listitem/menuitem/tabitem/treeitem/hyperlink/text/document/dataitem/slider，或中文 按钮/输入框/下拉框…"
+                  },
+                  "automation_id": {
+                    "type": "string",
+                    "description": "快照里的 id=…"
+                  },
+                  "class": {
+                    "type": "string",
+                    "description": "窗口类名，少用"
+                  },
+                  "index": {
+                    "type": "integer",
+                    "description": "多个匹配时取第几个（从 1 开始，按界面从上到下）"
+                  },
+                  "text": {
+                    "type": "string",
+                    "description": "按画面上的文字定位：截取窗口后本地 OCR 找这段文字，再用真实鼠标点它的中心。用于控件树读不到的自绘界面；单独使用"
+                  },
+                  "visual": {
+                    "type": "string",
+                    "description": "按画面定位：一句话描述目标外观和位置（如「左侧栏第二个图标」）。需在设置里启用 Jev；单独使用"
+                  },
+                  "point": {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    },
+                    "description": "[x, y]：desktop_screenshot 截图上的像素坐标（窗口左上角为 0,0）；单独使用"
+                  }
+                }
+              },
+              "text": {
+                "type": "string",
+                "description": "type 要输入的文字（换行符会按回车键输入）"
+              },
+              "clear": {
+                "type": "boolean",
+                "description": "type 前清空原内容。输入框/下拉框默认 true；文档、富文本默认 false（在光标处输入）"
+              },
+              "key": {
+                "type": "string",
+                "description": "press 的按键：Enter、Esc、Tab、Ctrl+S、Ctrl+Shift+N、Alt+F4、F5、Win+D；空格分隔表示依次按，如 \"Alt F\""
+              },
+              "option": {
+                "type": "string",
+                "description": "select：下拉框/列表要选的选项文字"
+              },
+              "checked": {
+                "type": "boolean",
+                "description": "set_checked 的目标状态"
+              },
+              "direction": {
+                "type": "string",
+                "enum": [
+                  "up",
+                  "down",
+                  "left",
+                  "right"
+                ],
+                "description": "scroll 方向，默认 down"
+              },
+              "amount": {
+                "type": "integer",
+                "description": "scroll 步数，默认 3"
+              },
+              "page": {
+                "type": "boolean",
+                "description": "scroll 按整页"
+              },
+              "method": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "mouse",
+                  "keys"
+                ],
+                "description": "auto（默认）：先用控件接口（不抢鼠标，窗口在后台也行），不行再用真实鼠标键盘；mouse：强制真实鼠标；keys：type 强制逐字键盘输入（有的程序只认键盘事件）"
+              },
+              "max_chars": {
+                "type": "integer",
+                "description": "read 返回的最大字数，默认 8000"
+              },
+              "gone": {
+                "type": "boolean",
+                "description": "wait：等目标消失（默认等出现）"
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "description": "wait 超时，默认 5000，最大 30000"
+              },
+              "settle_ms": {
+                "type": "integer",
+                "description": "动作后等界面稳定的毫秒数，单步默认 400、多步每步 250"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "desktop_screenshot",
+    "label": "截取软件窗口",
+    "description": "截取某个桌面软件窗口（被遮挡也能截完整，最小化的会先还原），保存到临时目录。当前模型支持看图时图片会直接附给模型；ocr=true 时同时返回画面上每行文字及其位置 rect [x,y,宽,高]。图上像素坐标可直接作为 desktop_action 的 target.point。用于控件树读不到的界面，或核对操作后的画面。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "window": {
+          "description": "目标窗口：标题或进程名的一部分（如「记事本」「WINWORD」），或 desktop_window 列出的 hwnd（数字写成字符串）。不写则沿用上次操作的窗口，再没有就用最上层的窗口",
+          "type": "string"
+        },
+        "ocr": {
+          "type": "boolean",
+          "description": "同时用本地 OCR 识别文字和位置（首次使用会下载约 15MB 模型）"
+        }
+      }
+    }
+  }
+]

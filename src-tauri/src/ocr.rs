@@ -20,6 +20,13 @@ pub struct OcrLineOut {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct OcrBox {
+    pub text: String,
+    pub score: f32,
+    pub rect: [i32; 4],
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct OcrResult {
     pub path: String,
     pub engine: String,
@@ -109,6 +116,35 @@ impl OcrEngine {
             lines,
             hint,
         })
+    }
+
+    /// 阻塞调用：返回每行文字及其外接框 [x, y, 宽, 高]（图片像素）。桌面操控按文字定位用。
+    pub fn recognize_boxes(&self, path: &Path) -> Result<Vec<OcrBox>> {
+        let mut guard = self.inner.lock().map_err(|_| anyhow!("OCR 引擎锁异常"))?;
+        if guard.is_none() {
+            *guard = Some(Self::load(&self.model_dir)?);
+        }
+        let output = guard
+            .as_mut()
+            .unwrap()
+            .run_path(path)
+            .with_context(|| format!("OCR 识别失败: {}", path.display()))?;
+        Ok(output
+            .lines
+            .into_iter()
+            .filter(|l| !l.text.trim().is_empty())
+            .map(|l| {
+                let xs = l.bbox.points.iter().map(|p| p[0]);
+                let ys = l.bbox.points.iter().map(|p| p[1]);
+                let (x0, x1) = xs.fold((f32::MAX, f32::MIN), |(a, b), v| (a.min(v), b.max(v)));
+                let (y0, y1) = ys.fold((f32::MAX, f32::MIN), |(a, b), v| (a.min(v), b.max(v)));
+                OcrBox {
+                    text: l.text,
+                    score: l.score,
+                    rect: [x0.round() as i32, y0.round() as i32, (x1 - x0).round() as i32, (y1 - y0).round() as i32],
+                }
+            })
+            .collect())
     }
 
     fn load(model_dir: &Path) -> Result<RapidOcr> {

@@ -98,3 +98,23 @@ body[data-window="terminal"] .chat-markdown {
 .chat-markdown :is(th, td) { padding: 6px 10px; border: 1px solid var(--md-border); text-align: left; min-width: 80px; }
 .chat-markdown th { background: var(--md-code-bg); font-weight: 600; }
 .chat-markdown input[type="checkbox"] { margin-right: 0.4em; }
+
+/* 可点击的文件路径：点击在资源管理器中定位 */
+.chat-markdown .chat-path {
+  color: var(--md-link);
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  word-break: break-all;
+}
+.chat-markdown .chat-path:hover {
+  text-decoration-style: solid;
+}
+.chat-markdown .chat-path-code code {
+  color: var(--md-link);
+}
+.chat-markdown .chat-path-missing,
+.chat-markdown .chat-path-missing code {
+  color: #f87171;
+  text-decoration: line-through;
+}

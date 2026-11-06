@@ -214,17 +214,13 @@ async fn finish_job(app: &AppHandle, id: &str, session_id: i64, report: Value) {
         .load(std::sync::atomic::Ordering::SeqCst);
     if !busy {
         let line = match status.as_str() {
-            "blocked" => format!("后台子任务卡住了：{summary}"),
-            "cancelled" => "后台子任务已中断。".to_string(),
-            "error" => format!("后台子任务出错：{summary}"),
-            _ => format!("后台子任务完成：{summary}"),
+            "blocked" => format!("后台子任务 {id} 卡住了：{summary}"),
+            "cancelled" => format!("后台子任务 {id} 已中断。"),
+            "error" => format!("后台子任务 {id} 出错：{summary}"),
+            _ => format!("后台子任务 {id} 完成：{summary}（完整汇报用 await_subagent 取）"),
         };
-        let state = app.state::<crate::AppState>();
-        let _ = state.db.save_chat(session_id, "system", &line);
-        let _ = app.emit(
-            "subagent-chat",
-            json!({ "session_id": session_id, "content": line }),
-        );
+        // 主对话空闲：自动开一轮，让 AI 根据汇报继续。
+        crate::chat_queue::post_event(app, session_id, &line);
     }
 }
 

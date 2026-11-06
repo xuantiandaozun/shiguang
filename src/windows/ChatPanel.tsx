@@ -58,7 +58,14 @@ function visibleAssistantContent(content: string): string {
   return text;
 }
 
+/** 后台任务/子代理结束时系统自动发给 AI 的消息前缀（与 chat_queue.rs 一致），界面按通知显示 */
+const EVENT_PREFIX = "【后台通知】";
+const eventNotice = (content: string) => `🔔 ${content.slice(EVENT_PREFIX.length).split("\n")[0]}`;
+
 const mapRow = (r: ChatMsg): UiMessage | null => {
+  if (r.role === "user" && r.content.startsWith(EVENT_PREFIX)) {
+    return { id: `h-${r.id}`, dbId: r.id, role: "system", content: eventNotice(r.content) };
+  }
   const content = r.role === "user" ? r.content : visibleAssistantContent(r.content);
   if (r.role !== "user" && !content) return null;
   return {
@@ -163,6 +170,9 @@ export default function ChatPanel() {
   const [attachments, setAttachments] = useState<string[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  /** AI 回复期间发出、还没被读到的追问（显示文字） */
+  const [queued, setQueued] = useState<string[]>([]);
+  const queuedRef = useRef<string[]>([]);
   const [showSessions, setShowSessions] = useState(false);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
@@ -336,6 +346,34 @@ export default function ChatPanel() {
     add<SessionTodoSnapshot>("session-todos", (p) => {
       if (p.session_id === currentSessionIdRef.current) setSessionTodos(p.todos);
     });
+    // 一轮回复开始（含排队追问、后台通知自动触发的轮次）：补上流式占位
+    add<{ session_id: number }>("chat-turn-started", () => {
+      if (useChatStore.getState().streaming) return;
+      addMessage({ role: "assistant", content: "", streaming: true });
+      setStreaming(true);
+    });
+    // 排队的追问/后台通知被 AI 读到（或停止时入库）：此时才放进对话，顺序与 AI 所见一致
+    add<{ session_id: number; content: string; id: number; event: boolean; answering: boolean }>(
+      "chat-queued-absorbed",
+      (p) => {
+        if (p.session_id !== currentSessionIdRef.current) return;
+        if (p.event) {
+          addMessage({ role: "system", content: eventNotice(p.content), dbId: p.id });
+          return;
+        }
+        const display = queuedRef.current.shift() ?? p.content;
+        setQueued([...queuedRef.current]);
+        if (p.answering) {
+          const msgs = useChatStore.getState().messages;
+          const last = msgs[msgs.length - 1];
+          if (last && last.role === "assistant" && last.streaming && !last.content && !last.reasoning) {
+            setMessages(msgs.slice(0, -1));
+          }
+        }
+        addMessage({ role: "user", content: display, dbId: p.id });
+        if (p.answering) addMessage({ role: "assistant", content: "", streaming: true });
+      },
+    );
     add<{ session_id: number; content: string }>("subagent-chat", (p) => {
       if (p.session_id === currentSessionIdRef.current) {
         addMessage({ role: "system", content: p.content });
@@ -467,9 +505,9 @@ export default function ChatPanel() {
   const send = async () => {
     const text = input.trim();
     const files = [...attachments];
-    if ((!text && files.length === 0) || streaming) return;
+    if (!text && files.length === 0) return;
 
-    const slash = text ? resolveSlashLine(text, slashCommands) : null;
+    const slash = text && !streaming ? resolveSlashLine(text, slashCommands) : null;
     if (slash) {
       setInput("");
       setAttachments([]);
@@ -485,13 +523,39 @@ export default function ChatPanel() {
       const names = files.map((p) => `📎 ${fileName(p)}`).join("\n");
       display = text ? `${text}\n\n${names}` : names;
     }
+    if (streaming) {
+      // 追问：先显示在输入框上方排队，AI 下一步读到时再放进对话（见 chat-queued-absorbed）
+      queuedRef.current.push(display);
+      setQueued([...queuedRef.current]);
+      try {
+        const id = await ipc.sendChat(text, files.length ? files : undefined);
+        // 恰好赶上空闲（上一轮刚结束）：直接作为新一轮发出
+        if (id > 0) {
+          const i = queuedRef.current.indexOf(display);
+          if (i >= 0) queuedRef.current.splice(i, 1);
+          setQueued([...queuedRef.current]);
+          const msgs = useChatStore.getState().messages;
+          const last = msgs[msgs.length - 1];
+          const placeholder = last && last.role === "assistant" && last.streaming && !last.content && !last.reasoning;
+          if (placeholder) setMessages(msgs.slice(0, -1));
+          addMessage({ role: "user", content: display, dbId: id });
+          if (placeholder) addMessage({ role: "assistant", content: "", streaming: true });
+        }
+      } catch (e) {
+        const i = queuedRef.current.indexOf(display);
+        if (i >= 0) queuedRef.current.splice(i, 1);
+        setQueued([...queuedRef.current]);
+        addMessage({ role: "system", content: `发送失败：${String(e)}` });
+      }
+      return;
+    }
     const localId = addMessage({ role: "user", content: display });
     addMessage({ role: "assistant", content: "", streaming: true });
     setStreaming(true);
     setSessionTodos([]);
     try {
       const dbId = await ipc.sendChat(text, files.length ? files : undefined);
-      attachDbId(localId, dbId);
+      if (dbId > 0) attachDbId(localId, dbId);
     } catch (e) {
       finishStreaming();
       addMessage({ role: "system", content: `发送失败：${String(e)}` });
@@ -683,6 +747,20 @@ export default function ChatPanel() {
             <span className="text-sm text-sky-300 font-medium">松开以添加文件</span>
           </div>
         )}
+        {queued.length > 0 && (
+          <div className="mb-2 flex flex-col gap-1">
+            {queued.map((q, i) => (
+              <div
+                key={`${i}-${q}`}
+                title="AI 做完当前这一步就会看到"
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-sky-500/10 border border-sky-500/30 text-[11px] text-sky-200"
+              >
+                <span className="shrink-0 text-sky-400">排队中</span>
+                <span className="truncate">{q}</span>
+              </div>
+            ))}
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className="flex flex-wrap gap-1.5 mb-2">
             {attachments.map((p) => (
@@ -706,7 +784,6 @@ export default function ChatPanel() {
         <div className="flex items-end gap-2">
           <button
             onClick={pickFiles}
-            disabled={streaming}
             title="添加文件（也可粘贴或拖入）"
             className="shrink-0 w-9 h-9 rounded-lg bg-slate-900/80 border border-slate-700 text-slate-400 hover:text-sky-300 hover:border-sky-500/50 disabled:opacity-40 transition flex items-center justify-center"
           >
@@ -714,6 +791,7 @@ export default function ChatPanel() {
               <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
             </svg>
           </button>
+          <div className="relative flex-1 min-w-0">
           <textarea
             ref={inputRef}
             value={input}
@@ -756,28 +834,33 @@ export default function ChatPanel() {
               }
             }}
             rows={1}
-            placeholder="和 AI 说点什么… 输入 / 运行工作流"
-            className="flex-1 resize-none scrollbar-none bg-slate-900/80 text-slate-100 text-sm rounded-lg px-3 py-2 outline-none border border-slate-700 focus:border-sky-500 placeholder:text-slate-500 max-h-28"
+            placeholder={streaming ? "可以继续补充，AI 下一步会看到" : "和 AI 说点什么… 输入 / 运行工作流"}
+            className={`w-full resize-none scrollbar-none bg-slate-900/80 text-slate-100 text-sm rounded-lg pl-3 py-2 outline-none border focus:border-sky-500 placeholder:text-slate-500 max-h-28 block ${streaming ? "pr-24 border-sky-500/40" : "pr-3 border-slate-700"}`}
           />
-          {streaming ? (
-            <button
-              onClick={stop}
-              disabled={cancelling}
-              title="中断当前回复"
-              className="px-3.5 py-2 rounded-lg bg-rose-500/90 text-white text-sm font-medium disabled:opacity-50 hover:bg-rose-500 transition shrink-0 flex items-center gap-1.5"
-            >
-              <span className="inline-block w-2.5 h-2.5 rounded-[2px] bg-white" />
-              {cancelling ? "中断中…" : "停止"}
-            </button>
-          ) : (
-            <button
-              onClick={send}
-              disabled={!input.trim() && attachments.length === 0}
-              className="px-3.5 py-2 rounded-lg bg-gradient-to-r from-sky-500 to-indigo-600 text-white text-sm font-medium disabled:opacity-40 hover:opacity-90 transition shrink-0"
-            >
-              发送
-            </button>
+          {/* 回复中标识：在输入框内右侧，点方块停止 */}
+          {streaming && (
+            <div className="absolute right-1.5 top-1.5 flex items-center gap-1.5 h-6 pl-2 pr-1 rounded-md bg-sky-500/10 border border-sky-500/30 text-[11px] text-sky-300 select-none">
+              <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-pulse" />
+              <span>{cancelling ? "中断中" : "回复中"}</span>
+              <button
+                onClick={stop}
+                disabled={cancelling}
+                title="停止回复"
+                className="w-4 h-4 rounded flex items-center justify-center hover:bg-rose-500/30 disabled:opacity-40 transition"
+              >
+                <span className="inline-block w-2 h-2 rounded-[1px] bg-rose-400" />
+              </button>
+            </div>
           )}
+          </div>
+          <button
+            onClick={send}
+            disabled={!input.trim() && attachments.length === 0}
+            title={streaming ? "AI 会在下一步看到这条消息，先回应你再继续" : undefined}
+            className="px-3.5 py-2 rounded-lg bg-gradient-to-r from-sky-500 to-indigo-600 text-white text-sm font-medium disabled:opacity-40 hover:opacity-90 transition shrink-0"
+          >
+            发送
+          </button>
         </div>
       </div>
 

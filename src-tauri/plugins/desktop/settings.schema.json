@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "properties": {
+    "blocked_processes": {
+      "type": "string",
+      "title": "不允许拾光操作的程序（进程名，逗号分隔，如 KeePass, 1Password）",
+      "default": "KeePass, KeePassXC, 1Password, Bitwarden, LastPass, Dashlane"
+    }
+  }
+}

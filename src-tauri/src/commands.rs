@@ -595,26 +595,23 @@ pub async fn send_chat_message(
     attachments: Option<Vec<String>>,
 ) -> Result<i64, String> {
     let state = app.state::<AppState>();
-    if state.chat_busy.swap(true, Ordering::SeqCst) {
-        return Err("上一条消息还在处理中，请稍候".to_string());
-    }
     let native_vision = {
         let settings = load_settings(&state.db);
         settings.model_supports_vision
     };
     let composed =
-        match compose_user_message(&text, attachments.as_deref().unwrap_or(&[]), native_vision) {
-            Ok(s) => s,
-            Err(e) => {
-                state.chat_busy.store(false, Ordering::SeqCst);
-                return Err(e);
-            }
-        };
+        compose_user_message(&text, attachments.as_deref().unwrap_or(&[]), native_vision)?;
     let session_id = state.db.current_session_id().map_err(|e| e.to_string())?;
+    let item = crate::chat_queue::Pending { session_id, content: composed.clone(), event: false };
+    // AI 正在回复：消息排队，由主循环在下一步带进对话（追问），返回 0 表示尚未入库。
+    if let crate::chat_queue::Submit::Queued = state.chat_queue.submit(&app, item) {
+        return Ok(0);
+    }
     let msg_id = match state.db.save_chat(session_id, "user", &composed) {
         Ok(id) => id,
         Err(e) => {
-            state.chat_busy.store(false, Ordering::SeqCst);
+            // 占用已拿到，入库失败要交还。
+            state.chat_queue.release(&app);
             return Err(e.to_string());
         }
     };
@@ -627,20 +624,7 @@ pub async fn send_chat_message(
     };
     let _ = state.db.auto_title_session(session_id, title_src);
     let _ = app.emit("sessions-changed", ());
-    let cancel = tokio_util::sync::CancellationToken::new();
-    {
-        let mut guard = state.chat_cancel.lock().map_err(|e| e.to_string())?;
-        *guard = Some(cancel.clone());
-    }
-    let app2 = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let result = llm::agent::run_chat(app2.clone(), session_id, msg_id, cancel).await;
-        let busy_state = app2.state::<AppState>();
-        busy_state.chat_busy.store(false, Ordering::SeqCst);
-        if let Err(e) = result {
-            let _ = app2.emit("llm-error", serde_json::json!({ "message": e.to_string() }));
-        }
-    });
+    crate::chat_queue::start_runner(app.clone(), session_id, msg_id);
     Ok(msg_id)
 }
 
@@ -660,9 +644,9 @@ pub async fn save_reply_markdown(window: tauri::WebviewWindow, path: String, con
 }
 
 /// 中断当前回复：模型连接/流式输出、正在执行的工具、子代理以及本轮启动的
-/// 后台命令都会收到取消信号；命令会强制结束整棵进程树。
+/// 后台命令都会收到取消信号；命令会强制结束整棵进程树。设了「结束后通知」的命令不受影响。
 #[tauri::command]
-pub fn stop_chat_message(state: State<AppState>) -> Result<(), String> {
+pub fn stop_chat_message(app: AppHandle, state: State<AppState>) -> Result<(), String> {
     let token = state.chat_cancel.lock().map_err(|e| e.to_string())?.take();
     // 先广播取消，避免确认框或子代理的锁延迟主请求和命令进程的中断。
     if let Some(t) = &token {
@@ -670,6 +654,12 @@ pub fn stop_chat_message(state: State<AppState>) -> Result<(), String> {
     }
     state.ask_user.dismiss();
     state.subagents.cancel_all();
+    // 还没被处理的追问照常入库，下一轮对话能看到；只是不再自动接着回复。
+    for item in state.chat_queue.drain_all() {
+        if let Err(e) = crate::chat_queue::persist(&app, &item, false) {
+            log::warn!("排队消息入库失败: {e}");
+        }
+    }
     match token {
         Some(_) => Ok(()),
         None => Err("当前没有进行中的回复".to_string()),

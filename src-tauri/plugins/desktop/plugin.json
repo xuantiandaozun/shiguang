@@ -1,0 +1,24 @@
+{
+  "id": "desktop",
+  "name": "桌面操控",
+  "version": "1.0.0",
+  "description": "通过 Windows UI Automation 读取并操作桌面软件（记事本、资源管理器、Office、微信等）；读不到结构的界面用 OCR / 画面定位 / 坐标兜底。",
+  "order": 22,
+  "tools": [
+    "tools.json"
+  ],
+  "skills": "skills",
+  "settings": "settings.schema.json",
+  "categories": {
+    "desktop": {
+      "label": "桌面软件",
+      "description": "操作本机桌面软件窗口：列出/打开/切换窗口，读取控件结构，点击、输入、按键、选择菜单和选项、读取软件里的文字、截取软件窗口画面",
+      "tools": [
+        "desktop_window",
+        "desktop_snapshot",
+        "desktop_action",
+        "desktop_screenshot"
+      ]
+    }
+  }
+}

@@ -5,12 +5,14 @@ pub mod agents;
 pub mod ask_user;
 pub mod browser;
 pub mod builtin_skills;
+pub mod chat_queue;
 pub mod cli_json;
 pub mod clipboard;
 pub mod commands;
 pub mod compact;
 pub mod db;
 pub mod delegation;
+pub mod desktop;
 pub mod file_index;
 pub mod llm;
 pub mod lookup_cache;
@@ -19,12 +21,14 @@ pub mod mcp_bridge;
 pub mod ntfs_helper;
 pub mod ntfs_usn;
 pub mod ocr;
+pub mod office;
 pub mod organizer;
 pub mod plugins;
 pub mod reader;
 pub mod recorder;
 pub mod repeat_guard;
 pub mod retention;
+pub mod reveal;
 pub mod session_todo;
 pub mod server_tools;
 pub mod servers;
@@ -51,6 +55,8 @@ pub struct AppState {
     pub chat_busy: AtomicBool,
     /// 当前聊天回复的取消令牌；每次发送新建，stop_chat_message 触发取消
     pub chat_cancel: std::sync::Mutex<Option<tokio_util::sync::CancellationToken>>,
+    /// AI 忙时的追问与后台事件队列
+    pub chat_queue: chat_queue::ChatQueue,
     /// 浏览器操作统一入口（扩展桥 / CDP）
     pub browser: browser::Hub,
     /// 本地 OCR（PaddleOCR），首次识别时懒加载模型
@@ -159,6 +165,7 @@ pub fn run() {
                 auto_paused: AtomicBool::new(paused),
                 chat_busy: AtomicBool::new(false),
                 chat_cancel: std::sync::Mutex::new(None),
+                chat_queue: chat_queue::ChatQueue::default(),
                 browser: browser::Hub::spawn(&app_dir),
                 ocr: ocr::OcrEngine::new(&app_dir),
                 tasks: tasks::TaskManager::new(&app_dir),
@@ -264,6 +271,7 @@ pub fn run() {
             commands::import_clipboard_attachments,
             commands::save_pasted_file,
             commands::stop_chat_message,
+            reveal::reveal_in_folder,
             commands::save_reply_markdown,
             commands::get_current_session,
             commands::list_sessions,

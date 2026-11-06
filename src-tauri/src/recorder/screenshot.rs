@@ -230,7 +230,7 @@ pub fn capture(app: &AppHandle, target: &str, window: Option<&str>, rect: Option
 }
 
 /// 窗口截图：优先 PrintWindow（被遮挡也完整）；得到全黑画面时（部分硬件加速程序）退回按屏幕区域截
-fn capture_window_best(w: &WinInfo) -> Result<RgbaImage> {
+pub(crate) fn capture_window_best(w: &WinInfo) -> Result<RgbaImage> {
     match win::capture_window(w.hwnd as isize) {
         Ok(img) if !is_blank(&img) => Ok(img),
         _ => {

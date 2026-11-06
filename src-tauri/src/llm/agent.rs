@@ -74,9 +74,11 @@ const MAX_TEXT_CALL_RETRIES: usize = 3;
 pub async fn run_chat(
     app: AppHandle,
     session_id: i64,
-    request_message_id: i64,
+    mut request_message_id: i64,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
+    // 本轮处理过的用户消息（开头那条 + 中途追问），最终回复要关联到全部。
+    let mut request_ids = vec![request_message_id];
     let mut settings = {
         let state = app.state::<crate::AppState>();
         load_settings(&state.db)
@@ -313,6 +315,14 @@ pub async fn run_chat(
             finalize_cancelled(&app, session_id, request_message_id, "", &tool_log).await?;
             return Ok(());
         }
+        // 用户在 AI 工作时追加的消息、后台事件通知：此刻入库并带进对话。
+        // 之后的工具调用挂到最新这条消息下，重放历史时顺序与模型所见一致。
+        if round > 0 {
+            if let Some(id) = absorb_queued(&app, session_id, &mut messages) {
+                request_message_id = id;
+                request_ids.push(id);
+            }
+        }
         if round + WARN_BEFORE_END == budget {
             let completed = app.state::<crate::AppState>().session_todos.completed_count(session_id);
             window.todo_completed_delta = completed.saturating_sub(window_todo_base);
@@ -410,11 +420,9 @@ pub async fn run_chat(
             }
             let state = app.state::<crate::AppState>();
             let response_message_id = state.db.save_chat(session_id, "assistant", &cleaned)?;
-            state.db.link_tool_calls_response(
-                session_id,
-                request_message_id,
-                response_message_id,
-            )?;
+            for id in &request_ids {
+                state.db.link_tool_calls_response(session_id, *id, response_message_id)?;
+            }
             let _ = app.emit("llm-message-done", json!({ "content": cleaned }));
             let _ = app.emit("sessions-changed", ());
             drop(state);
@@ -539,6 +547,15 @@ pub async fn run_chat(
                     tools::execute(&app, &call.name, &parsed_args, &cancel, session_id).await
                 }
             };
+            // 等待类工具可被用户追问打断：停止等待（任务本身不停），先回应用户。
+            let interruptible = INTERRUPTIBLE_WAITS.contains(&call.name.as_str());
+            let user_wake = async {
+                if interruptible {
+                    app.state::<crate::AppState>().chat_queue.user_message_arrived(session_id).await
+                } else {
+                    std::future::pending::<()>().await
+                }
+            };
             let result = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
@@ -562,6 +579,7 @@ pub async fn run_chat(
                     .await?;
                     return Ok(());
                 }
+                _ = user_wake => interrupted_wait_result(&app, &call.name),
                 result = execution => match result {
                     Ok(v) => v,
                     Err(e) => json!({ "error": e.to_string() }),
@@ -631,6 +649,52 @@ pub async fn run_chat(
         &tool_log,
     )
     .await
+}
+
+/// 用户追问时会被打断的等待类工具。打断只停止等待，被等的任务继续运行。
+const INTERRUPTIBLE_WAITS: &[&str] = &["await_task", "await_subagent", "await_agent", "wait_remote_task", "ask_user"];
+
+fn interrupted_wait_result(app: &AppHandle, tool: &str) -> Value {
+    if tool == "ask_user" {
+        let state = app.state::<crate::AppState>();
+        state.ask_user.dismiss();
+        let value = json!({
+            "status": "dismissed",
+            "note": "用户没有点选项，而是直接发了新消息（见下一条用户消息），按新消息处理。",
+        });
+        let _ = app.emit("ask-user-settled", &value);
+        return value;
+    }
+    json!({
+        "status": "interrupted_by_user",
+        "note": "用户发来了新消息，等待已暂停，被等待的任务仍在后台运行。先回应用户；之后需要结果时再次调用同一个等待工具，或用 await_task 的 mode=notify 改为结束后自动通知。",
+    })
+}
+
+/// 取走排队消息并入库，追加到本轮对话。返回最后一条用户消息的 id。
+fn absorb_queued(app: &AppHandle, session_id: i64, messages: &mut Vec<Value>) -> Option<i64> {
+    let state = app.state::<crate::AppState>();
+    let batch = state.chat_queue.take(session_id);
+    if batch.is_empty() {
+        return None;
+    }
+    let mut last = None;
+    let mut has_user = false;
+    for item in &batch {
+        match crate::chat_queue::persist(app, item, true) {
+            Ok(id) => last = Some(id),
+            Err(e) => log::warn!("排队消息入库失败: {e}"),
+        }
+        has_user |= !item.event;
+        messages.push(json!({ "role": "user", "content": item.content }));
+    }
+    let note = if has_user {
+        "用户在你工作期间发来了上面的新消息。先在本次回复正文里简短回应（一两句即可），然后结合新消息继续原任务；如果用户要求停下、改方向或补充了条件，照做。"
+    } else {
+        "上面是后台任务结束时系统自动发来的通知，不是用户本人说的。结合它继续当前任务。"
+    };
+    messages.push(json!({ "role": "system", "content": note }));
+    last
 }
 
 /// 工具协议层成功返回并不等于业务动作成功；命令非零退出等情况也要让界面显示失败。

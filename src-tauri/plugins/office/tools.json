@@ -1,0 +1,309 @@
+[
+  {
+    "name": "office_read",
+    "label": "读取文档结构",
+    "description": "结构化读取 Office/PDF 文档，为编辑做准备。docx：逐块列出 [编号] 类型（标题N/正文/列表/表格…）│ 文字，表格逐行展开；xlsx：工作表清单 + 带行号列号的表格（公式显示为 =公式 → 值）；pdf：按页文字与元数据（扫描件会提示）；pptx：每页文字与备注。旧版 doc/xls/ppt 先用 office_convert 转换。只想看纯文本时 read_file 也可以。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "文件路径：绝对路径；相对路径按桌面解析"
+        },
+        "sheet": {
+          "type": "string",
+          "description": "xlsx：工作表名，默认第一个"
+        },
+        "range": {
+          "type": "string",
+          "description": "xlsx：区域，如 A1:F50、B:D、2:10，默认已用区域"
+        },
+        "pages": {
+          "type": "string",
+          "description": "pdf/pptx：页码，如 1-3,5"
+        },
+        "offset": {
+          "type": "integer",
+          "description": "docx：从第几个编号开始（续读用 next_offset）"
+        },
+        "max_chars": {
+          "type": "integer",
+          "description": "返回字数上限，默认 12000"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "word_create",
+    "label": "新建 Word 文档",
+    "description": "用 Markdown 新建 .docx：# 标题（1–6 级，进导航窗格）、- / 1. 列表、> 引用、| 表格 |（首行为表头）、``` 代码块、![说明](图片路径) 插图、--- 分隔线、<!-- pagebreak --> 分页；行内 **粗体** *斜体* `代码` [文字](链接)。每个非空行是一个段落。默认宋体小四、标题黑体、1.5 倍行距、A4。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "保存路径（.docx）。相对路径落在应用临时目录；交付给用户时写用户指定的绝对路径"
+        },
+        "markdown": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string",
+          "description": "文档标题（居中大标题，也写入文档属性）"
+        },
+        "font": {
+          "type": "string",
+          "description": "正文中文字体，默认宋体"
+        },
+        "heading_font": {
+          "type": "string",
+          "description": "标题字体，默认黑体"
+        },
+        "font_size": {
+          "type": "number",
+          "description": "正文字号（磅），默认 12（小四）"
+        },
+        "line_spacing": {
+          "type": "number",
+          "description": "行距倍数，默认 1.5"
+        },
+        "first_line_indent": {
+          "type": "boolean",
+          "description": "正文首行缩进 2 字符（公文/报告常用）"
+        },
+        "landscape": {
+          "type": "boolean",
+          "description": "横向页面"
+        },
+        "overwrite": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "markdown"
+      ]
+    }
+  },
+  {
+    "name": "word_edit",
+    "label": "编辑 Word 文档",
+    "description": "原位编辑已有 .docx，只改动涉及的部分，其余格式、页眉页脚、图片、批注原样保留。先 office_read 拿到编号。支持跨格式查找替换、填写 {{占位符}} 模板、按位置插入 Markdown 内容（含表格、图片）、删除块、改写段落、改表格单元格、表格加行。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "文件路径：绝对路径；相对路径按桌面解析"
+        },
+        "operations": {
+          "type": "array",
+          "description": "按顺序执行的操作。编号一律用 office_read 读到的 [编号]（同一批里插入/删除不会让编号移位）。op 取值：replace {find, replace, all=true, match_case=true}（可跨格式替换，保留原格式；也作用于页眉页脚）；fill {values:{占位名:内容}} 填写模板里的 {{占位名}}；insert {markdown, after|before: 编号, 或 at:\"start\"，默认文末}；delete {index, count}；set_text {index, text} 改写整段（保留段落和首个文字的格式）；table_cell {index, row, col, text}（行列从 1 开始）；table_add_row {index, values:[...], after_row}",
+          "items": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "replace",
+                  "fill",
+                  "insert",
+                  "delete",
+                  "set_text",
+                  "table_cell",
+                  "table_add_row"
+                ]
+              }
+            },
+            "required": [
+              "op"
+            ]
+          }
+        },
+        "output": {
+          "type": "string",
+          "description": "另存为的路径（不改原文件）。省略则原地保存，并先自动备份原文件"
+        },
+        "overwrite": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "operations"
+      ]
+    }
+  },
+  {
+    "name": "excel_edit",
+    "label": "编辑 Excel",
+    "description": "读改写 .xlsx 并保留原有格式：写值/公式、批量写二维数据、追加行、插删行列、增删改工作表、样式（粗体、颜色、填充、数字格式、对齐、边框）、列宽、合并单元格、冻结窗格。create=true 时文件不存在就新建。改完可用 office_read 核对。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "文件路径；新建时相对路径落在应用临时目录"
+        },
+        "operations": {
+          "type": "array",
+          "description": "按顺序执行的操作，sheet 省略时为第一个工作表。值：数字/文本/布尔/null，以 = 开头的文本为公式（Excel/WPS 打开时计算）。op：set {cell, value}；write {start=\"A1\", rows:[[...],...]}；append {rows, start_col} 接在最后一行后；insert_rows/delete_rows {row, count}；insert_cols/delete_cols {col:\"C\", count}；add_sheet {name}；rename_sheet {sheet, name}；delete_sheet {sheet}；clear {range}；style {range, bold, italic, font, font_size, font_color, fill, number_format（如 0.00、yyyy-mm-dd、0%）, align, valign, wrap, border}；width {columns:\"A:D\", width（省略为按内容自动）}；merge {range}；freeze {cell:\"A2\"} 冻结其上方行/左侧列",
+          "items": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "set",
+                  "write",
+                  "append",
+                  "insert_rows",
+                  "delete_rows",
+                  "insert_cols",
+                  "delete_cols",
+                  "add_sheet",
+                  "rename_sheet",
+                  "delete_sheet",
+                  "clear",
+                  "style",
+                  "width",
+                  "merge",
+                  "freeze"
+                ]
+              },
+              "sheet": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "op"
+            ]
+          }
+        },
+        "create": {
+          "type": "boolean",
+          "description": "文件不存在时新建工作簿"
+        },
+        "first_sheet": {
+          "type": "string",
+          "description": "新建时第一个工作表的名称"
+        },
+        "output": {
+          "type": "string",
+          "description": "另存为的路径（不改原文件）。省略则原地保存，并先自动备份原文件"
+        },
+        "overwrite": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "operations"
+      ]
+    }
+  },
+  {
+    "name": "pdf_edit",
+    "label": "处理 PDF",
+    "description": "PDF 页面操作（不需要额外软件）：merge 合并多个（inputs 按顺序）；split 拆分（默认每页一份，every=N 每 N 页，或 ranges:[\"1-3\",\"4-9\"]，output 为目录）；extract 抽取页面成新文件；delete 删除页面；rotate 旋转（degrees 90/180/270，pages 可选，省略 output 则原地修改并备份）；images_to_pdf 图片合成 PDF（inputs 为图片，每张一页）；to_images 把页面渲染成 PNG（扫描件再交给 ocr_image）。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "merge",
+            "split",
+            "extract",
+            "delete",
+            "rotate",
+            "images_to_pdf",
+            "to_images"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "description": "源 PDF"
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "merge 的 PDF 列表 / images_to_pdf 的图片列表"
+        },
+        "output": {
+          "type": "string",
+          "description": "输出文件（split/to_images 为目录）"
+        },
+        "pages": {
+          "type": "string",
+          "description": "页码，如 1-3,5,8-"
+        },
+        "ranges": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "every": {
+          "type": "integer"
+        },
+        "degrees": {
+          "type": "integer"
+        },
+        "width": {
+          "type": "integer",
+          "description": "to_images 图片宽度像素，默认 1600"
+        },
+        "overwrite": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "action"
+      ]
+    }
+  },
+  {
+    "name": "office_convert",
+    "label": "转换文档格式",
+    "description": "调用本机的 Microsoft Office / WPS（后台运行，不影响用户已打开的文档）或 LibreOffice 转换格式：Word/Excel/PPT → PDF，doc→docx、xls→xlsx、ppt→pptx，docx→odt/rtf/html/txt，xlsx→csv，pdf→docx（版式可能有偏差），pptx→png/jpg（每页一张图，输出为目录）。engine=list 查看本机可用的转换软件。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "文件路径：绝对路径；相对路径按桌面解析"
+        },
+        "to": {
+          "type": "string",
+          "description": "目标格式扩展名，如 pdf、docx；输出与源文件同目录同名"
+        },
+        "output": {
+          "type": "string",
+          "description": "或直接给目标路径"
+        },
+        "engine": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "office",
+            "wps",
+            "libreoffice",
+            "list"
+          ]
+        },
+        "overwrite": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  }
+]

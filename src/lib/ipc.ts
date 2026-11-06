@@ -448,6 +448,8 @@ export const ipc = {
   savePastedFile: (filename: string, dataBase64: string) =>
     invoke<string>("save_pasted_file", { filename, dataBase64 }),
   stopChat: () => invoke<void>("stop_chat_message"),
+  /** 在资源管理器中定位聊天消息里的文件（支持相对路径），返回解析后的完整路径 */
+  revealInFolder: (path: string) => invoke<string>("reveal_in_folder", { path }),
   saveReplyMarkdown: (path: string, content: string) => invoke<void>("save_reply_markdown", { path, content }),
   getCurrentSession: () => invoke<SessionView>("get_current_session"),
   listSessions: () => invoke<SessionInfo[]>("list_sessions"),

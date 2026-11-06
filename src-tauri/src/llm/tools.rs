@@ -669,6 +669,12 @@ async fn execute_inner(
     if crate::agents::TOOL_NAMES.contains(&name) {
         return crate::agents::execute(app, name, args, cancel, session_id).await;
     }
+    if crate::office::TOOL_NAMES.contains(&name) {
+        return crate::office::execute(app, name, args).await;
+    }
+    if crate::desktop::TOOL_NAMES.contains(&name) {
+        return crate::desktop::execute(app, name, args).await;
+    }
     if crate::recorder::screenshot::TOOL_NAMES.contains(&name) {
         return crate::recorder::screenshot::execute(app, name, args).await;
     }
@@ -1341,7 +1347,7 @@ async fn execute_inner(
                     }
                 }
             }
-            command_tool(app, n, &args, cancel).await
+            command_tool(app, n, &args, cancel, session_id).await
         }
         "get_system_info" => {
             let category = args
@@ -1590,7 +1596,7 @@ async fn execute_inner(
             if let Some(stdin) = args.get("stdin").and_then(Value::as_str) {
                 run_args["stdin"] = json!(stdin);
             }
-            command_tool(app, "run_command", &run_args, cancel).await
+            command_tool(app, "run_command", &run_args, cancel, session_id).await
         }
         "delete_skill" => {
             let name = args
@@ -2823,6 +2829,7 @@ async fn command_tool(
     name: &str,
     args: &Value,
     cancel: &tokio_util::sync::CancellationToken,
+    session_id: i64,
 ) -> Result<Value> {
     let state = app.state::<crate::AppState>();
     let tasks = &state.tasks;
@@ -2899,6 +2906,7 @@ async fn command_tool(
             let success_exit_codes = integer_array(args, "success_exit_codes")?;
             let script_args = args.get("script_args").cloned().unwrap_or(Value::Null);
             let environment = string_map(args, "environment")?;
+            let notify = args.get("notify").and_then(|v| v.as_bool()).unwrap_or(false);
             let info = tasks.start_command(
                 app,
                 crate::tasks::CommandSpec {
@@ -2913,8 +2921,21 @@ async fn command_tool(
                     script_args: &script_args,
                     environment: &environment,
                 },
-                Some(cancel),
+                // 结束后通知的任务不随聊天停止而结束，用户可在「任务」页或让 AI stop_task 停止。
+                if notify { None } else { Some(cancel) },
             )?;
+            if notify {
+                tasks.set_notify(&info.id, Some(session_id))?;
+                let mut result = json!({
+                    "task_id": info.id,
+                    "pid": info.pid,
+                    "status": info.status,
+                    "execution_context": command_execution_context(&info),
+                    "message": "命令已在后台执行，结束后系统会自动发来【后台通知】并让你继续。现在告诉用户任务已在后台运行、完成后会通知，然后结束本次回复；不要 await_task 或 check_task 等它。",
+                });
+                attach_input_files(&mut result, &input_files, workdir.as_deref());
+                return Ok(result);
+            }
             let wait_now = args.get("await").and_then(|v| v.as_bool()).unwrap_or(false);
             if wait_now {
                 let timeout = args
@@ -2966,6 +2987,17 @@ async fn command_tool(
                 .get("json_pointer")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let notify = args.get("mode").and_then(Value::as_str) == Some("notify");
+            // notify：不挂起对话，任务结束后自动通知；已结束则直接返回结果。
+            // 普通等待：取消之前的通知，避免拿到结果后又收到重复通知。
+            let still_running = tasks.set_notify(id, notify.then_some(session_id))?;
+            if notify && still_running {
+                return Ok(json!({
+                    "task_id": id,
+                    "status": "running",
+                    "message": "已改为结束后自动通知：任务继续在后台运行，用户停止回复也不会结束它。现在告诉用户完成后会通知，然后结束本次回复。",
+                }));
+            }
             awaited_task_result(
                 app,
                 tasks,

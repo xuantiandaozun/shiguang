@@ -50,6 +50,10 @@ tokio-tungstenite = "0.26"
 tokio-util = "0.7"
 base64 = "0.22"
 pdf-extract = "0.12.0"
+# PDF 合并/拆分/旋转（与 pdf-extract 用同一版本）
+lopdf = { version = "0.42", default-features = false }
+# Excel 读改写（保留原有格式）
+umya-spreadsheet = "2.3"
 tauri-plugin-dialog = "2.7.2"
 rapidocr-core = "0.2.2"
 trash = "5"
@@ -83,8 +87,8 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_UI_WindowsAndMessaging",
 ] }
 
-# UI Automation（桌面录屏识别点击的控件）；版本与 Tauri 依赖的一致，不额外下载
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Accessibility"] }
+# UI Automation（桌面录屏识别点击的控件、桌面软件操控）；Windows.Data.Pdf（PDF 页面转图片）；版本与 Tauri 依赖的一致
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Accessibility", "Foundation", "Data_Pdf", "Storage", "Storage_Streams"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"

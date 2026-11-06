@@ -444,7 +444,7 @@ pub async fn inspect_or_managed_up() -> bool {
 
 async fn port_up(port: u16) -> bool {
     let http = format!("http://127.0.0.1:{}/json/version", port);
-    let http_up = tokio::time::timeout(Duration::from_millis(600), reqwest::get(&http))
+    let http_up = tokio::time::timeout(Duration::from_millis(600), local_get(&http))
         .await
         .map(|r| matches!(r, Ok(resp) if resp.status().is_success()))
         .unwrap_or(false);
@@ -458,9 +458,14 @@ async fn port_up(port: u16) -> bool {
         .unwrap_or(false)
 }
 
+/// 访问本机调试端口，不走 HTTP_PROXY 等代理。
+async fn local_get(url: &str) -> reqwest::Result<reqwest::Response> {
+    reqwest::Client::builder().no_proxy().build()?.get(url).send().await
+}
+
 async fn connect_port(port: u16, origin: &str) -> Result<CdpClient> {
     let http = format!("http://127.0.0.1:{}/json/version", port);
-    let ws = match reqwest::get(&http).await {
+    let ws = match local_get(&http).await {
         Ok(resp) if resp.status().is_success() => resp.json::<Value>().await.ok().and_then(|v| {
             v.get("webSocketDebuggerUrl")
                 .and_then(|u| u.as_str())
