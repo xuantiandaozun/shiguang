@@ -2,7 +2,7 @@
   {
     "name": "desktop_window",
     "label": "桌面窗口",
-    "description": "管理桌面软件窗口。list：列出打开的窗口（标题、进程、hwnd、位置，标出前台窗口）；open：启动程序/打开文件或网址（target 写 notepad、calc、winword、excel、完整路径、ms-settings: 等），等待新窗口出现并返回它；focus 切到前台；minimize/maximize/restore；move 按 rect 移动缩放；close 发送关闭（相当于点 ×，有未保存内容时软件会自己弹确认）。拾光自己的窗口不会列出。",
+    "description": "管理桌面软件窗口。list：列出打开的窗口（标题、进程、hwnd、位置，标出前台窗口），background 里是在运行但没有可见窗口（缩在托盘）的软件；open：启动程序/打开文件或网址（target 写 notepad、calc、winword、excel、微信、完整路径、ms-settings: 等），等待新窗口出现并返回它；软件已在运行（包括托盘里）时直接唤出已有窗口（already_running=true），不会重复启动；程序名找不到时会去开始菜单找同名快捷方式；focus 切到前台（也能唤出托盘里的隐藏窗口）；minimize/maximize/restore；move 按 rect 移动缩放；close 发送关闭（相当于点 ×，有未保存内容时软件会自己弹确认）。拾光自己的窗口不会列出。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -39,6 +39,10 @@
         "wait_ms": {
           "type": "integer",
           "description": "open：等待新窗口的最长毫秒数，默认 8000"
+        },
+        "force_new": {
+          "type": "boolean",
+          "description": "open：软件已在运行时仍然再启动一个实例。默认 false（唤出已有窗口）。只有用户明确要多开时才用"
         },
         "rect": {
           "type": "array",

@@ -300,6 +300,7 @@ pub fn run() {
             commands::show_agent_run_window,
             commands::finish_agent_run_worktree,
             commands::toggle_chat,
+            commands::set_floatball_region,
             commands::open_main_window,
             commands::hide_chat,
             commands::open_external,

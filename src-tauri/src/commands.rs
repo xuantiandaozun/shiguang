@@ -920,6 +920,12 @@ pub fn toggle_chat(app: AppHandle) {
     windows::toggle_chat(&app);
 }
 
+/// 悬浮球形状变化后同步原生窗口的可点击区域
+#[tauri::command]
+pub fn set_floatball_region(app: AppHandle, x: f64, y: f64, w: f64, h: f64, shape: String) -> Result<(), String> {
+    windows::set_floatball_region(&app, x, y, w, h, &shape)
+}
+
 /// 幂等展示聊天窗（区别于 toggle_chat 的开/关切换），提醒弹窗发消息后调用
 #[tauri::command]
 pub fn show_chat_window(app: AppHandle) {

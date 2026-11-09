@@ -54,6 +54,140 @@ mod imp {
             .collect()
     }
 
+    /// 同一软件的常见叫法（进程名 / 英文名 / 中文名 / 开始菜单快捷方式名），小写
+    const APP_ALIASES: &[&[&str]] = &[
+        &["weixin", "wechat", "微信"],
+        &["wxwork", "wecom", "企业微信"],
+        &["qq", "qqnt"],
+        &["dingtalk", "钉钉"],
+        &["feishu", "lark", "飞书"],
+        &["wps", "wps office"],
+        &["winword", "word"],
+        &["excel"],
+        &["powerpnt", "powerpoint"],
+        &["notepad", "记事本"],
+        &["calc", "calculatorapp", "calculator", "计算器"],
+    ];
+    /// 本来就该每次开新窗口的程序，不做"已在运行就唤出"的处理
+    const MULTI_WINDOW: &[&str] = &["explorer", "资源管理器", "文件资源管理器", "cmd", "powershell", "pwsh", "wt"];
+    /// 系统和常驻组件，不算"托盘里运行的软件"
+    const SYSTEM_PROCS: &[&str] = &[
+        "explorer", "svchost", "applicationframehost", "textinputhost", "systemsettings", "shellexperiencehost",
+        "startmenuexperiencehost", "searchhost", "searchapp", "msedgewebview2", "runtimebroker", "ctfmon", "dwm", "sihost",
+        "taskhostw", "conhost", "widgets", "widgetservice", "lockapp", "securityhealthsystray", "csrss", "winlogon",
+        "rundll32", "dllhost", "smartscreen", "phoneexperiencehost", "crossdeviceresume", "",
+    ];
+
+    fn proc_stem(process: &str) -> String {
+        process.to_lowercase().trim_end_matches(".exe").to_string()
+    }
+
+    /// open 的目标若是一个软件（而不是网址、文档），返回可能的进程名 / 快捷方式名
+    fn app_terms(target: &str) -> Option<Vec<String>> {
+        let t = target.trim().trim_matches('"');
+        let lower = t.to_lowercase();
+        let is_path = t.contains('\\') || t.contains('/');
+        // 网址、ms-settings: 这类协议（排除 C:\ 盘符路径）
+        if lower.contains("://") || (t.contains(':') && !is_path) {
+            return None;
+        }
+        let path = std::path::Path::new(t);
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase());
+        if !matches!(ext.as_deref(), None | Some("exe") | Some("lnk")) {
+            return None; // 文档、图片等交给默认程序打开
+        }
+        let stem = path.file_stem()?.to_string_lossy().to_lowercase();
+        if MULTI_WINDOW.contains(&stem.as_str()) {
+            return None;
+        }
+        let mut terms = vec![stem.clone()];
+        if let Some(group) = APP_ALIASES.iter().find(|g| g.contains(&stem.as_str())) {
+            terms.extend(group.iter().map(|s| s.to_string()).filter(|s| *s != stem));
+        }
+        Some(terms)
+    }
+
+    /// 已在运行的同名软件：可见窗口和隐藏（托盘）主窗口
+    fn running_windows(terms: &[String]) -> (Vec<WinInfo>, Vec<WinInfo>) {
+        let hit = |w: &WinInfo| terms.iter().any(|t| *t == proc_stem(&w.process));
+        let visible: Vec<WinInfo> = screenshot::list_windows(false).into_iter().filter(|w| hit(w)).collect();
+        let me = std::process::id();
+        let hidden = screenshot::win::list_hidden_windows().into_iter().filter(|w| w.pid != me && hit(w)).collect();
+        (visible, hidden)
+    }
+
+    /// 隐藏窗口里最像主窗口的：面积最大的那个
+    fn main_hidden(hidden: &[WinInfo]) -> Option<&WinInfo> {
+        hidden.iter().max_by_key(|w| (w.rect[2].max(0) as i64) * (w.rect[3].max(0) as i64))
+    }
+
+    /// 有隐藏主窗口、却没有任何可见窗口的软件，多半缩在托盘里运行
+    fn background_apps(visible: &[WinInfo]) -> Vec<Value> {
+        let me = std::process::id();
+        let shown: std::collections::HashSet<u32> = visible.iter().map(|w| w.pid).collect();
+        let hidden = screenshot::win::list_hidden_windows();
+        let mut by_proc: Vec<(String, Vec<WinInfo>)> = Vec::new();
+        for w in hidden {
+            let stem = proc_stem(&w.process);
+            if w.pid == me || shown.contains(&w.pid) || SYSTEM_PROCS.contains(&stem.as_str()) {
+                continue;
+            }
+            // 同一软件的多个进程只要有一个窗口可见，就不算后台
+            if visible.iter().any(|v| proc_stem(&v.process) == stem) {
+                continue;
+            }
+            match by_proc.iter_mut().find(|(p, _)| *p == stem) {
+                Some((_, ws)) => ws.push(w),
+                None => by_proc.push((stem, vec![w])),
+            }
+        }
+        // 只给进程名：隐藏窗口里哪个是主窗口说不准，交给 open 去判断和唤出
+        by_proc.into_iter().filter_map(|(_, ws)| ws.first().map(|w| json!(w.process))).take(30).collect()
+    }
+
+    /// 在开始菜单里按名字找快捷方式（程序名不在 PATH / App Paths 里时用）
+    fn start_menu_find(terms: &[String]) -> Option<std::path::PathBuf> {
+        let mut roots = Vec::new();
+        if let Ok(p) = std::env::var("ProgramData") {
+            roots.push(std::path::PathBuf::from(p).join(r"Microsoft\Windows\Start Menu\Programs"));
+        }
+        if let Ok(p) = std::env::var("APPDATA") {
+            roots.push(std::path::PathBuf::from(p).join(r"Microsoft\Windows\Start Menu\Programs"));
+        }
+        let mut links = Vec::new();
+        fn walk(dir: &std::path::Path, depth: u32, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() && depth > 0 {
+                    walk(&p, depth - 1, out);
+                } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk")) {
+                    out.push(p);
+                }
+            }
+        }
+        for r in &roots {
+            walk(r, 3, &mut links);
+        }
+        let name = |p: &std::path::PathBuf| p.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+        // 先找名字完全一致的，再找包含的；跳过卸载/帮助类快捷方式
+        let skip = |n: &str| ["卸载", "uninstall", "帮助", "help", "readme"].iter().any(|k| n.contains(k));
+        for t in terms {
+            if let Some(p) = links.iter().find(|p| name(p) == *t) {
+                return Some(p.clone());
+            }
+        }
+        for t in terms.iter().filter(|t| t.chars().count() >= 2) {
+            if let Some(p) = links.iter().find(|p| {
+                let n = name(p);
+                n.contains(t.as_str()) && !skip(&n)
+            }) {
+                return Some(p.clone());
+            }
+        }
+        None
+    }
+
     fn win_json(w: &WinInfo) -> Value {
         json!({"hwnd": w.hwnd, "title": w.title, "process": w.process, "rect": w.rect, "minimized": w.minimized})
     }
@@ -64,7 +198,11 @@ mod imp {
         let w = match raw {
             Some(Value::Number(n)) => {
                 let h = n.as_i64().unwrap_or(0);
-                all.iter().find(|w| w.hwnd == h).cloned().ok_or_else(|| anyhow!("窗口句柄 {h} 不存在或已关闭，用 desktop_window 重新列出"))?
+                all.iter()
+                    .find(|w| w.hwnd == h)
+                    .cloned()
+                    .or_else(|| screenshot::win::list_hidden_windows().into_iter().find(|w| w.hwnd == h))
+                    .ok_or_else(|| anyhow!("窗口句柄 {h} 不存在或已关闭，用 desktop_window 重新列出"))?
             }
             Some(Value::String(s)) if !s.trim().is_empty() => {
                 if let Ok(h) = s.trim().parse::<i64>() {
@@ -144,12 +282,63 @@ mod imp {
                         v
                     })
                     .collect();
-                Ok(json!({"count": list.len(), "windows": list, "note": "按层叠顺序从上到下。其它工具的 window 参数可写标题/进程名的一部分，或 hwnd 数字"}))
+                let mut v = json!({"count": list.len(), "windows": list, "note": "按层叠顺序从上到下。其它工具的 window 参数可写标题/进程名的一部分，或 hwnd 数字"});
+                let bg = background_apps(&all);
+                if !bg.is_empty() {
+                    v["background"] = json!(bg);
+                    v["background_note"] = json!("这些进程在运行但没有可见窗口（多半缩在托盘里）。要用其中的软件时用 action=open（target 写进程名或软件名）唤出，open 不会重复启动");
+                }
+                Ok(v)
             }
             "open" => {
-                let target = str_arg(args, "target").ok_or_else(|| anyhow!("open 需要 target：程序名（notepad、calc、winword）、完整路径、文件或网址（ms-settings:）"))?;
+                let target = str_arg(args, "target").ok_or_else(|| anyhow!("open 需要 target：程序名（notepad、calc、winword、微信）、完整路径、文件或网址（ms-settings:）"))?;
+                let force_new = args.get("force_new").and_then(Value::as_bool).unwrap_or(false);
+                let terms = app_terms(target);
+                // 软件已经在运行：唤出已有窗口，不再启动第二个（有的软件会开出第二个实例，比如微信会弹登录页）
+                if let (Some(terms), false) = (&terms, force_new || str_arg(args, "args").is_some()) {
+                    let (visible, hidden) = running_windows(terms);
+                    let reuse = |w: WinInfo, how: &str| -> Result<Value> {
+                        let w = screenshot::list_windows(false).into_iter().find(|x| x.hwnd == w.hwnd).unwrap_or(w);
+                        let w = guard(app, w)?;
+                        Ok(json!({"ok": true, "already_running": true, "how": how, "window": win_json(&w),
+                            "note": "软件已在运行，已切到它的窗口，没有重新启动。确实要再开一个用 force_new=true"}))
+                    };
+                    if let Some(w) = visible.iter().find(|w| !w.minimized).or(visible.first()).cloned() {
+                        input::activate(w.hwnd as isize)?;
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        return reuse(w, "activated");
+                    }
+                    if let Some(w) = main_hidden(&hidden).cloned() {
+                        guard(app, w.clone())?;
+                        let shown = input::unhide(w.hwnd as isize);
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        if shown.is_ok() && screenshot::win::is_visible(w.hwnd as isize) {
+                            return reuse(w, "restored_from_tray");
+                        }
+                        return Ok(json!({"ok": false, "already_running": true, "window": win_json(&w),
+                            "error": format!("「{}」已在后台（托盘）运行，但没能把窗口唤出来。没有重新启动它，以免开出第二个实例", w.title),
+                            "next": "请用户点一下托盘图标，或用软件自己的快捷键唤出（微信默认 Ctrl+Alt+W），然后 action=list 确认"}));
+                    }
+                    // 进程在跑但找不到能唤出的窗口（比如正在启动、只有后台服务进程）
+                    let mut sys = sysinfo::System::new();
+                    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
+                    let me = std::process::id();
+                    if let Some(p) = sys.processes().values().find(|p| p.pid().as_u32() != me && terms.contains(&proc_stem(&p.name().to_string_lossy()))) {
+                        return Ok(json!({"ok": false, "already_running": true, "process": p.name().to_string_lossy(),
+                            "error": format!("{} 已在运行，但找不到它的窗口。没有重新启动它，以免开出第二个实例", p.name().to_string_lossy()),
+                            "next": "可能还在启动，稍等后 action=list 再看；或请用户点托盘图标唤出。用户明确要多开才用 force_new=true"}));
+                    }
+                }
                 let before: Vec<i64> = screenshot::list_windows(false).iter().map(|w| w.hwnd).collect();
-                input::shell_open(target, str_arg(args, "args"), str_arg(args, "workdir"))?;
+                let mut launched = target.to_string();
+                if let Err(e) = input::shell_open(target, str_arg(args, "args"), str_arg(args, "workdir")) {
+                    // 程序名不在 PATH / App Paths 里：去开始菜单找同名快捷方式
+                    let lnk = terms.as_deref().filter(|_| !target.contains('\\') && !target.contains('/')).and_then(start_menu_find);
+                    let Some(lnk) = lnk else { return Err(e) };
+                    launched = lnk.to_string_lossy().into_owned();
+                    input::shell_open(&launched, str_arg(args, "args"), str_arg(args, "workdir"))?;
+                }
+                let target = launched.as_str();
                 let wait = args.get("wait_ms").and_then(Value::as_u64).unwrap_or(8000).min(30000);
                 let deadline = Instant::now() + Duration::from_millis(wait);
                 while Instant::now() < deadline {
@@ -168,6 +357,7 @@ mod imp {
                 let w = resolve_window(app, args.get("window"))?;
                 let h = w.hwnd as isize;
                 match action {
+                    "focus" if !screenshot::win::is_visible(h) => input::unhide(h)?,
                     "focus" => input::activate(h)?,
                     "close" => input::close(h)?,
                     "move" => {
@@ -430,7 +620,15 @@ mod imp {
     }
 
     async fn action_tool(app: &AppHandle, args: &Value) -> Result<Value> {
-        let w = resolve_window(app, args.get("window"))?;
+        let mut w = resolve_window(app, args.get("window"))?;
+        // 最小化的窗口尺寸只剩标题栏，坐标和截图都对不上，先还原
+        if w.minimized {
+            input::show(w.hwnd as isize, "restore")?;
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            if let Some(fresh) = screenshot::list_windows(false).into_iter().find(|x| x.hwnd == w.hwnd) {
+                w = fresh;
+            }
+        }
         let Some(steps) = args.get("steps").and_then(Value::as_array) else {
             let before = observe(&w);
             let mut r = run_step(app, &w, args).await?;
@@ -817,6 +1015,37 @@ mod imp {
     fn finish(mut out: Value, method: &str) -> Result<Value> {
         out["method"] = json!(method);
         Ok(out)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn app_terms_cover_aliases_and_skip_non_apps() {
+            let t = app_terms("WeChat").unwrap();
+            assert!(t.contains(&"weixin".into()) && t.contains(&"微信".into()));
+            assert_eq!(app_terms(r"C:\Program Files\Tencent\Weixin\Weixin.exe").unwrap()[0], "weixin");
+            assert!(app_terms("微信").unwrap().contains(&"wechat".into()));
+            assert!(app_terms("ms-settings:display").is_none());
+            assert!(app_terms("https://example.com").is_none());
+            assert!(app_terms(r"D:\docs\a.docx").is_none());
+            assert!(app_terms("explorer").is_none());
+            assert_eq!(app_terms("mytool.exe").unwrap(), vec!["mytool".to_string()]);
+        }
+
+        /// 只读：打印本机后台软件、微信的运行窗口和开始菜单快捷方式
+        /// cargo test --lib desktop::imp::tests::inspect_running -- --ignored --nocapture
+        #[test]
+        #[ignore]
+        fn inspect_running() {
+            let all = screenshot::list_windows(false);
+            println!("background: {}", serde_json::to_string_pretty(&background_apps(&all)).unwrap());
+            let terms = app_terms("WeChat").unwrap();
+            let (v, h) = running_windows(&terms);
+            println!("visible: {v:?}\nhidden: {h:?}\nmain hidden: {:?}", main_hidden(&h));
+            println!("start menu: {:?}", start_menu_find(&terms));
+        }
     }
 }
 

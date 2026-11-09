@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
-import { currentMonitor, primaryMonitor, getCurrentWindow, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/window";
+import { availableMonitors, currentMonitor, primaryMonitor, getCurrentWindow, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/window";
 import { ipc } from "../lib/ipc";
 import appIcon from "../assets/brand-mark.svg";
 
@@ -12,7 +12,19 @@ const CAPSULE_W = 28;
 const DOCK_DIST = 64;
 const UNDOCK_DIST = 48;
 const SETTLE_MS = 260;
+const POS_KEY = "floatball.position";
 type Mode = "ball" | "bar";
+
+// 记住上次停放的位置（物理像素），重启后恢复
+function loadPos(): { x: number; y: number } | null {
+  try {
+    const v = JSON.parse(localStorage.getItem(POS_KEY) ?? "null");
+    return v && Number.isFinite(v.x) && Number.isFinite(v.y) ? v : null;
+  } catch { return null; }
+}
+function savePos(x: number, y: number) {
+  try { localStorage.setItem(POS_KEY, JSON.stringify({ x, y })); } catch { /* 存不了就算了 */ }
+}
 type Side = "left" | "right";
 
 export default function FloatBall() {
@@ -20,6 +32,24 @@ export default function FloatBall() {
   const [side, setSide] = useState<Side>("right");
   const modeRef = useRef<Mode>("ball");
   const downPos = useRef<{ x: number; y: number } | null>(null);
+  const shapeRef = useRef<HTMLDivElement>(null);
+
+  // 原生窗口比可见形状大，把可点击区域裁到可见形状上
+  useEffect(() => {
+    const sync = () => {
+      const el = shapeRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      void ipc.setFloatballRegion(r.left, r.top, r.width, r.height, mode === "ball" ? "circle" : side).catch(console.error);
+    };
+    sync();
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    // 拖到不同缩放的显示器时物理尺寸会变，重新裁
+    void getCurrentWindow().onScaleChanged(sync).then((stop) => { if (cancelled) stop(); else unlisten = stop; });
+    window.addEventListener("resize", sync);
+    return () => { cancelled = true; unlisten?.(); window.removeEventListener("resize", sync); };
+  }, [mode, side]);
 
   const onDown = (e: ReactMouseEvent) => { downPos.current = { x: e.screenX, y: e.screenY }; };
   const onUp = (e: ReactMouseEvent) => {
@@ -38,6 +68,7 @@ export default function FloatBall() {
     let unlisten: (() => void) | undefined;
     let polling = false;
     let observed: { x: number; y: number; changedAt: number } | undefined;
+    let saved = loadPos();
 
     const changeMode = (next: Mode) => { modeRef.current = next; setMode(next); };
     const evaluate = async (settled: boolean) => {
@@ -102,6 +133,7 @@ export default function FloatBall() {
           if (modeRef.current === "bar") void schedule(false);
         } else if (now - observed.changedAt >= SETTLE_MS) {
           void schedule(true);
+          if (saved?.x !== pos.x || saved?.y !== pos.y) { saved = { x: pos.x, y: pos.y }; savePos(pos.x, pos.y); }
         }
       }).catch(console.error).finally(() => { polling = false; });
     }, 150);
@@ -116,9 +148,19 @@ export default function FloatBall() {
       unlisten = stop;
       const scale = await win.scaleFactor();
       await win.setSize(new PhysicalSize(Math.round(FRAME_W * scale), Math.round(FRAME_H * scale)));
-      const [actual, monitor] = await Promise.all([win.outerSize(), primaryMonitor()]);
+      const [actual, monitor, monitors] = await Promise.all([win.outerSize(), primaryMonitor(), availableMonitors()]);
       if (cancelled) return;
-      if (monitor) {
+      // 上次的位置仍落在某块屏幕上就恢复（显示器拔掉了则回到默认位置）；
+      // 贴边位置恢复后，停稳检测会自动重新吸成胶囊
+      const cx = saved ? saved.x + actual.width / 2 : 0;
+      const cy = saved ? saved.y + actual.height / 2 : 0;
+      const home = saved && monitors.find((m) => cx >= m.position.x && cx < m.position.x + m.size.width
+        && cy >= m.position.y && cy < m.position.y + m.size.height);
+      if (saved && home) {
+        const x = Math.min(Math.max(saved.x, home.position.x), home.position.x + home.size.width - actual.width);
+        const y = Math.min(Math.max(saved.y, home.position.y), home.position.y + home.size.height - actual.height);
+        await win.setPosition(new PhysicalPosition(Math.round(x), Math.round(y)));
+      } else if (monitor) {
         const margin = Math.round(64 * scale);
         const minX = monitor.position.x + margin;
         const minY = monitor.position.y + margin;
@@ -138,13 +180,13 @@ export default function FloatBall() {
     return () => { cancelled = true; ready = false; clearTimeout(timer); clearInterval(poll); unlisten?.(); };
   }, []);
 
-  return <div className="relative w-full h-full" onMouseDown={onDown} onMouseUp={onUp}>
-    {mode === "bar" ? <div data-tauri-drag-region className="absolute overflow-hidden cursor-pointer select-none" style={{
+  return <div className="relative w-full h-full">
+    {mode === "bar" ? <div ref={shapeRef} onMouseDown={onDown} onMouseUp={onUp} data-tauri-drag-region className="absolute overflow-hidden cursor-pointer select-none" style={{
       top: 6, width: CAPSULE_W, height: LOGO_SIZE,
       [side]: 0, borderRadius: side === "left" ? "0 32px 32px 0" : "32px 0 0 32px", background: "#e8a23a",
     }}>
       <img src={appIcon} alt="打开拾光" draggable={false} style={{ position: "absolute", top: 0, width: LOGO_SIZE, height: LOGO_SIZE, maxWidth: "none", pointerEvents: "none", [side]: CAPSULE_W - LOGO_SIZE }} />
-    </div> : <div data-tauri-drag-region className="absolute cursor-pointer select-none" style={{ top: 6, left: "50%", transform: "translateX(-50%)", width: LOGO_SIZE, height: LOGO_SIZE }}>
+    </div> : <div ref={shapeRef} onMouseDown={onDown} onMouseUp={onUp} data-tauri-drag-region className="absolute cursor-pointer select-none" style={{ top: 6, left: "50%", transform: "translateX(-50%)", width: LOGO_SIZE, height: LOGO_SIZE }}>
       <img src={appIcon} alt="拾光" draggable={false} className="rounded-full shadow-lg" style={{ width: LOGO_SIZE, height: LOGO_SIZE, pointerEvents: "none" }} />
     </div>}
   </div>;

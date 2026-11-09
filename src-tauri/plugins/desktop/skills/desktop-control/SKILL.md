@@ -10,7 +10,8 @@ description: >
 
 ## 基本流程
 
-1. `desktop_window`（action=list）确认窗口；软件没开就 `action=open`（target 写程序名或路径），返回新窗口。
+1. `desktop_window`（action=list）确认窗口。注意返回里的 `background`：那是已经在运行、只是缩在托盘里的软件，不要当成没开。要用某个软件直接 `action=open`（target 写程序名、中文名或路径）：已在运行时会唤出已有窗口（返回 `already_running: true`），没运行才启动。**不要自己用命令行再启动一次已在运行的软件**，微信这类软件会开出第二个实例、弹出登录页。open 返回 `ok: false` 说唤不出来时，按返回的 `next` 请用户协助，不要改用 `force_new`。
+   之后的调用 `window` 优先写返回的 hwnd 数字，标题可能重名（比如微信的主窗口和弹窗都叫"微信"/"Weixin"）。
 2. `desktop_snapshot` 看控件结构。大窗口用 `query` 只看相关部分，例如 `query: "保存"`。
 3. `desktop_action` 操作。target 优先用 `ref`，或直接写 `name` + `role`（不必先快照）。多步操作用 `steps` 一次提交。
 4. 看返回的 `effect`：`opened_windows` 表示弹出了对话框或新窗口，`target_closed` 表示窗口关了，`title_changed` 表示比如文件名变了。出现对话框时对它 `desktop_snapshot`（window 写对话框标题）后再继续。

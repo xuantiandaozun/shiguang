@@ -127,3 +127,44 @@ pub fn hide_chat(app: &AppHandle) {
         let _ = chat.hide();
     }
 }
+
+/// 把悬浮球窗口的命中区域裁成可见形状（逻辑像素，相对窗口左上角）。
+/// 原生窗口固定 160×76 且透明，不裁的话透明部分也会挡住鼠标。
+/// shape: "circle" 圆球；"left"/"right" 贴左/右边的胶囊（贴边一侧为直角）。
+#[cfg(windows)]
+pub fn set_floatball_region(app: &AppHandle, x: f64, y: f64, w: f64, h: f64, shape: &str) -> Result<(), String> {
+    use windows_sys::Win32::Graphics::Gdi::{CreateEllipticRgn, CreateRoundRectRgn, SetWindowRgn};
+    let win = app.get_webview_window("floatball").ok_or("悬浮球窗口不存在")?;
+    let hwnd = win.hwnd().map_err(|e| e.to_string())?;
+    let s = win.scale_factor().unwrap_or(1.0);
+    // 外扩 1px 保留抗锯齿边缘
+    let pad = 1.0;
+    let l = ((x - pad) * s).floor() as i32;
+    let t = ((y - pad) * s).floor() as i32;
+    let r = ((x + w + pad) * s).ceil() as i32 + 1;
+    let b = ((y + h + pad) * s).ceil() as i32 + 1;
+    let d = (h * s).round() as i32; // 圆角直径 = 高度，两端成半圆
+    let rgn = unsafe {
+        match shape {
+            "circle" => CreateEllipticRgn(l, t, r, b),
+            // 贴边一侧向窗外延伸一个半径，圆角落在窗外被裁掉，只剩外侧半圆
+            "left" => CreateRoundRectRgn(l - d, t, r, b, d, d),
+            "right" => CreateRoundRectRgn(l, t, r + d, b, d, d),
+            _ => return Err(format!("未知形状: {shape}")),
+        }
+    };
+    if rgn.is_null() {
+        return Err("创建区域失败".into());
+    }
+    // 成功后区域归系统所有，无需释放
+    if unsafe { SetWindowRgn(hwnd.0 as _, rgn, 1) } == 0 {
+        unsafe { windows_sys::Win32::Graphics::Gdi::DeleteObject(rgn) };
+        return Err("设置窗口区域失败".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn set_floatball_region(_: &AppHandle, _: f64, _: f64, _: f64, _: f64, _: &str) -> Result<(), String> {
+    Ok(())
+}

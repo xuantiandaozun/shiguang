@@ -172,17 +172,30 @@ pub fn list_windows(include_self: bool) -> Vec<WinInfo> {
     win::list_windows().into_iter().filter(|w| include_self || w.pid != me).collect()
 }
 
-/// 按标题或进程名找窗口（不区分大小写；多个命中取最上层）
+/// 按标题或进程名找窗口（不区分大小写）。
+/// 标题完全一致 > 标题包含 > 进程名包含；同档里未最小化的优先，再按层叠顺序取最上层
 pub(crate) fn find_window(query: &str, include_self: bool) -> Result<(WinInfo, Vec<String>)> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
         bail!("需要窗口标题或进程名");
     }
     let all = list_windows(include_self);
-    let hits: Vec<&WinInfo> = all
-        .iter()
-        .filter(|w| w.title.to_lowercase().contains(&q) || w.process.to_lowercase().trim_end_matches(".exe").contains(q.trim_end_matches(".exe")))
-        .collect();
+    let rank = |w: &WinInfo| -> Option<u8> {
+        let title = w.title.to_lowercase();
+        let tier = if title == q {
+            0
+        } else if title.contains(&q) {
+            1
+        } else if w.process.to_lowercase().trim_end_matches(".exe").contains(q.trim_end_matches(".exe")) {
+            2
+        } else {
+            return None;
+        };
+        Some(tier * 2 + w.minimized as u8)
+    };
+    let mut hits: Vec<(u8, &WinInfo)> = all.iter().filter_map(|w| rank(w).map(|r| (r, w))).collect();
+    hits.sort_by_key(|(r, _)| *r); // 稳定排序，同档保持层叠顺序
+    let hits: Vec<&WinInfo> = hits.into_iter().map(|(_, w)| w).collect();
     match hits.first() {
         Some(w) => Ok(((*w).clone(), hits.iter().skip(1).take(5).map(|w| format!("{}（{}）", w.title, w.process)).collect())),
         None => {
@@ -820,6 +833,60 @@ pub(crate) mod win {
         out
     }
 
+    /// 隐藏的顶层主窗口（有标题、无所有者、非工具窗口），用来发现缩在托盘里运行的软件
+    pub fn list_hidden_windows() -> Vec<WinInfo> {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetWindow, GW_OWNER};
+        dpi_aware(|| {
+            let mut hwnds: Vec<HWND> = Vec::new();
+            unsafe {
+                EnumWindows(Some(enum_cb), &mut hwnds as *mut Vec<HWND> as LPARAM);
+            }
+            let mut out = Vec::new();
+            for hwnd in hwnds {
+                unsafe {
+                    if IsWindowVisible(hwnd) != 0 || GetWindowTextLengthW(hwnd) == 0 || !GetWindow(hwnd, GW_OWNER).is_null() {
+                        continue;
+                    }
+                    if (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32) & WS_EX_TOOLWINDOW != 0 {
+                        continue;
+                    }
+                    let mut cls = [0u16; 128];
+                    let n = GetClassNameW(hwnd, cls.as_mut_ptr(), cls.len() as i32);
+                    let class = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
+                    if matches!(class.as_str(), "IME" | "MSCTFIME UI" | "ConsoleWindowClass" | "GDI+ Hook Window Class" | "OleDdeWndClass") {
+                        continue;
+                    }
+                    let mut buf = [0u16; 512];
+                    let n = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+                    let title = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+                    // 各种后台消息窗口，不是给人看的界面
+                    let t = title.to_lowercase();
+                    if title == class
+                        || title.contains('\\')
+                        || t.starts_with(".net-broadcasteventwindow")
+                        || ["messagewindow", "hiddenwindow", "message window", "notification window"].iter().any(|k| t.contains(k))
+                        || class.to_lowercase().contains("message")
+                    {
+                        continue;
+                    }
+                    let mut r: RECT = std::mem::zeroed();
+                    GetWindowRect(hwnd, &mut r);
+                    let mut pid = 0u32;
+                    GetWindowThreadProcessId(hwnd, &mut pid);
+                    out.push(WinInfo {
+                        hwnd: hwnd as i64,
+                        pid,
+                        title,
+                        process: process_name(pid),
+                        rect: [r.left, r.top, r.right - r.left, r.bottom - r.top],
+                        minimized: IsIconic(hwnd) != 0,
+                    });
+                }
+            }
+            out
+        })
+    }
+
     pub fn is_visible(hwnd: isize) -> bool {
         unsafe { IsWindowVisible(hwnd as HWND) != 0 }
     }
@@ -971,6 +1038,9 @@ pub(crate) mod win {
         bail!("截图目前只支持 Windows")
     }
     pub fn list_windows() -> Vec<WinInfo> {
+        Vec::new()
+    }
+    pub fn list_hidden_windows() -> Vec<WinInfo> {
         Vec::new()
     }
     pub fn is_visible(_: isize) -> bool {

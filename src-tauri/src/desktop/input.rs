@@ -254,6 +254,18 @@ pub fn show(hwnd: isize, how: &str) -> Result<()> {
     Ok(())
 }
 
+/// 唤出隐藏（缩在托盘）的窗口并切到前台
+pub fn unhide(hwnd: isize) -> Result<()> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW;
+    unsafe {
+        if IsWindow(hwnd as HWND) == 0 {
+            bail!("窗口已关闭");
+        }
+        ShowWindow(hwnd as HWND, SW_SHOW);
+    }
+    activate(hwnd)
+}
+
 pub fn is_maximized(hwnd: isize) -> bool {
     unsafe { IsZoomed(hwnd as HWND) != 0 }
 }

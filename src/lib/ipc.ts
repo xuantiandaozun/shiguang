@@ -499,6 +499,8 @@ export const ipc = {
   showAgentRunWindow: (id: string) => invoke<void>("show_agent_run_window", { id }),
   finishAgentRunWorktree: (id: string, action: "apply" | "discard") => invoke<unknown>("finish_agent_run_worktree", { id, action }),
   toggleChat: () => invoke<void>("toggle_chat"),
+  setFloatballRegion: (x: number, y: number, w: number, h: number, shape: "circle" | "left" | "right") =>
+    invoke<void>("set_floatball_region", { x, y, w, h, shape }),
   openMain: () => invoke<void>("open_main_window"),
   hideChat: () => invoke<void>("hide_chat"),
   /** 在系统默认浏览器/程序中打开 http(s) 链接或本地文件 */
