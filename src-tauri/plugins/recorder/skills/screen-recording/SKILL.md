@@ -11,9 +11,13 @@ description: >
 
 - 用户说「截个图」「我框一下」：`screenshot`（mode 默认 interactive），会弹出全屏选区，用户自己拖选区域或单击窗口。
 - 截某个软件：`screenshot` 的 mode=window，window 写标题或进程名的一部分。不确定名字时先 `list_windows`。窗口被遮挡也能截完整；最小化的窗口要先还原。
-- 全屏：mode=screen。
-- 默认不包含拾光自己的窗口。做拾光宣传素材时传 `include_self: true`。
-- 截图存在「图片/拾光截图」，默认同时复制到剪贴板。需要看内容时用 `read_image` 读返回的路径。
+- 只要窗口里的一块（mode=window 或 self 都行），三选一：
+  - `element`：按控件，如 `{"name": "发送", "role": "button"}`，或 desktop_snapshot 的 `{"ref": 12}`。最准，优先用。
+  - `text`：按画面上的文字（本地 OCR 找到那一行），适合控件树读不到的界面；要带上周围内容就加大 `padding`（如 120）。
+  - `rect`：窗口截图上的像素坐标 `[x, y, 宽, 高]`。不知道坐标时先整窗截一张看图，再按图上的位置裁。
+- 截拾光自己：mode=self，window 写 主窗口 / 对话 / 悬浮球 / 提醒（不写取可见的主窗口，其次对话窗口）。隐藏的窗口会临时显示、截完收起。做拾光宣传素材、检查自己的界面效果时用；也能配合 element 只截某个面板或按钮。
+- 全屏：mode=screen。screen / region 默认不包含拾光自己的窗口，要包含时传 `include_self: true`。
+- 截图存在「图片/拾光截图」，默认同时复制到剪贴板。当前模型能看图时，window / self 截图会直接附给你；否则用 `read_image` 读返回的路径。
 - 用户也可以用全局快捷键（默认 Ctrl+Shift+X）或「录屏截图」页截图。
 - 截图里可能有敏感信息，要发给别人或做素材前提醒用户检查。
 

@@ -128,40 +128,70 @@ pub fn hide_chat(app: &AppHandle) {
     }
 }
 
-/// 把悬浮球窗口的命中区域裁成可见形状（逻辑像素，相对窗口左上角）。
-/// 原生窗口固定 160×76 且透明，不裁的话透明部分也会挡住鼠标。
-/// shape: "circle" 圆球；"left"/"right" 贴左/右边的胶囊（贴边一侧为直角）。
+/// 悬浮球可见形状（逻辑像素，相对窗口左上角）。
+/// 原生窗口固定 160×76 且透明，透明部分不该挡鼠标。
+/// 早先用 SetWindowRgn 裁窗口，但透明窗口裁区域后，后面窗口变化时透明部分不重绘，
+/// 会留下别的窗口的残影；现在改为后台跟踪鼠标：鼠标不在球上时让整个窗口点击穿透。
+#[cfg(windows)]
+static FLOATBALL_SHAPE: std::sync::Mutex<Option<(f64, f64, f64, f64, bool)>> = std::sync::Mutex::new(None);
+
+/// shape: "circle" 圆球；"left"/"right" 贴边胶囊（按矩形判断）。
 #[cfg(windows)]
 pub fn set_floatball_region(app: &AppHandle, x: f64, y: f64, w: f64, h: f64, shape: &str) -> Result<(), String> {
-    use windows_sys::Win32::Graphics::Gdi::{CreateEllipticRgn, CreateRoundRectRgn, SetWindowRgn};
-    let win = app.get_webview_window("floatball").ok_or("悬浮球窗口不存在")?;
-    let hwnd = win.hwnd().map_err(|e| e.to_string())?;
-    let s = win.scale_factor().unwrap_or(1.0);
-    // 外扩 1px 保留抗锯齿边缘
-    let pad = 1.0;
-    let l = ((x - pad) * s).floor() as i32;
-    let t = ((y - pad) * s).floor() as i32;
-    let r = ((x + w + pad) * s).ceil() as i32 + 1;
-    let b = ((y + h + pad) * s).ceil() as i32 + 1;
-    let d = (h * s).round() as i32; // 圆角直径 = 高度，两端成半圆
-    let rgn = unsafe {
-        match shape {
-            "circle" => CreateEllipticRgn(l, t, r, b),
-            // 贴边一侧向窗外延伸一个半径，圆角落在窗外被裁掉，只剩外侧半圆
-            "left" => CreateRoundRectRgn(l - d, t, r, b, d, d),
-            "right" => CreateRoundRectRgn(l, t, r + d, b, d, d),
-            _ => return Err(format!("未知形状: {shape}")),
-        }
+    let circle = match shape {
+        "circle" => true,
+        "left" | "right" => false,
+        _ => return Err(format!("未知形状: {shape}")),
     };
-    if rgn.is_null() {
-        return Err("创建区域失败".into());
-    }
-    // 成功后区域归系统所有，无需释放
-    if unsafe { SetWindowRgn(hwnd.0 as _, rgn, 1) } == 0 {
-        unsafe { windows_sys::Win32::Graphics::Gdi::DeleteObject(rgn) };
-        return Err("设置窗口区域失败".into());
+    let first = {
+        let mut guard = FLOATBALL_SHAPE.lock().map_err(|e| e.to_string())?;
+        let first = guard.is_none();
+        *guard = Some((x, y, w, h, circle));
+        first
+    };
+    if first {
+        let app = app.clone();
+        std::thread::spawn(move || floatball_hit_loop(app));
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn floatball_hit_loop(app: AppHandle) {
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
+    let mut ignoring = false;
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let Some(win) = app.get_webview_window("floatball") else { return };
+        let Ok(hwnd) = win.hwnd() else { continue };
+        let Some((x, y, w, h, circle)) = FLOATBALL_SHAPE.lock().ok().and_then(|g| *g) else { continue };
+        let mut pt = POINT { x: 0, y: 0 };
+        let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        if unsafe { GetCursorPos(&mut pt) } == 0 || unsafe { GetWindowRect(hwnd.0 as _, &mut rc) } == 0 {
+            continue;
+        }
+        // 按住左键（正在拖动/点击）时保持可交互，避免拖到一半被穿透
+        let pressed = unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } as u16 & 0x8000 != 0;
+        if pressed && !ignoring {
+            continue;
+        }
+        let s = win.scale_factor().unwrap_or(1.0);
+        let px = (pt.x - rc.left) as f64 / s;
+        let py = (pt.y - rc.top) as f64 / s;
+        let pad = 1.0;
+        let inside = if circle {
+            let (cx, cy, r) = (x + w / 2.0, y + h / 2.0, w.min(h) / 2.0 + pad);
+            (px - cx).powi(2) + (py - cy).powi(2) <= r * r
+        } else {
+            px >= x - pad && px <= x + w + pad && py >= y - pad && py <= y + h + pad
+        };
+        if inside == ignoring {
+            ignoring = !inside;
+            let _ = win.set_ignore_cursor_events(ignoring);
+        }
+    }
 }
 
 #[cfg(not(windows))]

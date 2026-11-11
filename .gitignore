@@ -2,6 +2,7 @@ node_modules
 dist
 release
 src-tauri/target
+src-tauri/src-tauri/target-alt
 src-tauri/gen
 src-tauri/binaries
 src-tauri/resources/browser-extension.zip

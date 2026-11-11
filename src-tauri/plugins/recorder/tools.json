@@ -2,7 +2,7 @@
   {
     "name": "screenshot",
     "label": "截图",
-    "description": "截图并保存为 PNG（默认在 图片/拾光截图，可同时复制到剪贴板）。mode=interactive：弹出全屏选区，让用户自己拖选区域或单击某个窗口（用户说「截个图」「我框一下」时用）；window：按标题或进程名截指定软件的整个窗口，被遮挡也完整（不确定名字先用 list_windows）；screen：全屏（所有显示器）；region：按 rect [x,y,宽,高] 屏幕物理像素截。默认不包含拾光自己的窗口，做宣传素材需要时 include_self=true。返回文件路径，要看内容再用 read_image。",
+    "description": "截图并保存为 PNG（默认在 图片/拾光截图，可同时复制到剪贴板；当前模型能看图时图片会直接附给你）。mode=interactive：弹出全屏选区，让用户自己拖选区域或单击某个窗口（用户说「截个图」「我框一下」时用）；window：按标题或进程名截指定软件的整个窗口，被遮挡也完整（不确定名字先用 list_windows）；self：截拾光自己的窗口（window 写 主窗口 / 对话 / 悬浮球 / 提醒，不写取可见的主窗口，其次对话窗口；隐藏的会临时显示，截完收起），用于做宣传素材、核对自己的界面；screen：全屏（所有显示器）；region：按 rect [x,y,宽,高] 屏幕物理像素截。window / self 只要其中一块时三选一：element 按控件（名称/类型，同 desktop_action 的 target）、text 按画面上的文字（本地 OCR 找到那一行）、rect 按窗口内像素坐标；padding 控制外扩。screen / region 默认不包含拾光自己的窗口，需要时 include_self=true。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -11,6 +11,7 @@
           "enum": [
             "interactive",
             "window",
+            "self",
             "screen",
             "region"
           ],
@@ -18,14 +19,50 @@
         },
         "window": {
           "type": "string",
-          "description": "mode=window 时：窗口标题或进程名的一部分，如「微信」「chrome」"
+          "description": "mode=window：窗口标题或进程名的一部分，如「微信」「chrome」；mode=self：主窗口 / 对话 / 悬浮球 / 提醒"
         },
         "rect": {
           "type": "array",
           "items": {
             "type": "number"
           },
-          "description": "mode=region 时：[x, y, 宽, 高]"
+          "description": "mode=region：[x, y, 宽, 高] 屏幕物理像素；mode=window/self：窗口截图上的像素坐标（左上角 0,0，与 desktop_screenshot 一致），只截这一块"
+        },
+        "element": {
+          "type": "object",
+          "description": "mode=window/self：只截某个控件，如 {\"name\": \"发送\", \"role\": \"button\"}；字段同 desktop_action 的 target：ref（desktop_snapshot 编号）/ name / role / automation_id / class / index",
+          "properties": {
+            "ref": {
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "role": {
+              "type": "string"
+            },
+            "automation_id": {
+              "type": "string"
+            },
+            "class": {
+              "type": "string"
+            },
+            "index": {
+              "type": "integer"
+            }
+          }
+        },
+        "text": {
+          "type": "string",
+          "description": "mode=window/self：只截画面上包含这段文字的那一行（本地 OCR，首次会下载约 15MB 模型）；想多截周围内容就加大 padding"
+        },
+        "index": {
+          "type": "integer",
+          "description": "text 有多处匹配时取第几个（从 1 开始，从上到下）"
+        },
+        "padding": {
+          "type": "number",
+          "description": "element / text 区块向外扩的像素，默认 8"
         },
         "include_self": {
           "type": "boolean",

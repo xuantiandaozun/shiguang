@@ -568,6 +568,9 @@ pub async fn execute(app: &AppHandle, name: &str, args: &Value) -> Result<Value>
             if mode == "interactive" {
                 return interactive(app, b("include_self"), b("copy")).await;
             }
+            if mode == "window" || mode == "self" {
+                return window_shot(app, mode == "self", args).await;
+            }
             let rect = args.get("rect").and_then(Value::as_array).and_then(|a| {
                 let n: Vec<i32> = a.iter().filter_map(Value::as_f64).map(|v| v.round() as i32).collect();
                 (n.len() == 4).then(|| [n[0], n[1], n[2], n[3]])
@@ -579,6 +582,249 @@ pub async fn execute(app: &AppHandle, name: &str, args: &Value) -> Result<Value>
                 .map_err(|e| anyhow!("截图线程异常：{e}"))?
         }
         _ => bail!("未知截图工具 {name}"),
+    }
+}
+
+// ---------- 窗口 / 拾光自身 + 区块 ----------
+
+/// 拾光自己的窗口（不含截图选区），可见的在前
+fn own_windows(app: &AppHandle) -> Vec<(tauri::WebviewWindow, WinInfo, bool)> {
+    let mut out: Vec<_> = app
+        .webview_windows()
+        .into_values()
+        .filter(|w| !w.label().starts_with("capture-"))
+        .filter_map(|w| {
+            let h = w.hwnd().ok()?.0 as isize;
+            let info = win::window_info(h)?;
+            Some((w, info, win::is_visible(h)))
+        })
+        .collect();
+    // 默认顺序：主窗口 > 对话 > 其它，可见的优先
+    let rank = |l: &str| match l {
+        "main" => 0,
+        "chat" => 1,
+        "floatball" => 3,
+        _ => 2,
+    };
+    out.sort_by_key(|(w, _, vis)| (!vis, rank(w.label())));
+    out
+}
+
+fn own_alias(q: &str) -> Option<&'static str> {
+    Some(match q {
+        "main" | "主窗口" | "主界面" | "设置" | "主页" => "main",
+        "chat" | "对话" | "聊天" | "对话框" | "对话窗口" | "聊天窗口" | "对话面板" => "chat",
+        "floatball" | "ball" | "悬浮球" | "球" => "floatball",
+        "reminder" | "提醒" | "提醒窗口" => "reminder",
+        _ => return None,
+    })
+}
+
+/// 选拾光的某个窗口：别名（主窗口/对话/悬浮球/提醒）、label 或标题的一部分；不写取可见的主窗口 > 对话窗口
+fn pick_own(app: &AppHandle, query: Option<&str>) -> Result<(tauri::WebviewWindow, WinInfo, bool)> {
+    let all = own_windows(app);
+    let q = query.map(|q| q.trim().to_lowercase()).filter(|q| !q.is_empty() && q != "拾光" && q != "self" && q != "自己");
+    let names = || all.iter().map(|(w, i, v)| format!("{}（{}{}）", w.label(), i.title, if *v { "" } else { "，隐藏" })).collect::<Vec<_>>().join("、");
+    let hit = match q.as_deref() {
+        None => all.first().cloned(),
+        Some(q) => {
+            let label = own_alias(q);
+            all.iter()
+                .find(|(w, _, _)| Some(w.label()) == label || w.label().eq_ignore_ascii_case(q))
+                .or_else(|| all.iter().find(|(_, i, _)| i.title.to_lowercase().contains(q)))
+                .or_else(|| all.iter().find(|(w, _, _)| w.label().to_lowercase().contains(q)))
+                .cloned()
+        }
+    };
+    hit.ok_or_else(|| anyhow!("拾光没有「{}」这个窗口。现有：{}（可写 主窗口 / 对话 / 悬浮球 / 提醒）", query.unwrap_or(""), names()))
+}
+
+/// 截拾光自己的窗口：隐藏的先临时显示，被设为「不被采集」的临时取消，截完恢复。
+/// 有标题栏的（主窗口）用 PrintWindow，被挡住也完整；透明无边框的（对话、悬浮球）按屏幕上看到的截，保留圆角和透明处的背景
+fn capture_own(webview: &tauri::WebviewWindow, h: isize) -> Result<(RgbaImage, WinInfo)> {
+    let was_visible = win::is_visible(h);
+    let was_min = webview.is_minimized().unwrap_or(false);
+    if !was_visible || was_min {
+        let _ = webview.unminimize();
+        let _ = webview.show();
+        std::thread::sleep(std::time::Duration::from_millis(600));
+    }
+    let excluded = EXCLUDED.lock().unwrap().contains(&h);
+    if excluded {
+        win::set_exclude(&[h], false);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+    let r = (|| {
+        let info = win::window_info(h).ok_or_else(|| anyhow!("窗口已关闭"))?;
+        let img = if webview.is_decorated().unwrap_or(false) {
+            capture_window_best(&info)?
+        } else {
+            let [x, y, w, hh] = info.rect;
+            win::capture_rect(x, y, w.max(1) as u32, hh.max(1) as u32)?
+        };
+        Ok((img, info))
+    })();
+    if excluded {
+        win::set_exclude(&[h], true);
+    }
+    if !was_visible {
+        let _ = webview.hide();
+    } else if was_min {
+        let _ = webview.minimize();
+    }
+    r
+}
+
+fn norm_text(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase()
+}
+
+/// 外扩 pad 像素
+fn pad_rect([x, y, w, h]: [i32; 4], pad: i32) -> [i32; 4] {
+    [x - pad, y - pad, w + pad * 2, h + pad * 2]
+}
+
+/// 截窗口（mode=window）或拾光自己的窗口（mode=self），可选只要其中一块：
+/// element（控件）、text（OCR 找到的那行文字）、rect（窗口内像素坐标）
+async fn window_shot(app: &AppHandle, self_mode: bool, args: &Value) -> Result<Value> {
+    let b = |k: &str| args.get(k).and_then(Value::as_bool);
+    let copy = b("copy").unwrap_or_else(|| default_copy(app));
+    let query = args.get("window").and_then(Value::as_str).map(str::to_string);
+    // 普通窗口找不到时，看是不是在说拾光自己（「拾光」「对话窗口」等）
+    let target = if self_mode {
+        None
+    } else {
+        match find_window(query.as_deref().unwrap_or(""), b("include_self").unwrap_or(false)) {
+            Ok(found) => Some(found),
+            Err(e) => match query.as_deref().map(|q| (q, pick_own(app, Some(q)))) {
+                Some((q, Ok(_))) if q.contains("拾光") || own_alias(q.trim()).is_some() => None,
+                _ => return Err(e),
+            },
+        }
+    };
+    let own = match target {
+        None => Some(pick_own(app, query.as_deref())?),
+        Some(_) => None,
+    };
+    let (hwnd, label) = match (&target, &own) {
+        (Some((w, _)), _) => (w.hwnd as isize, w.title.clone()),
+        (_, Some((wv, i, _))) => (i.hwnd as isize, if i.title.trim().is_empty() { format!("拾光-{}", wv.label()) } else { i.title.clone() }),
+        _ => unreachable!(),
+    };
+    if let Some((w, _)) = &target {
+        if w.minimized {
+            bail!("窗口「{}」已最小化，先把它还原再截", w.title);
+        }
+    }
+
+    let pad = args.get("padding").and_then(Value::as_f64).map(|p| p.round() as i32).unwrap_or(8).clamp(0, 400);
+    let element = args.get("element").filter(|v| !v.is_null());
+    let text = args.get("text").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty());
+    let rect = args.get("rect").and_then(Value::as_array).map(|a| {
+        let n: Vec<i32> = a.iter().filter_map(Value::as_f64).map(|v| v.round() as i32).collect();
+        match n[..] {
+            [x, y, w, h] if w > 0 && h > 0 => Ok([x, y, w, h]),
+            _ => Err(anyhow!("rect 需要 [x, y, 宽, 高]，是窗口截图上的像素坐标（左上角 0,0），宽高大于 0")),
+        }
+    });
+    let rect = rect.transpose()?;
+    // 控件要先定位（可能会滚动到可见）再截图；对隐藏的拾光窗口，先显示再找
+    let mut shown = false;
+    let el_rect = match element {
+        Some(el) => {
+            if let Some((wv, _, false)) = &own {
+                shown = true;
+                let _ = wv.show();
+                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            }
+            Some(crate::desktop::element_rect(hwnd, el).await?)
+        }
+        None => None,
+    };
+
+    let wv = own.as_ref().map(|(wv, _, _)| wv.clone());
+    let fallback = target.as_ref().map(|(w, _)| w.clone());
+    let captured = tokio::task::spawn_blocking(move || -> Result<(RgbaImage, WinInfo)> {
+        match wv {
+            Some(wv) => capture_own(&wv, hwnd),
+            None => {
+                let info = win::window_info(hwnd).or(fallback).ok_or_else(|| anyhow!("窗口已关闭"))?;
+                Ok((capture_window_best(&info)?, info))
+            }
+        }
+    })
+    .await
+    .map_err(|e| anyhow!("截图线程异常：{e}"));
+    if shown {
+        if let Some((wv, _, _)) = &own {
+            let _ = wv.hide();
+        }
+    }
+    let (img, info) = captured??;
+
+    // 裁出区块（坐标都相对窗口截图左上角）
+    let (img, block) = if let Some((r, what)) = el_rect {
+        let rel = pad_rect([r[0] - info.rect[0], r[1] - info.rect[1], r[2], r[3]], pad);
+        (crop(&img, rel).map_err(|_| anyhow!("{what} 不在窗口画面里（可能被遮住或在屏幕外）"))?, json!({"element": what, "rect": rel}))
+    } else if let Some(t) = text {
+        let r = ocr_find(app, &img, t, args.get("index").and_then(Value::as_u64).map(|i| i as usize))?;
+        let rel = pad_rect(r, pad);
+        (crop(&img, rel)?, json!({"text": t, "rect": rel}))
+    } else if let Some(r) = rect {
+        (crop(&img, r).map_err(|_| anyhow!("rect {r:?} 超出窗口画面 {}×{}", img.width(), img.height()))?, json!({"rect": r}))
+    } else {
+        (img, Value::Null)
+    };
+
+    let label = if block.is_null() { label } else { format!("{label}-区块") };
+    let mut v = deliver(app, &img, &label, copy)?;
+    v["window"] = json!({"title": info.title, "process": info.process, "self": own.is_some()});
+    if let Some(o) = &own {
+        v["window"]["label"] = json!(o.0.label());
+    }
+    if !block.is_null() {
+        v["block"] = block;
+    }
+    if let Some((_, others)) = &target {
+        if !others.is_empty() {
+            v["other_matches"] = json!(others);
+        }
+    }
+    let vision = crate::commands::load_settings(&app.state::<crate::AppState>().db).model_supports_vision;
+    if vision {
+        v["native_image"] = json!(true);
+        v["note"] = json!("图片已直接附给你。");
+    }
+    Ok(v)
+}
+
+/// 在窗口截图上用本地 OCR 找文字所在的行（先整行相等，再包含），返回相对截图的 rect
+fn ocr_find(app: &AppHandle, img: &RgbaImage, text: &str, index: Option<usize>) -> Result<[i32; 4]> {
+    let dir = crate::tempfs::ensure_temp_dir(app)?.join("desktop");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("shot-ocr-{}.png", chrono::Local::now().format("%Y%m%d-%H%M%S-%3f")));
+    save_fast_png(img, &path)?;
+    let state = app.state::<crate::AppState>();
+    let boxes = tokio::task::block_in_place(|| state.ocr.recognize_boxes(&path));
+    let _ = std::fs::remove_file(&path);
+    let boxes = boxes?;
+    let want = norm_text(text);
+    let mut hits: Vec<&crate::ocr::OcrBox> = boxes.iter().filter(|b| norm_text(&b.text) == want).collect();
+    if hits.is_empty() {
+        hits = boxes.iter().filter(|b| norm_text(&b.text).contains(&want)).collect();
+    }
+    match (hits.len(), index) {
+        (0, _) => {
+            let seen: Vec<&str> = boxes.iter().take(30).map(|b| b.text.as_str()).collect();
+            bail!("画面上没有识别到文字「{text}」。识别到的有：{}", seen.join("、"))
+        }
+        (n, Some(i)) if i >= 1 && i <= n => Ok(hits[i - 1].rect),
+        (n, Some(i)) => bail!("index {i} 超出范围：共 {n} 处「{text}」"),
+        (1, None) => Ok(hits[0].rect),
+        (n, None) => {
+            let list: Vec<String> = hits.iter().take(8).enumerate().map(|(k, b)| format!("{}. 「{}」@{:?}", k + 1, b.text, b.rect)).collect();
+            bail!("画面上有 {n} 处「{text}」，用 index 指定第几个（从上到下、从左到右），或改用 rect：{}", list.join("；"))
+        }
     }
 }
 
@@ -891,6 +1137,26 @@ pub(crate) mod win {
         unsafe { IsWindowVisible(hwnd as HWND) != 0 }
     }
 
+    /// 单个窗口的当前信息（隐藏窗口也行）
+    pub fn window_info(hwnd: isize) -> Option<WinInfo> {
+        dpi_aware(|| unsafe {
+            let h = hwnd as HWND;
+            let r = frame_bounds(h)?;
+            let mut buf = [0u16; 512];
+            let n = GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(h, &mut pid);
+            Some(WinInfo {
+                hwnd: hwnd as i64,
+                pid,
+                title: String::from_utf16_lossy(&buf[..n.max(0) as usize]),
+                process: process_name(pid),
+                rect: [r.left, r.top, r.right - r.left, r.bottom - r.top],
+                minimized: IsIconic(h) != 0,
+            })
+        })
+    }
+
     pub fn set_exclude(hwnds: &[isize], on: bool) {
         for &h in hwnds {
             unsafe {
@@ -1046,6 +1312,9 @@ pub(crate) mod win {
     pub fn is_visible(_: isize) -> bool {
         false
     }
+    pub fn window_info(_: isize) -> Option<WinInfo> {
+        None
+    }
     pub fn set_exclude(_: &[isize], _: bool) {}
     pub fn clipboard_set_image(_: &RgbaImage) -> Result<()> {
         bail!("只支持 Windows")
@@ -1076,6 +1345,18 @@ mod tests {
         let img = RgbaImage::new(100, 50);
         assert_eq!(crop(&img, [90, 40, 50, 50]).unwrap().dimensions(), (10, 10));
         assert!(crop(&img, [200, 0, 10, 10]).is_err());
+    }
+
+    #[test]
+    fn block_helpers() {
+        assert_eq!(pad_rect([10, 20, 30, 40], 8), [2, 12, 46, 56]);
+        // 外扩超出图片时按图片边界裁
+        let img = RgbaImage::new(100, 50);
+        assert_eq!(crop(&img, pad_rect([0, 0, 20, 10], 8)).unwrap().dimensions(), (28, 18));
+        assert_eq!(own_alias("对话"), Some("chat"));
+        assert_eq!(own_alias("悬浮球"), Some("floatball"));
+        assert_eq!(own_alias("微信"), None);
+        assert_eq!(norm_text(" 发 送 "), "发送");
     }
 
     #[test]

@@ -15,8 +15,13 @@ pub async fn execute(_app: &tauri::AppHandle, _name: &str, _args: &serde_json::V
     anyhow::bail!("桌面软件操控只支持 Windows")
 }
 
+#[cfg(not(windows))]
+pub async fn element_rect(_hwnd: isize, _target: &serde_json::Value) -> anyhow::Result<([i32; 4], String)> {
+    anyhow::bail!("按控件截图只支持 Windows")
+}
+
 #[cfg(windows)]
-pub use imp::execute;
+pub use imp::{element_rect, execute};
 #[cfg(all(test, windows))]
 use imp::{perform, Target};
 
@@ -472,6 +477,32 @@ mod imp {
             return Ok(None);
         }
         Ok(Some(Query { name, roles, automation_id, class, index: t.get("index").and_then(Value::as_u64).map(|i| i as usize), include_offscreen: false }))
+    }
+
+    /// 控件在屏幕上的边框（物理像素）与描述，给截图按控件裁剪用。
+    /// element 同 desktop_action 的 target：ref，或 name / role / automation_id / class（+index）
+    pub async fn element_rect(hwnd: isize, element: &Value) -> Result<([i32; 4], String)> {
+        let t = element.as_object().ok_or_else(|| anyhow!("element 必须是对象，如 {{\"name\": \"设置\", \"role\": \"button\"}}"))?;
+        let by_ref = match t.get("ref") {
+            Some(r) => Some(r.as_u64().or_else(|| r.as_str().and_then(|s| s.trim().parse().ok())).ok_or_else(|| anyhow!("ref 必须是 desktop_snapshot 里的数字编号"))? as usize),
+            None => None,
+        };
+        let q = match by_ref {
+            Some(_) => None,
+            None => Some(parse_query(t)?.ok_or_else(|| anyhow!("element 至少给 ref、name、role、automation_id 之一"))?),
+        };
+        uia::run(move |ctx| {
+            let (el, info) = match (by_ref, &q) {
+                (Some(r), _) => ctx.by_ref(hwnd, r)?,
+                (None, Some(q)) => ctx.find(hwnd, q)?,
+                _ => unreachable!(),
+            };
+            uia::scroll_into_view(&el);
+            let what = tree::describe(&info);
+            let rect = uia::current_rect(&el).ok_or_else(|| anyhow!("{what} 没有可见位置（可能被折叠或在屏幕外）"))?;
+            Ok((rect, what))
+        })
+        .await
     }
 
     async fn resolve_target(app: &AppHandle, w: &WinInfo, raw: Option<&Value>) -> Result<Target> {

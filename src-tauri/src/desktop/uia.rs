@@ -375,8 +375,8 @@ pub fn current_rect(el: &IUIAutomationElement) -> Option<[i32; 4]> {
     unsafe { el.CurrentBoundingRectangle().ok().and_then(rect_of) }
 }
 
-/// 鼠标要点的位置：优先控件自报的可点击点，否则取边框中心；在屏幕外时先让它滚动到可见
-pub fn click_point(el: &IUIAutomationElement) -> Result<(i32, i32)> {
+/// 控件在屏幕外（列表/页面没滚到）时让它滚动到可见
+pub fn scroll_into_view(el: &IUIAutomationElement) {
     unsafe {
         if el.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) {
             if let Ok(p) = el.GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(UIA_ScrollItemPatternId) {
@@ -384,6 +384,13 @@ pub fn click_point(el: &IUIAutomationElement) -> Result<(i32, i32)> {
                 std::thread::sleep(Duration::from_millis(200));
             }
         }
+    }
+}
+
+/// 鼠标要点的位置：优先控件自报的可点击点，否则取边框中心；在屏幕外时先让它滚动到可见
+pub fn click_point(el: &IUIAutomationElement) -> Result<(i32, i32)> {
+    scroll_into_view(el);
+    unsafe {
         let mut pt = POINT::default();
         if el.GetClickablePoint(&mut pt).map(|b| b.as_bool()).unwrap_or(false) {
             return Ok((pt.x, pt.y));
