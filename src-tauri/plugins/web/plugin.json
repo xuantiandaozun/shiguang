@@ -2,11 +2,12 @@
   "id": "web",
   "name": "网页搜索",
   "version": "1.0.0",
-  "description": "公开网页搜索与抓取。",
+  "description": "公开网页搜索与抓取（本地优先，DeepSeek 兜底）。",
   "order": 30,
   "tools": [
     "tools.json"
   ],
+  "skills": "skills",
   "categories": {
     "web": {
       "label": "网页",

@@ -107,6 +107,8 @@ pub struct ChatMsg {
     pub role: String,
     pub content: String,
     pub created_at: String,
+    #[serde(default)]
+    pub meta_json: String,
 }
 
 /// 写在工具轮里、没有进入最终助手气泡的中间草稿。
@@ -729,10 +731,21 @@ impl Db {
               created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_agent_run_events_run ON agent_run_events(run_id, id);
+            CREATE TABLE IF NOT EXISTS deepseek_files(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              local_path TEXT NOT NULL,
+              file_size INTEGER NOT NULL,
+              modified_secs INTEGER NOT NULL,
+              purpose TEXT NOT NULL,
+              file_id TEXT NOT NULL,
+              filename TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE(local_path, file_size, modified_secs, purpose)
+            );
             "#,
         )?;
 
-        // 老库迁移：chat_messages 增加 session_id 列
+        // 老库迁移：chat_messages 增加 session_id / meta_json 列
         let cols: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(chat_messages)")?;
             let collected: Vec<String> = stmt
@@ -744,6 +757,11 @@ impl Db {
         if !cols.iter().any(|c| c == "session_id") {
             conn.execute_batch(
                 "ALTER TABLE chat_messages ADD COLUMN session_id INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        if !cols.iter().any(|c| c == "meta_json") {
+            conn.execute_batch(
+                "ALTER TABLE chat_messages ADD COLUMN meta_json TEXT NOT NULL DEFAULT '{}';",
             )?;
         }
         // Preserve reasoning content needed to reconstruct provider-specific tool rounds.
@@ -1440,6 +1458,29 @@ impl Db {
         Ok(())
     }
 
+    pub fn update_session_title(&self, id: i64, title: &str) -> Result<()> {
+        let trimmed: String = title.trim().chars().take(60).collect();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE chat_sessions SET title=?1 WHERE id=?2",
+            params![trimmed, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn count_user_messages(&self, session_id: i64) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chat_messages WHERE session_id=?1 AND role='user'",
+            params![session_id],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -1538,11 +1579,22 @@ impl Db {
     }
 
     pub fn save_chat(&self, session_id: i64, role: &str, content: &str) -> Result<i64> {
+        self.save_chat_with_meta(session_id, role, content, "{}")
+    }
+
+    pub fn save_chat_with_meta(
+        &self,
+        session_id: i64,
+        role: &str,
+        content: &str,
+        meta_json: &str,
+    ) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         let now = now_str();
+        let meta = if meta_json.trim().is_empty() { "{}" } else { meta_json };
         conn.execute(
-            "INSERT INTO chat_messages(session_id, role, content, created_at) VALUES(?1, ?2, ?3, ?4)",
-            params![session_id, role, content, now],
+            "INSERT INTO chat_messages(session_id, role, content, meta_json, created_at) VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![session_id, role, content, meta, now],
         )?;
         let id = conn.last_insert_rowid();
         conn.execute(
@@ -1552,10 +1604,34 @@ impl Db {
         Ok(id)
     }
 
+    pub fn update_chat_meta(&self, id: i64, meta_json: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE chat_messages SET meta_json=?1 WHERE id=?2",
+            params![meta_json, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_chat_message(&self, id: i64, content: &str, meta_json: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE chat_messages SET content=?1, meta_json=?2 WHERE id=?3",
+            params![content, meta_json, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_chat_message(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM chat_messages WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
     pub fn load_chat(&self, session_id: i64, limit: usize) -> Result<Vec<ChatMsg>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, role, content, created_at FROM chat_messages
+            "SELECT id, role, content, created_at, COALESCE(meta_json, '{}') FROM chat_messages
              WHERE session_id=?1 ORDER BY id DESC LIMIT ?2",
         )?;
         let mut rows: Vec<ChatMsg> = stmt
@@ -1565,6 +1641,7 @@ impl Db {
                     role: r.get(1)?,
                     content: r.get(2)?,
                     created_at: r.get(3)?,
+                    meta_json: r.get(4)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -1578,7 +1655,7 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
-                "SELECT id, role, content, created_at FROM chat_messages
+                "SELECT id, role, content, created_at, COALESCE(meta_json, '{}') FROM chat_messages
                  WHERE session_id=?1 AND id=?2",
                 params![session_id, id],
                 |r| {
@@ -1587,6 +1664,7 @@ impl Db {
                         role: r.get(1)?,
                         content: r.get(2)?,
                         created_at: r.get(3)?,
+                        meta_json: r.get(4)?,
                     })
                 },
             )
@@ -1605,7 +1683,7 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let tokens = query_like_tokens(query);
         let mut sql = String::from(
-            "SELECT id, role, content, created_at FROM chat_messages
+            "SELECT id, role, content, created_at, COALESCE(meta_json, '{}') FROM chat_messages
              WHERE session_id=?1 AND (?2 IS NULL OR id<?2)",
         );
         if !tokens.is_empty() {
@@ -1634,12 +1712,62 @@ impl Db {
                     role: r.get(1)?,
                     content: r.get(2)?,
                     created_at: r.get(3)?,
+                    meta_json: r.get(4)?,
                 })
             })?
             .filter_map(|r| r.ok())
             .collect();
         rows.reverse();
         Ok(rows)
+    }
+
+    pub fn get_cached_deepseek_file(
+        &self,
+        local_path: &str,
+        file_size: i64,
+        modified_secs: i64,
+        purpose: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT file_id FROM deepseek_files
+             WHERE local_path=?1 AND file_size=?2 AND modified_secs=?3 AND purpose=?4",
+            params![local_path, file_size, modified_secs, purpose],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn put_cached_deepseek_file(
+        &self,
+        local_path: &str,
+        file_size: i64,
+        modified_secs: i64,
+        purpose: &str,
+        file_id: &str,
+        filename: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO deepseek_files(local_path, file_size, modified_secs, purpose, file_id, filename, created_at)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(local_path, file_size, modified_secs, purpose) DO UPDATE SET
+               file_id=excluded.file_id,
+               filename=excluded.filename,
+               created_at=excluded.created_at",
+            params![local_path, file_size, modified_secs, purpose, file_id, filename, now_str()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_cached_deepseek_file_by_id(&self, file_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM deepseek_files WHERE file_id=?1",
+            params![file_id],
+        )?;
+        Ok(())
     }
 
     /// 工具轮里写下、但没有进入最终助手气泡的中间草稿。

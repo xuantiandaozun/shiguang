@@ -55,6 +55,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw '下载安装包失败' }
           $files = @(Get-ChildItem release-assets -Filter '*.exe')
           if ($files.Count -ne 1) { throw '必须且只能提供一个安装包' }
+          if ($files[0].Name -notmatch '^[A-Za-z0-9._-]+$') { throw "安装包文件名 $($files[0].Name) 含非 ASCII 字符，GitHub 上传时会丢弃这些字符。请改用 scripts/publish-draft.ps1 创建草稿，文件名会统一成 ShiGuang_<版本>_x64-setup.exe" }
           if ((Get-FileHash $files[0].FullName -Algorithm SHA256).Hash -ne $env:EXPECTED_SHA256) { throw 'SHA256 校验失败，拒绝签名' }
           "INSTALLER=$($files[0].FullName)" >> $env:GITHUB_ENV
           "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
@@ -82,7 +83,7 @@ jobs:
           $entry = @{ signature = $signature; url = $url }
           $manifest = @{
             version = $env:RELEASE_VERSION
-            notes = '界面焕新、悬浮球修复、技能精简与服务器体验优化。'
+            notes = '新增独立小程序窗口与桌面快捷启动、服务器管理独立化与 XFTP 风格双栏 SFTP 文件管理、自定义标签与最近操作分组，以及 DeepSeek 语音与联网能力增强。'
             pub_date = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
             platforms = @{ 'windows-x86_64' = $entry; 'windows-x86_64-nsis' = $entry }
           }

@@ -19,10 +19,191 @@ const MAX_BODY_CHARS: usize = 80_000;
 const USER_AGENT: &str = "ShiGuang/0.1 (desktop assistant; +https://github.com)";
 
 pub async fn execute(name: &str, args: &Value, cancel: &CancellationToken) -> Result<Value> {
+    execute_with_deepseek(None, name, args, cancel).await
+}
+
+pub async fn execute_with_deepseek(
+    deepseek_creds: Option<(String, String)>,
+    name: &str,
+    args: &Value,
+    cancel: &CancellationToken,
+) -> Result<Value> {
     match name {
-        "web_search" => search(args, cancel).await,
-        "web_fetch" => fetch(args, cancel).await,
+        "web_search" => search_with_deepseek(deepseek_creds, args, cancel).await,
+        "web_fetch" => fetch_with_deepseek(deepseek_creds, args, cancel).await,
         _ => bail!("未知网页工具: {name}"),
+    }
+}
+
+/// 搜索：默认本地引擎优先；本地失败才用 DeepSeek Search 兜底。
+/// 需要正文摘要（need_content）或模型显式指定 engine=deepseek 时，才优先 DeepSeek。
+async fn search_with_deepseek(
+    deepseek_creds: Option<(String, String)>,
+    args: &Value,
+    cancel: &CancellationToken,
+) -> Result<Value> {
+    let query = args
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("缺少 query"))?;
+    let prefer_deepseek = args.get("engine").and_then(Value::as_str) == Some("deepseek")
+        || args.get("need_content").and_then(Value::as_bool) == Some(true);
+    if prefer_deepseek {
+        if let Some(creds) = &deepseek_creds {
+            if let Some(v) = deepseek_search(creds, args, query, cancel).await {
+                return Ok(v);
+            }
+        }
+    }
+    match search(args, cancel).await {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            if cancel.is_cancelled() {
+                bail!("已中断");
+            }
+            if !prefer_deepseek {
+                if let Some(creds) = &deepseek_creds {
+                    log::warn!("本地网页搜索失败，改用 DeepSeek Search 兜底: {e}");
+                    if let Some(v) = deepseek_search(creds, args, query, cancel).await {
+                        return Ok(v);
+                    }
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+async fn deepseek_search(
+    (root, api_key): &(String, String),
+    args: &Value,
+    query: &str,
+    cancel: &CancellationToken,
+) -> Option<Value> {
+    let count = args
+        .get("count")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize)
+        .unwrap_or(10);
+    let need_content = args
+        .get("need_content")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let ori_question = args.get("ori_question").and_then(Value::as_str);
+    let client = http_client(SEARCH_TIMEOUT_SECS).ok()?;
+    match crate::llm::deepseek::search(
+        &client,
+        root,
+        api_key,
+        query,
+        count,
+        need_content,
+        ori_question,
+        cancel,
+    )
+    .await
+    {
+        Ok(v) => {
+            let results = v.get("results").and_then(Value::as_array)?;
+            if results.is_empty() {
+                return None;
+            }
+            Some(json!({
+                "query": query,
+                "engine": "deepseek",
+                "results": results,
+                "note": "需要某条结果的全文时用 web_fetch。用户已经打开的页面用 browser_*，不要用本工具。",
+            }))
+        }
+        Err(e) => {
+            log::warn!("DeepSeek Search 失败: {e}");
+            None
+        }
+    }
+}
+
+/// 抓取：默认本地直接抓取；失败、HTTP 错误或正文过短（多为动态渲染/反爬）时才用 DeepSeek Fetch 兜底。
+/// 模型显式指定 engine=deepseek 时优先 DeepSeek。
+async fn fetch_with_deepseek(
+    deepseek_creds: Option<(String, String)>,
+    args: &Value,
+    cancel: &CancellationToken,
+) -> Result<Value> {
+    let raw = args
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("缺少 url"))?;
+    let url = validate_fetch_url(raw)?;
+    let prefer_deepseek = args.get("engine").and_then(Value::as_str) == Some("deepseek");
+    if prefer_deepseek {
+        if let Some(creds) = &deepseek_creds {
+            if let Some(v) = deepseek_fetch(creds, url.as_str(), cancel).await {
+                return Ok(v);
+            }
+        }
+    }
+    let local = fetch(args, cancel).await;
+    let weak = match &local {
+        Ok(v) => {
+            let status = v.get("status").and_then(Value::as_u64).unwrap_or(200);
+            let len = v
+                .get("content")
+                .and_then(Value::as_str)
+                .map(|c| c.trim().chars().count())
+                .unwrap_or(0);
+            status >= 400 || len < 200
+        }
+        Err(_) => true,
+    };
+    if !weak || prefer_deepseek {
+        return local;
+    }
+    if cancel.is_cancelled() {
+        bail!("已中断");
+    }
+    if let Some(creds) = &deepseek_creds {
+        log::warn!("本地抓取失败或正文过短，改用 DeepSeek Fetch 兜底: {url}");
+        if let Some(v) = deepseek_fetch(creds, url.as_str(), cancel).await {
+            return Ok(v);
+        }
+    }
+    local
+}
+
+async fn deepseek_fetch(
+    (root, api_key): &(String, String),
+    url: &str,
+    cancel: &CancellationToken,
+) -> Option<Value> {
+    let client = http_client(FETCH_TIMEOUT_SECS).ok()?;
+    match crate::llm::deepseek::fetch(&client, root, api_key, url, cancel).await {
+        Ok(v) => {
+            let title = v.get("title").and_then(Value::as_str).unwrap_or("");
+            let raw_content = v.get("content").and_then(Value::as_str).unwrap_or("");
+            if raw_content.trim().is_empty() {
+                return None;
+            }
+            let total = raw_content.chars().count();
+            let content: String = raw_content.chars().take(MAX_BODY_CHARS).collect();
+            Some(json!({
+                "url": url,
+                "status": 200,
+                "engine": "deepseek",
+                "title": title,
+                "content_type": "text/markdown",
+                "content": content,
+                "truncated": total > MAX_BODY_CHARS,
+                "note": "引用时用 markdown 链接。这是公开网页抓取；操作用户已打开的标签请用 browser_*。",
+            }))
+        }
+        Err(e) => {
+            log::warn!("DeepSeek Fetch 失败: {e}");
+            None
+        }
     }
 }
 

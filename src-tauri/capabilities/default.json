@@ -10,8 +10,10 @@
     "delegation-*",
     "agent-run-*",
     "terminal-*",
+    "sftp-*",
     "reply-*",
     "plugin-*",
+    "applet-*",
     "capture-*"
   ],
   "permissions": [

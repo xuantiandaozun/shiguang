@@ -1431,6 +1431,7 @@ mod tests {
             role: role.to_string(),
             content: content.to_string(),
             created_at: String::new(),
+            meta_json: "{}".to_string(),
         }
     }
 
@@ -1551,6 +1552,10 @@ mod tests {
             profile_email: String::new(),
             profile_city: String::new(),
             temp_path: String::new(),
+            deepseek_safety_check: false,
+            deepseek_search_for_agent: true,
+            deepseek_tts_voice: "stella".into(),
+            deepseek_tts_filter_markdown: true,
         };
         let cfg = client::LlmConfig {
             base_url: settings.base_url.clone(),
@@ -1615,6 +1620,10 @@ mod tests {
             profile_email: String::new(),
             profile_city: String::new(),
             temp_path: String::new(),
+            deepseek_safety_check: false,
+            deepseek_search_for_agent: true,
+            deepseek_tts_voice: "stella".into(),
+            deepseek_tts_filter_markdown: true,
         }
     }
 

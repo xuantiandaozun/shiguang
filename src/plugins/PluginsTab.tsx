@@ -1,7 +1,7 @@
 // 主窗口「插件」页：查看、启停、设置、回滚插件；显示加载错误与安全模式。
 import { useEffect, useState } from "react";
-import { ipc } from "../lib/ipc";
-import type { PluginInfo, PluginVersion } from "../lib/ipc";
+import { ipc, onEvent } from "../lib/ipc";
+import type { AppletEntry, PluginInfo, PluginVersion } from "../lib/ipc";
 import { startPluginRegistry, usePluginStore } from "./registry";
 import { SchemaFields } from "./SchemaForm";
 
@@ -89,7 +89,7 @@ function Group({ title, plugins, selected, onSelect, empty }: { title: string; p
               <span className="text-[11px] text-slate-500">{p.id}</span>
             </div>
             <div className="text-[11px] text-slate-500">
-              {p.tools.length} 个工具{p.ui && (p.ui.tabs?.length || p.ui.windows?.length) ? " · 有界面" : ""}
+              {p.tools.length} 个工具{p.ui && (p.ui.applets?.length || p.ui.tabs?.length || p.ui.windows?.length) ? " · 有界面" : ""}
               {!p.enabled && " · 已停用"}
             </div>
           </button>
@@ -103,11 +103,26 @@ function Detail({ plugin, onAct }: { plugin: PluginInfo; onAct: (fn: () => Promi
   const [settings, setSettings] = useState<Record<string, unknown> | null>(null);
   const [saved, setSaved] = useState(false);
   const [versions, setVersions] = useState<PluginVersion[]>([]);
+  const [applets, setApplets] = useState<AppletEntry[]>([]);
+  const [shortcutMsg, setShortcutMsg] = useState("");
 
   useEffect(() => {
     if (plugin.settings_schema) ipc.getPluginSettings(plugin.id).then(setSettings).catch(() => setSettings({}));
     if (!plugin.builtin) ipc.pluginVersions(plugin.id).then(setVersions).catch(() => setVersions([]));
   }, [plugin.id, plugin.settings_schema, plugin.builtin]);
+
+  useEffect(() => {
+    const load = () => {
+      ipc
+        .listApplets()
+        .then((all) => setApplets(all.filter((a) => a.plugin_id === plugin.id)))
+        .catch(() => setApplets([]));
+    };
+    load();
+    let u: (() => void) | undefined;
+    onEvent("applets-changed", load).then((fn) => (u = fn));
+    return () => u?.();
+  }, [plugin.id, plugin.enabled]);
 
   return (
     <div className="space-y-4">
@@ -132,6 +147,68 @@ function Detail({ plugin, onAct }: { plugin: PluginInfo; onAct: (fn: () => Promi
           <div className="text-xs text-slate-500 break-words">工具：{plugin.tools.join("、")}</div>
         )}
       </div>
+
+      {plugin.enabled && applets.length > 0 && (
+        <div className="rounded-xl border border-slate-700 p-4 space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-sm font-semibold text-slate-100">小程序与桌面入口</div>
+            {shortcutMsg && <span className="text-xs text-sky-300">{shortcutMsg}</span>}
+          </div>
+          <div className="space-y-2">
+            {applets.map((a) => (
+              <div key={a.key} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-700/70 px-3 py-2">
+                <div className="min-w-0">
+                  <div className="text-sm text-slate-100">{a.title}</div>
+                  <div className="text-[11px] text-slate-500">
+                    {a.slot} · {a.item_id}
+                    {a.shortcut_name && ` · 桌面已有「${a.shortcut_name}.lnk」`}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    className={button}
+                    onClick={() => void onAct(() => ipc.openAppletWindow(a.plugin_id, a.item_id, { slot: a.slot }))}
+                  >
+                    独立打开
+                  </button>
+                  <button
+                    className={button}
+                    onClick={() => void onAct(() => ipc.openAppletWindow(a.plugin_id, a.item_id, { slot: a.slot, newInstance: true }))}
+                    title="再开一个同类独立窗口"
+                  >
+                    多开
+                  </button>
+                  {a.shortcut_path ? (
+                    <button
+                      className={button}
+                      onClick={() =>
+                        void onAct(async () => {
+                          await ipc.removeAppletShortcut(a.key);
+                          setShortcutMsg(`已从桌面移除「${a.title}」`);
+                        })
+                      }
+                    >
+                      移出桌面
+                    </button>
+                  ) : (
+                    <button
+                      className={button}
+                      onClick={() =>
+                        void onAct(async () => {
+                          const rec = await ipc.createAppletShortcut(a.plugin_id, a.item_id, { slot: a.slot, name: a.title });
+                          setShortcutMsg(`已发送到桌面：${rec.name}.lnk`);
+                        })
+                      }
+                    >
+                      发送到桌面
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {plugin.settings_schema && settings && (
         <div className="rounded-xl border border-slate-700 p-4 space-y-3">

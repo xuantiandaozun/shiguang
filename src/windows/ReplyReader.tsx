@@ -1,15 +1,33 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import Markdown from "../components/Markdown";
 import { save } from "@tauri-apps/plugin-dialog";
-import { ipc } from "../lib/ipc";
+import { ipc, onEvent } from "../lib/ipc";
+import { isDeepSeekBaseUrl } from "../lib/providers";
+import { playBase64WavChunks, stopActiveTtsPlayback } from "../lib/audio";
 
 export default function ReplyReader() {
   const [content, setContent] = useState<string | null>(null);
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [deepSeekEnabled, setDeepSeekEnabled] = useState(false);
+  const [ttsState, setTtsState] = useState<"idle" | "loading" | "playing">("idle");
+  const stopTtsRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    const syncSettings = () => {
+      ipc.getSettings().then((s) => setDeepSeekEnabled(isDeepSeekBaseUrl(s.base_url))).catch(() => {});
+    };
+    syncSettings();
+    let stopSettings: (() => void) | undefined;
+    void onEvent("settings-changed", syncSettings).then((u) => { stopSettings = u; });
+    return () => {
+      stopSettings?.();
+      stopTtsRef.current?.();
+    };
+  }, []);
   useEffect(() => {
     let disposed = false;
     let stop: (() => void) | undefined;
@@ -49,10 +67,39 @@ export default function ReplyReader() {
     try { await navigator.clipboard.writeText(content ?? ""); setFeedback("已复制"); }
     catch { setFeedback("复制失败，请选择正文后复制"); }
   }
+  async function toggleSpeak() {
+    if (!content) return;
+    if (ttsState === "playing") {
+      stopTtsRef.current?.();
+      stopActiveTtsPlayback();
+      stopTtsRef.current = null;
+      setTtsState("idle");
+      return;
+    }
+    if (ttsState === "loading") return;
+    setTtsState("loading");
+    setFeedback("");
+    try {
+      const chunks = await ipc.deepseekTts(content);
+      if (!chunks.length) { setTtsState("idle"); setFeedback("无可朗读文本"); return; }
+      setTtsState("playing");
+      stopTtsRef.current = playBase64WavChunks(
+        chunks,
+        () => { stopTtsRef.current = null; setTtsState("idle"); },
+        (err) => { stopTtsRef.current = null; setTtsState("idle"); setFeedback(err); },
+      );
+    } catch (e) {
+      setTtsState("idle");
+      setFeedback(String(e));
+    }
+  }
   return <div className="flex h-full flex-col bg-white text-[#1f2329]">
     <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#e2e5e9] px-6 py-3">
       <h1 className="text-sm font-semibold">回复详情</h1>
       <div className="flex flex-wrap items-center gap-3">
+        {deepSeekEnabled && (
+          <button disabled={!content || ttsState === "loading"} onClick={() => void toggleSpeak()} className="rounded-md border border-[#d5d9df] px-3 py-1.5 text-sm hover:bg-[#f3f4f6] disabled:opacity-40">{ttsState === "loading" ? "合成中…" : ttsState === "playing" ? "停止朗读" : "朗读"}</button>
+        )}
         <button disabled={content === null || saving} onClick={() => void saveMarkdown()} className="rounded-md border border-[#d5d9df] px-3 py-1.5 text-sm hover:bg-[#f3f4f6] disabled:opacity-40">{saving ? "正在保存…" : "保存 MD"}</button>
         <button disabled={!content} onClick={() => void copy()} className="rounded-md border border-[#d5d9df] px-3 py-1.5 text-sm hover:bg-[#f3f4f6] disabled:opacity-40">复制原文</button>
       </div>

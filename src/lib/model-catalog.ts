@@ -27,8 +27,9 @@ export const MODEL_CATALOG: CatalogModel[] = [
   {
     id: "deepseek-v4.1-flash",
     label: "DeepSeek V4.1 Flash",
-    tags: ["对话", "视觉"],
+    tags: ["对话", "视觉", "推理"],
     vision: true,
+    thinking: true,
     contextWindow: 1_000_000,
     bindings: {
       deepseek: "deepseek-flash",
@@ -39,7 +40,8 @@ export const MODEL_CATALOG: CatalogModel[] = [
   {
     id: "deepseek-v4-pro",
     label: "DeepSeek V4 Pro",
-    tags: ["对话"],
+    tags: ["对话", "推理"],
+    thinking: true,
     contextWindow: 1_000_000,
     bindings: { deepseek: "deepseek-v4-pro" },
   },

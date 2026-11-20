@@ -2,6 +2,7 @@
 #![recursion_limit = "256"]
 
 pub mod agents;
+pub mod applets;
 pub mod ask_user;
 pub mod browser;
 pub mod builtin_skills;
@@ -109,8 +110,12 @@ pub fn run() {
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            windows::show_chat(app);
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if let Some(req) = applets::parse_launch_args(args) {
+                applets::dispatch_launch(app.clone(), req, false);
+            } else {
+                windows::show_chat(app);
+            }
         }))
         .plugin(
             tauri_plugin_window_state::Builder::default()
@@ -225,6 +230,10 @@ pub fn run() {
             }
             tray::create_tray(app.handle())?;
             todo::scheduler::spawn(app.handle().clone());
+            // 若通过桌面小程序快捷方式（--open ...）冷启动，初始化完毕后直达目标窗口
+            if let Some(req) = applets::parse_launch_args(std::env::args()) {
+                applets::dispatch_launch(app.handle().clone(), req, true);
+            }
             // Desktop organization is user-invoked through the editable external Skill.
             // Do not execute legacy database rules in the background.
             log::info!("拾光已启动，数据目录: {:?}", app_dir);
@@ -263,8 +272,13 @@ pub fn run() {
             plugins::ipc::plugins_boot_ok,
             plugins::ipc::plugin_call_tool,
             plugins::ipc::open_plugin_window,
+            applets::list_applets,
+            applets::open_applet_window,
+            applets::create_applet_shortcut,
+            applets::remove_applet_shortcut,
             servers::server_action,
             servers::server_terminal,
+            servers::server_sftp,
             servers::reveal_server_secret,
             servers::trust_server_host,
             commands::send_chat_message,
@@ -349,6 +363,13 @@ pub fn run() {
             commands::sync_skills_cmd,
             commands::read_skill_content,
             commands::get_llm_usage_stats,
+            commands::set_deepseek_chat_options,
+            commands::deepseek_tts,
+            commands::deepseek_asr,
+            commands::deepseek_list_files,
+            commands::deepseek_delete_file,
+            commands::continue_chat_message,
+            commands::regenerate_chat_message,
             commands::get_browser_extension_info,
             commands::open_browser_extension_dir,
         ])

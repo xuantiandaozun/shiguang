@@ -245,6 +245,34 @@ async fn confirm(app: &AppHandle, cancel: &CancellationToken, header: &str, ques
 }
 
 fn emit_preview(app: &AppHandle, id: &str) {
+    // 若插件只有 ui.applets（没有 ui.tabs），直接弹出独立小程序窗口预览
+    let snapshot = super::snapshot();
+    if let Some(plugin) = snapshot.plugin(id) {
+        let has_tabs = plugin
+            .manifest
+            .ui
+            .get("tabs")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty());
+        let first_applet = plugin
+            .manifest
+            .ui
+            .get("applets")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+            .and_then(|item| item.get("id").or_else(|| item.get("route")).and_then(Value::as_str))
+            .map(str::to_string);
+        if !has_tabs {
+            if let Some(item_id) = first_applet {
+                let handle = app.clone();
+                let pid = id.to_string();
+                tauri::async_runtime::spawn(async move {
+                    let _ = crate::applets::open_applet_impl(&handle, &pid, &item_id, Some("applet"), None, false).await;
+                });
+                return;
+            }
+        }
+    }
     crate::windows::open_main(app);
     let _ = app.emit("plugin-preview", json!({"id": id}));
 }
@@ -500,11 +528,85 @@ pub async fn execute(app: &AppHandle, name: &str, args: &Value, cancel: &Cancell
             emit_preview(app, id);
             Ok(json!({"opened": true}))
         }
+        "applet_list" => {
+            let items = crate::applets::list_applets_impl(app);
+            Ok(json!({ "applets": items }))
+        }
+        "applet_open" => {
+            let plugin_id = args.get("plugin_id").and_then(Value::as_str).unwrap_or_default();
+            let item_id = args.get("item_id").and_then(Value::as_str).unwrap_or(plugin_id);
+            let slot = args.get("slot").and_then(Value::as_str);
+            let query = args.get("query").and_then(Value::as_str);
+            let new_instance = args.get("new_instance").and_then(Value::as_bool).unwrap_or(false);
+            let label = crate::applets::open_applet_impl(app, plugin_id, item_id, slot, query, new_instance).await?;
+            Ok(json!({ "opened": true, "window_label": label }))
+        }
+        "applet_shortcut" => {
+            let action = args.get("action").and_then(Value::as_str).unwrap_or("create");
+            let plugin_id = args.get("plugin_id").and_then(Value::as_str).unwrap_or_default();
+            let item_id = args.get("item_id").and_then(Value::as_str).unwrap_or(plugin_id);
+            let slot = args.get("slot").and_then(Value::as_str);
+            let spec = crate::applets::resolve_applet(plugin_id, item_id, slot)?;
+            if action == "remove" {
+                let (choice, _) = confirm(
+                    app,
+                    cancel,
+                    "移除桌面快捷方式",
+                    format!("要从桌面移除「{}」的快捷方式吗？", spec.title),
+                    format!("目标入口：{}", spec.key()),
+                    &["确认移除", "取消"],
+                )
+                .await?;
+                if choice != "确认移除" {
+                    return Ok(json!({ "cancelled": true }));
+                }
+                let removed = crate::applets::remove_desktop_shortcut_impl(app, &spec.key())?;
+                return Ok(json!({ "removed": removed, "key": spec.key() }));
+            }
+            let name = args.get("name").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
+            let query = args.get("query").and_then(Value::as_str);
+            let new_instance = args.get("new_instance").and_then(Value::as_bool).unwrap_or(false);
+            let display_name = name.unwrap_or(&spec.title);
+            let (choice, _) = confirm(
+                app,
+                cancel,
+                "创建桌面快捷方式",
+                format!("要在桌面创建「{display_name}」的快捷启动图标吗？"),
+                format!("入口：{}（双击直接打开独立弹窗）", spec.key()),
+                &["创建到桌面", "取消"],
+            )
+            .await?;
+            if choice != "创建到桌面" {
+                return Ok(json!({ "cancelled": true }));
+            }
+            let record = crate::applets::create_desktop_shortcut_impl(
+                app,
+                &spec.plugin_id,
+                &spec.item_id,
+                Some(&spec.slot),
+                name,
+                query,
+                new_instance,
+            )
+            .await?;
+            Ok(json!({ "created": true, "shortcut": record }))
+        }
         _ => bail!("未知插件工具 {name}"),
     }
 }
 
-pub const TOOL_NAMES: &[&str] = &["plugin_list", "plugin_read", "plugin_write", "plugin_rollback", "plugin_delete", "plugin_enable", "plugin_preview"];
+pub const TOOL_NAMES: &[&str] = &[
+    "plugin_list",
+    "plugin_read",
+    "plugin_write",
+    "plugin_rollback",
+    "plugin_delete",
+    "plugin_enable",
+    "plugin_preview",
+    "applet_list",
+    "applet_open",
+    "applet_shortcut",
+];
 
 #[cfg(test)]
 mod tests {

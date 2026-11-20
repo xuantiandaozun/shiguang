@@ -1,5 +1,7 @@
 pub mod agent;
 pub mod client;
+pub mod deepseek;
+pub mod deepseek_chat;
 pub mod models;
 pub mod profile;
 pub mod prompts;

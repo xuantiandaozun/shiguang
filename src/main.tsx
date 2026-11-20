@@ -18,9 +18,15 @@ document.body.dataset.window = route in BUILTIN_WINDOWS ? route : "main";
 /** 内置窗口（核心插件等声明的 builtin 组件）立即渲染，不等插件清单。 */
 function BuiltinWindow({ name }: { name: string }) {
   const Component = builtinComponent(BUILTIN_WINDOWS[name]) ?? builtinComponent(BUILTIN_WINDOWS.floatball)!;
-  if (name === "terminal") {
+  if (name === "terminal" || name === "sftp") {
     return (
-      <React.Suspense fallback={<div className="h-screen bg-slate-950 p-4 text-slate-300">正在打开终端…</div>}>
+      <React.Suspense
+        fallback={
+          <div className={`h-screen p-4 ${name === "terminal" ? "bg-slate-950 text-slate-300" : "bg-white text-slate-500"}`}>
+            {name === "terminal" ? "正在打开终端…" : "正在打开文件管理…"}
+          </div>
+        }
+      >
         <Component />
       </React.Suspense>
     );

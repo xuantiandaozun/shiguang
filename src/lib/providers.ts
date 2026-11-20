@@ -125,6 +125,10 @@ export function normalizeBaseUrl(url: string): string {
   return url.trim().replace(/\/+$/, "");
 }
 
+export function isDeepSeekBaseUrl(baseUrl?: string): boolean {
+  return Boolean(baseUrl && baseUrl.toLowerCase().includes("api.deepseek.com"));
+}
+
 export function providerByBaseUrl(baseUrl: string): ProviderPreset | undefined {
   const key = normalizeBaseUrl(baseUrl);
   return PROVIDER_PRESETS.find((p) => normalizeBaseUrl(p.baseUrl) === key);

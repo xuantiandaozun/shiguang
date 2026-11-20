@@ -42,6 +42,7 @@ export {
   providerByBaseUrl,
   providerById,
   normalizeBaseUrl,
+  isDeepSeekBaseUrl,
 } from "./providers";
 export type { CatalogModel, CatalogGroup } from "./model-catalog";
 export type { ProviderPreset, ProviderGroup } from "./providers";

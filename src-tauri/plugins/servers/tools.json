@@ -67,6 +67,13 @@
           "description": "密码或私钥口令，仅写入；省略保留，空串清除。已有凭据不会返回。",
           "type": "string"
         },
+        "tags": {
+          "description": "自定义标签列表，用于分类与搜索",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "username": {
           "type": "string"
         }
@@ -121,6 +128,13 @@
         },
         "server_id": {
           "type": "string"
+        },
+        "tags": {
+          "description": "自定义标签列表，用于分类与搜索",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "username": {
           "type": "string"

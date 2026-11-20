@@ -1,5 +1,6 @@
 //! Local SQLite connections and plaintext credentials, plus isolated SSH/SFTP tasks.
 include!("server_terminal.inc.rs");
+include!("server_sftp.inc.rs");
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use rusqlite::{params, Connection};
@@ -27,10 +28,13 @@ pub struct Server {
     pub port: u16,
     pub username: String,
     pub group: String,
+    pub tags: Vec<String>,
     pub note: String,
     pub auth: String,
     pub private_key: String,
     pub fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<i64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RemoteTask {
@@ -77,6 +81,23 @@ fn required<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| anyhow!("缺少参数 {key}"))
 }
+fn normalize_tags(raw: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for item in raw {
+        let tag: String = item.trim().trim_start_matches('#').trim().chars().take(32).collect();
+        if tag.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&tag)) {
+            out.push(tag);
+            if out.len() >= 20 {
+                break;
+            }
+        }
+    }
+    out
+}
+
 fn validate(s: &Server) -> Result<()> {
     if s.name.trim().is_empty()
         || s.host.trim().is_empty()
@@ -156,12 +177,23 @@ impl ServerHub {
     }
     fn list(&self) -> Result<Vec<Server>> {
         let db = self.db.lock().unwrap();
-        let mut stmt = db.prepare("SELECT s.data FROM servers s LEFT JOIN server_usage u ON u.server_id=s.id ORDER BY COALESCE(u.last_used,0) DESC, s.rowid ASC")?;
+        let mut stmt = db.prepare("SELECT s.data, u.last_used FROM servers s LEFT JOIN server_usage u ON u.server_id=s.id ORDER BY COALESCE(u.last_used,0) DESC, s.rowid ASC")?;
         let mut result = Vec::new();
-        for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
-            result.push(serde_json::from_str(&row?)?);
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)))? {
+            let (raw, last_used) = row?;
+            let mut server: Server = serde_json::from_str(&raw)?;
+            server.last_used_at = last_used;
+            result.push(server);
         }
         Ok(result)
+    }
+    fn touch_usage(&self, id: &str) {
+        if let Err(error) = self.db.lock().unwrap().execute(
+            "INSERT INTO server_usage(server_id,last_used) VALUES(?1,?2) ON CONFLICT(server_id) DO UPDATE SET last_used=excluded.last_used",
+            params![id, chrono::Utc::now().timestamp_millis()],
+        ) {
+            log::warn!("记录服务器使用时间失败: {error}");
+        }
     }
     fn get(&self, id: &str) -> Result<Server> {
         let raw: String = self
@@ -173,23 +205,27 @@ impl ServerHub {
         Ok(serde_json::from_str(&raw)?)
     }
     fn save(&self, server: &Server) -> Result<()> {
+        let mut persisted = server.clone();
+        persisted.last_used_at = None;
         self.db.lock().unwrap().execute(
             "INSERT OR REPLACE INTO servers(id,data) VALUES(?1,?2)",
-            params![server.id, serde_json::to_string(server)?],
+            params![persisted.id, serde_json::to_string(&persisted)?],
         )?;
         Ok(())
     }
     fn save_with_secret(&self, server: &Server, secret: Option<&str>) -> Result<()> {
+        let mut persisted = server.clone();
+        persisted.last_used_at = None;
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         tx.execute(
             "INSERT OR REPLACE INTO servers(id,data) VALUES(?1,?2)",
-            params![server.id, serde_json::to_string(server)?],
+            params![persisted.id, serde_json::to_string(&persisted)?],
         )?;
         if let Some(value) = secret {
             tx.execute(
                 "INSERT OR REPLACE INTO server_secrets(id,secret) VALUES(?1,?2)",
-                params![server.id, value],
+                params![persisted.id, value],
             )?;
         }
         tx.commit()?;
@@ -199,6 +235,7 @@ impl ServerHub {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         tx.execute("DELETE FROM server_secrets WHERE id=?1", [id])?;
+        tx.execute("DELETE FROM server_usage WHERE server_id=?1", [id])?;
         tx.execute("DELETE FROM servers WHERE id=?1", [id])?;
         tx.commit()?;
         Ok(())
@@ -304,10 +341,7 @@ fn authenticate(hub: &ServerHub, session: &Session, server: &Server, fp: &str) -
         bail!("SSH 身份认证失败");
     }
     // Only successful authentication counts as use (terminal, SSH and SFTP).
-    if let Err(error) = hub.db.lock().unwrap().execute(
-        "INSERT INTO server_usage(server_id,last_used) VALUES(?1,?2) ON CONFLICT(server_id) DO UPDATE SET last_used=excluded.last_used",
-        params![server.id, chrono::Utc::now().timestamp_millis()],
-    ) { log::warn!("记录服务器使用时间失败: {error}"); }
+    hub.touch_usage(&server.id);
     Ok(())
 }
 fn connect(hub: &ServerHub, server: &Server) -> Result<Session> {
@@ -347,6 +381,7 @@ pub async fn dispatch(app: &tauri::AppHandle, name: &str, args: &Value) -> Resul
                 "port",
                 "username",
                 "group",
+                "tags",
                 "note",
                 "auth",
                 "private_key",
@@ -356,6 +391,7 @@ pub async fn dispatch(app: &tauri::AppHandle, name: &str, args: &Value) -> Resul
                 }
             }
             let mut updated: Server = serde_json::from_value(value)?;
+            updated.tags = normalize_tags(updated.tags);
             validate(&updated)?;
             if updated.host != old.host || updated.port != old.port {
                 updated.fingerprint = None;
@@ -1296,6 +1332,29 @@ mod tests {
         assert!(validate(&s).is_err());
         s.auth = "agent".into();
         assert!(validate(&s).is_ok());
+    }
+    #[test]
+    fn tags_normalize_and_recent_usage_orders_newest_first() {
+        assert_eq!(
+            normalize_tags(vec![" #GPU ".into(), "生产".into(), "gpu".into(), "".into()]),
+            vec!["GPU".to_string(), "生产".to_string()]
+        );
+        let dir = test_dir();
+        let hub = ServerHub::new(&dir).unwrap();
+        let s1 = Server { id: "s1".into(), name: "A".into(), host: "1.1.1.1".into(), port: 22, username: "root".into(), tags: vec!["生产".into()], auth: "agent".into(), ..Default::default() };
+        let s2 = Server { id: "s2".into(), name: "B".into(), host: "2.2.2.2".into(), port: 22, username: "root".into(), tags: vec!["GPU".into()], auth: "agent".into(), ..Default::default() };
+        hub.save(&s1).unwrap();
+        hub.save(&s2).unwrap();
+        hub.touch_usage("s1");
+        std::thread::sleep(Duration::from_millis(5));
+        hub.touch_usage("s2");
+        let list = hub.list().unwrap();
+        assert_eq!(list[0].id, "s2");
+        assert!(list[0].last_used_at.unwrap() >= list[1].last_used_at.unwrap());
+        assert_eq!(list[0].tags, vec!["GPU".to_string()]);
+        // get() keeps persisted config clean without ephemeral last_used_at
+        assert_eq!(hub.get("s2").unwrap().last_used_at, None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

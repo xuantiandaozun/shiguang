@@ -1,13 +1,17 @@
 import { create } from "zustand";
-import type { Plan } from "../lib/ipc";
-import type { AskUserPrompt, SessionTodo } from "../lib/ipc";
+import type {
+  AskUserPrompt,
+  DeepSeekMessageMeta,
+  Plan,
+  SessionTodo,
+} from "../lib/ipc";
 
 export interface UiMessage {
   id: string;
   dbId?: number;
   role: "user" | "assistant" | "tool" | "system";
   content: string;
-  /** 思考模式下的思维链（仅流式期间展示，不入库） */
+  /** 思考模式下的思维链 */
   reasoning?: string;
   toolName?: string;
   toolFailed?: boolean;
@@ -17,6 +21,8 @@ export interface UiMessage {
   ask?: AskUserPrompt;
   askSettled?: boolean;
   streaming?: boolean;
+  finishReason?: string;
+  refused?: boolean;
 }
 
 let seq = 0;
@@ -32,9 +38,13 @@ interface ChatState {
   addMessage: (m: Omit<UiMessage, "id">) => string;
   attachDbId: (localId: string, dbId: number) => void;
   recallLocal: (localId: string) => void;
+  removeMessageLocal: (localId: string) => void;
   appendToken: (d: string) => void;
   appendReasoning: (d: string) => void;
-  finishStreaming: (content?: string) => void;
+  startContinueMessage: (dbId: number) => void;
+  appendContinueToken: (dbId: number, delta: string) => void;
+  finishContinueMessage: (dbId: number, content: string, meta?: DeepSeekMessageMeta) => void;
+  finishStreaming: (content?: string, dbId?: number) => void;
   completeTool: (toolName: string, error?: string, result?: unknown) => void;
   setStreaming: (b: boolean) => void;
   setPendingPlan: (p: Plan | null) => void;
@@ -70,6 +80,8 @@ export const useChatStore = create<ChatState>()((set) => ({
       msgs.splice(idx, end - idx);
       return { messages: msgs };
     }),
+  removeMessageLocal: (localId) =>
+    set((s) => ({ messages: s.messages.filter((m) => m.id !== localId) })),
   appendToken: (d) =>
     set((s) => {
       const msgs = [...s.messages];
@@ -92,7 +104,31 @@ export const useChatStore = create<ChatState>()((set) => ({
       }
       return { messages: msgs };
     }),
-  finishStreaming: (content) =>
+  startContinueMessage: (dbId) =>
+    set((s) => ({
+      streaming: true,
+      messages: s.messages.map((m) => (m.dbId === dbId ? { ...m, streaming: true } : m)),
+    })),
+  appendContinueToken: (dbId, delta) =>
+    set((s) => ({
+      messages: s.messages.map((m) => (m.dbId === dbId ? { ...m, content: m.content + delta } : m)),
+    })),
+  finishContinueMessage: (dbId, content, meta) =>
+    set((s) => ({
+      streaming: false,
+      messages: s.messages.map((m) =>
+        m.dbId === dbId
+          ? {
+              ...m,
+              content,
+              streaming: false,
+              finishReason: meta?.finish_reason ?? m.finishReason,
+              refused: meta?.refused ?? m.refused,
+            }
+          : m,
+      ),
+    })),
+  finishStreaming: (content, dbId) =>
     set((s) => {
       const msgs = s.messages.map((m) => ({ ...m }));
       // 多轮工具调用时可能存在多个流式气泡，最终内容只落到最近一个 assistant 气泡，
@@ -102,13 +138,21 @@ export const useChatStore = create<ChatState>()((set) => ({
         if (!msgs[i].streaming) continue;
         if (!applied && msgs[i].role === "assistant") {
           msgs[i].content = content ?? msgs[i].content;
+          if (dbId != null) msgs[i].dbId = dbId;
           applied = true;
         }
         msgs[i].streaming = false;
       }
       return {
         messages: msgs.filter(
-          (m) => !(m.role === "assistant" && m.content === "" && !m.plan && !m.ask && !m.reasoning)
+          (m) =>
+            !(
+              m.role === "assistant" &&
+              m.content === "" &&
+              !m.plan &&
+              !m.ask &&
+              !m.reasoning
+            )
         ),
         streaming: false,
       };

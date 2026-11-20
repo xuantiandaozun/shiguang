@@ -136,6 +136,19 @@ pub struct Settings {
     pub profile_city: String,
     /// 应用临时目录（只读展示，不入库；路径由 app_data/temp 决定）
     pub temp_path: String,
+    // ---- DeepSeek 全家桶能力配置 ----
+    #[serde(default)]
+    pub deepseek_safety_check: bool,
+    #[serde(default = "default_true")]
+    pub deepseek_search_for_agent: bool,
+    #[serde(default = "default_deepseek_tts_voice")]
+    pub deepseek_tts_voice: String,
+    #[serde(default = "default_true")]
+    pub deepseek_tts_filter_markdown: bool,
+}
+
+fn default_deepseek_tts_voice() -> String {
+    "stella".to_string()
 }
 
 fn default_context_window() -> usize {
@@ -263,6 +276,13 @@ pub fn load_settings(db: &Db) -> Settings {
         llm_profiles: Vec::new(),
         active_llm_profile_id: String::new(),
         temp_path: default_temp_path(),
+        deepseek_safety_check: get("deepseek_safety_check", "false") == "true",
+        deepseek_search_for_agent: get("deepseek_search_for_agent", "true") == "true",
+        deepseek_tts_voice: match get("deepseek_tts_voice", "stella").as_str() {
+            "tide" => "tide".to_string(),
+            _ => "stella".to_string(),
+        },
+        deepseek_tts_filter_markdown: get("deepseek_tts_filter_markdown", "true") == "true",
     };
     if let Some(new_root) = migrate_legacy_root(db, &desktop, &settings.organize_root) {
         settings.organize_root = new_root;
@@ -1415,6 +1435,22 @@ pub fn save_settings(
         ("profile_phone", settings.profile_phone.trim()),
         ("profile_email", settings.profile_email.trim()),
         ("profile_city", settings.profile_city.trim()),
+        (
+            "deepseek_safety_check",
+            if settings.deepseek_safety_check { "true" } else { "false" },
+        ),
+        (
+            "deepseek_search_for_agent",
+            if settings.deepseek_search_for_agent { "true" } else { "false" },
+        ),
+        (
+            "deepseek_tts_voice",
+            if settings.deepseek_tts_voice == "tide" { "tide" } else { "stella" },
+        ),
+        (
+            "deepseek_tts_filter_markdown",
+            if settings.deepseek_tts_filter_markdown { "true" } else { "false" },
+        ),
     ] {
         db.set_setting(k, v).map_err(|e| e.to_string())?;
     }
@@ -1752,6 +1788,219 @@ pub fn read_skill_content(state: State<AppState>, name: String) -> Result<String
 #[tauri::command]
 pub fn get_llm_usage_stats(state: State<AppState>) -> Result<crate::db::LlmUsageSnapshot, String> {
     state.db.llm_usage_snapshot().map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeepSeekChatOptionsPatch {
+    pub thinking_enabled: Option<bool>,
+    pub reasoning_effort: Option<String>,
+    pub deepseek_safety_check: Option<bool>,
+    pub deepseek_tts_voice: Option<String>,
+}
+
+/// 聊天窗快捷更新 DeepSeek 对话模式与功能开关（同步写回当前激活配置）。
+#[tauri::command]
+pub fn set_deepseek_chat_options(
+    app: AppHandle,
+    state: State<AppState>,
+    patch: DeepSeekChatOptionsPatch,
+) -> Result<Settings, String> {
+    let mut settings = load_settings(&state.db);
+    if let Some(v) = patch.thinking_enabled {
+        settings.thinking_enabled = v;
+        if let Some(p) = settings
+            .llm_profiles
+            .iter_mut()
+            .find(|p| p.id == settings.active_llm_profile_id)
+        {
+            p.thinking_enabled = v;
+        }
+    }
+    if let Some(effort) = patch.reasoning_effort {
+        if matches!(effort.as_str(), "low" | "high" | "max") {
+            settings.reasoning_effort = effort.clone();
+            if let Some(p) = settings
+                .llm_profiles
+                .iter_mut()
+                .find(|p| p.id == settings.active_llm_profile_id)
+            {
+                p.reasoning_effort = effort;
+            }
+        }
+    }
+    if let Some(v) = patch.deepseek_safety_check {
+        settings.deepseek_safety_check = v;
+    }
+    if let Some(voice) = patch.deepseek_tts_voice {
+        settings.deepseek_tts_voice = if voice == "tide" {
+            "tide".to_string()
+        } else {
+            "stella".to_string()
+        };
+    }
+    persist_llm_profiles(&state.db, &settings);
+    for (k, v) in [
+        (
+            "thinking_enabled",
+            if settings.thinking_enabled { "true" } else { "false" },
+        ),
+        ("reasoning_effort", settings.reasoning_effort.as_str()),
+        (
+            "deepseek_safety_check",
+            if settings.deepseek_safety_check { "true" } else { "false" },
+        ),
+        ("deepseek_tts_voice", settings.deepseek_tts_voice.as_str()),
+    ] {
+        state.db.set_setting(k, v).map_err(|e| e.to_string())?;
+    }
+    let _ = app.emit("settings-changed", ());
+    Ok(settings)
+}
+
+#[tauri::command]
+pub async fn deepseek_tts(
+    state: State<'_, AppState>,
+    text: String,
+    voice_id: Option<String>,
+) -> Result<Vec<String>, String> {
+    use base64::Engine;
+    let settings = load_settings(&state.db);
+    let (root, api_key) = crate::llm::deepseek::resolve_deepseek_credentials(&settings)
+        .ok_or_else(|| "当前主模型不是 DeepSeek，或尚未填写 DeepSeek API Key".to_string())?;
+    let chunks = crate::llm::deepseek::split_tts_chunks(&text);
+    if chunks.is_empty() {
+        return Err("没有可朗读的文本".to_string());
+    }
+    let voice = voice_id.unwrap_or_else(|| settings.deepseek_tts_voice.clone());
+    let filter_md = settings.deepseek_tts_filter_markdown;
+    let http = reqwest::Client::new();
+    let mut out = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        let wav = crate::llm::deepseek::synthesize_tts(
+            &http, &root, &api_key, &chunk, &voice, filter_md,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        out.push(base64::engine::general_purpose::STANDARD.encode(wav));
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn deepseek_asr(
+    state: State<'_, AppState>,
+    audio_base64: String,
+    filename: Option<String>,
+) -> Result<crate::llm::deepseek::AsrResult, String> {
+    use base64::Engine;
+    let settings = load_settings(&state.db);
+    let (root, api_key) = crate::llm::deepseek::resolve_deepseek_credentials(&settings)
+        .ok_or_else(|| "当前主模型不是 DeepSeek，或尚未填写 DeepSeek API Key".to_string())?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(audio_base64.trim())
+        .map_err(|e| format!("音频解码失败: {e}"))?;
+    let name = filename.unwrap_or_else(|| "voice.wav".to_string());
+    let ct = if name.ends_with(".ogg") || name.ends_with(".opus") {
+        "audio/ogg"
+    } else {
+        "audio/wav"
+    };
+    let http = reqwest::Client::new();
+    crate::llm::deepseek::transcribe_asr(&http, &root, &api_key, &bytes, &name, ct)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn deepseek_list_files(
+    state: State<'_, AppState>,
+    purpose: Option<String>,
+) -> Result<Vec<crate::llm::deepseek::DeepSeekFileObject>, String> {
+    let settings = load_settings(&state.db);
+    let (root, api_key) = crate::llm::deepseek::resolve_deepseek_credentials(&settings)
+        .ok_or_else(|| "尚未配置 DeepSeek API Key".to_string())?;
+    let http = reqwest::Client::new();
+    crate::llm::deepseek::list_files(&http, &root, &api_key, purpose.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn deepseek_delete_file(
+    state: State<'_, AppState>,
+    file_id: String,
+) -> Result<(), String> {
+    let settings = load_settings(&state.db);
+    let (root, api_key) = crate::llm::deepseek::resolve_deepseek_credentials(&settings)
+        .ok_or_else(|| "尚未配置 DeepSeek API Key".to_string())?;
+    let http = reqwest::Client::new();
+    crate::llm::deepseek::delete_file(&http, &root, &api_key, &file_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let _ = state.db.delete_cached_deepseek_file_by_id(&file_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn continue_chat_message(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    message_id: i64,
+) -> Result<(), String> {
+    let session_id = state.db.current_session_id().map_err(|e| e.to_string())?;
+    if !state.chat_queue.try_acquire(&app) {
+        return Err("当前有回复正在生成，请稍后再试".to_string());
+    }
+    let cancel = tokio_util::sync::CancellationToken::new();
+    {
+        let mut guard = state.chat_cancel.lock().map_err(|e| e.to_string())?;
+        *guard = Some(cancel.clone());
+    }
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let res = crate::llm::deepseek_chat::continue_deepseek_chat(
+            app_clone.clone(),
+            session_id,
+            message_id,
+            cancel,
+        )
+        .await;
+        if let Err(e) = res {
+            let _ = app_clone.emit("llm-error", serde_json::json!({ "message": e.to_string() }));
+        }
+        let st = app_clone.state::<AppState>();
+        st.chat_queue.release(&app_clone);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn regenerate_chat_message(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    message_id: i64,
+) -> Result<i64, String> {
+    let session_id = state.db.current_session_id().map_err(|e| e.to_string())?;
+    if !state.chat_queue.try_acquire(&app) {
+        return Err("当前有回复正在生成，请稍后再试".to_string());
+    }
+    let history = state.db.load_chat(session_id, 200).map_err(|e| e.to_string())?;
+    let Some(pos) = history.iter().position(|m| m.id == message_id && m.role == "assistant") else {
+        state.chat_queue.release(&app);
+        return Err("找不到要重新生成的助手回复".to_string());
+    };
+    let Some(user_msg) = history[..pos].iter().rev().find(|m| m.role == "user") else {
+        state.chat_queue.release(&app);
+        return Err("找不到对应的用户提问".to_string());
+    };
+    if let Err(e) = state.db.delete_chat_message(message_id) {
+        state.chat_queue.release(&app);
+        return Err(e.to_string());
+    }
+    let snapshot = state.session_todos.begin_turn(session_id);
+    let _ = app.emit("session-todos", &snapshot);
+    crate::chat_queue::start_runner(app.clone(), session_id, user_msg.id);
+    Ok(user_msg.id)
 }
 
 #[cfg(test)]

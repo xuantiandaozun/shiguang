@@ -4,6 +4,7 @@ import React from "react";
 import FloatBall from "../windows/FloatBall";
 import ChatPanel from "../windows/ChatPanel";
 import MainWindow from "../windows/MainWindow";
+import AppletWindow from "../windows/AppletWindow";
 import Reminder from "../windows/Reminder";
 import DelegationWindow from "../windows/DelegationWindow";
 import AgentRunWindow from "../windows/AgentRunWindow";
@@ -22,18 +23,21 @@ import SettingsTab from "../components/SettingsTab";
 import PluginsTab from "./PluginsTab";
 
 const ServerTerminal = React.lazy(() => import("../windows/ServerTerminal"));
+const ServerSftp = React.lazy(() => import("../windows/ServerSftp"));
 
 // 用函数延迟建表：MainWindow 等组件又会引用插件挂载模块，避免循环导入时取到未初始化的绑定。
 const table = (): Record<string, React.ComponentType> => ({
   FloatBall,
   ChatPanel,
   MainWindow,
+  AppletWindow,
   Reminder,
   DelegationWindow,
   AgentRunWindow,
   ReplyReader,
   CaptureOverlay,
   ServerTerminal,
+  ServerSftp,
   TodosTab,
   TasksTab,
   ServersTab,
@@ -59,7 +63,9 @@ export const BUILTIN_WINDOWS: Record<string, string> = {
   floatball: "builtin:FloatBall",
   chat: "builtin:ChatPanel",
   main: "builtin:MainWindow",
+  applet: "builtin:AppletWindow",
   terminal: "builtin:ServerTerminal",
+  sftp: "builtin:ServerSftp",
   reminder: "builtin:Reminder",
   delegation: "builtin:DelegationWindow",
   "agent-run": "builtin:AgentRunWindow",

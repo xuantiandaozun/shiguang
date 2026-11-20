@@ -19,6 +19,9 @@ import type { UiMessage } from "../stores/chat";
 import Markdown from "../components/Markdown";
 import ReplyActions from "../components/ReplyActions";
 import ChatSlashMenu from "../components/ChatSlashMenu";
+import { startVoiceRecording, type VoiceRecorder } from "../lib/audio";
+import type { DeepSeekMessageMeta, Settings } from "../lib/ipc";
+import { isDeepSeekBaseUrl } from "../lib/providers";
 import { startPluginRegistry, usePluginSlashCommands, usePluginToolCards, useToolLabels } from "../plugins/registry";
 import PluginMount from "../plugins/PluginMount";
 import appIcon from "../assets/brand-mark.svg";
@@ -68,11 +71,22 @@ const mapRow = (r: ChatMsg): UiMessage | null => {
   }
   const content = r.role === "user" ? r.content : visibleAssistantContent(r.content);
   if (r.role !== "user" && !content) return null;
+  let meta: DeepSeekMessageMeta = {};
+  if (r.meta_json && r.meta_json !== "{}") {
+    try {
+      meta = JSON.parse(r.meta_json) as DeepSeekMessageMeta;
+    } catch {
+      meta = {};
+    }
+  }
   return {
     id: `h-${r.id}`,
     dbId: r.id,
     role: r.role === "user" ? "user" : "assistant",
     content,
+    reasoning: meta.reasoning_content || undefined,
+    finishReason: meta.finish_reason,
+    refused: meta.refused,
   };
 };
 
@@ -156,8 +170,12 @@ export default function ChatPanel() {
     addMessage,
     attachDbId,
     recallLocal,
+    removeMessageLocal,
     appendToken,
     appendReasoning,
+    startContinueMessage,
+    appendContinueToken,
+    finishContinueMessage,
     finishStreaming,
     completeTool,
     setStreaming,
@@ -170,6 +188,11 @@ export default function ChatPanel() {
   const [attachments, setAttachments] = useState<string[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [chatSettings, setChatSettings] = useState<Settings | null>(null);
+    const [recordingSec, setRecordingSec] = useState<number | null>(null);
+  const [transcribing, setTranscribing] = useState(false);
+  const recorderRef = useRef<VoiceRecorder | null>(null);
+  const stoppingVoiceRef = useRef(false);
   /** AI 回复期间发出、还没被读到的追问（显示文字） */
   const [queued, setQueued] = useState<string[]>([]);
   const queuedRef = useRef<string[]>([]);
@@ -332,7 +355,19 @@ export default function ChatPanel() {
 
     add<{ delta: string }>("llm-token", (p) => appendToken(p.delta));
     add<{ delta: string }>("llm-reasoning", (p) => appendReasoning(p.delta));
-    add<{ content: string }>("llm-message-done", (p) => finishStreaming(p.content));
+    add<{ db_id: number; delta: string }>("deepseek-continue-token", (p) =>
+      appendContinueToken(p.db_id, p.delta),
+    );
+    add<{ db_id: number; content: string; meta?: DeepSeekMessageMeta }>(
+      "deepseek-continue-done",
+      (p) => finishContinueMessage(p.db_id, p.content, p.meta),
+    );
+    add<{ content: string; db_id?: number }>("llm-message-done", (p) => {
+      finishStreaming(p.content, p.db_id);
+    });
+    add("settings-changed", () => {
+      ipc.getSettings().then(setChatSettings).catch(() => {});
+    });
     add<{ content: string }>("llm-cancelled", (p) => {
       finishStreaming(p.content.trim() ? `${p.content}\n\n（已中断）` : undefined);
       if (!p.content.trim()) {
@@ -444,9 +479,11 @@ export default function ChatPanel() {
     };
     hydrate();
     refreshSessions();
+    ipc.getSettings().then(setChatSettings).catch(() => {});
 
     return () => {
       disposed = true;
+      recorderRef.current?.cancel();
       cleanups.forEach((u) => u());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -655,22 +692,114 @@ export default function ChatPanel() {
     }
   };
 
+  const patchChatOptions = async (patch: Parameters<typeof ipc.setDeepSeekChatOptions>[0]) => {
+    try {
+      const next = await ipc.setDeepSeekChatOptions(patch);
+      setChatSettings(next);
+    } catch (e) {
+      addMessage({ role: "system", content: `切换设置失败：${String(e)}` });
+    }
+  };
+
+  const stopAndTranscribeVoice = async () => {
+    if (stoppingVoiceRef.current) return;
+    const rec = recorderRef.current;
+    if (!rec) return;
+    stoppingVoiceRef.current = true;
+    recorderRef.current = null;
+    setRecordingSec(null);
+    setTranscribing(true);
+    try {
+      const { base64 } = await rec.stop();
+      const res = await ipc.deepseekAsr(base64, "voice.wav");
+      const text = res.text?.trim();
+      if (text) {
+        setInput((prev) => (prev ? `${prev} ${text}` : text));
+        window.setTimeout(() => inputRef.current?.focus(), 40);
+      } else {
+        addMessage({ role: "system", content: "未识别到有效语音内容。" });
+      }
+    } catch (e) {
+      addMessage({ role: "system", content: `语音识别失败：${String(e)}` });
+    } finally {
+      setTranscribing(false);
+      stoppingVoiceRef.current = false;
+    }
+  };
+
+  const toggleVoiceInput = async () => {
+    if (transcribing) return;
+    if (recorderRef.current) {
+      await stopAndTranscribeVoice();
+      return;
+    }
+    try {
+      const rec = await startVoiceRecording(
+        (sec) => setRecordingSec(sec),
+        () => { void stopAndTranscribeVoice(); },
+      );
+      recorderRef.current = rec;
+      setRecordingSec(0);
+    } catch (e) {
+      addMessage({ role: "system", content: `无法启动录音：${String(e)}` });
+    }
+  };
+
+  const handleContinue = async (dbId: number) => {
+    if (streaming) return;
+    startContinueMessage(dbId);
+    try {
+      await ipc.continueChatMessage(dbId);
+    } catch (e) {
+      finishStreaming();
+      addMessage({ role: "system", content: `继续生成失败：${String(e)}` });
+    }
+  };
+
+  const handleRegenerate = async (m: UiMessage) => {
+    if (streaming || m.dbId == null) return;
+    removeMessageLocal(m.id);
+    addMessage({ role: "assistant", content: "", streaming: true });
+    setStreaming(true);
+    setSessionTodos([]);
+    try {
+      await ipc.regenerateChatMessage(m.dbId);
+    } catch (e) {
+      finishStreaming();
+      addMessage({ role: "system", content: `重新生成失败：${String(e)}` });
+    }
+  };
+
+  const isDeepSeekMain = isDeepSeekBaseUrl(chatSettings?.base_url);
+  const lastAssistantId = [...messages].reverse().find((x) => x.role === "assistant" && x.dbId != null)?.id;
+  const toolLabels = useToolLabels();
+  const runningToolName = [...messages]
+    .reverse()
+    .find((x) => x.role === "tool" && x.streaming)?.toolName;
+  const runningToolLabel = runningToolName ? (toolLabels[runningToolName] ?? runningToolName) : undefined;
+
   return (
     <div className="relative h-full flex flex-col rounded-2xl overflow-hidden bg-slate-900/95 backdrop-blur border border-slate-700/60 shadow-2xl">
       <div
         data-tauri-drag-region
         className="h-11 shrink-0 flex items-center justify-between px-3 bg-slate-800/80 border-b border-slate-700/60 cursor-move"
       >
-        <div data-tauri-drag-region className="flex items-center gap-2">
-          <img src={appIcon} alt="拾光" className="w-5 h-5 rounded-full" draggable={false} />
-          <span data-tauri-drag-region className="text-slate-200 text-sm font-medium">
+        <div data-tauri-drag-region className="flex items-center gap-2 min-w-0">
+          <img src={appIcon} alt="拾光" className="w-5 h-5 rounded-full shrink-0" draggable={false} />
+          <span data-tauri-drag-region className="text-[#1f2329] text-sm font-semibold tracking-tight">
             拾光
           </span>
+          {streaming && (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[#fff4e2] border border-[#e8a23a]/60 text-[10px] font-medium text-[#875318]">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#c98428] animate-pulse" />
+              运行中
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1">
           <button
             onClick={createSession}
-            className="w-7 h-7 rounded text-slate-300 hover:text-white hover:bg-slate-700 transition text-base leading-none"
+            className="w-7 h-7 rounded-md flex items-center justify-center text-[#646a73] hover:text-[#1f2329] hover:bg-[#f3f4f6] transition"
             title="新会话"
           >
             <Icon name="plus" />
@@ -681,21 +810,24 @@ export default function ChatPanel() {
               refreshSessions();
             }}
             title="历史会话"
-            className={`px-2 py-1 text-xs rounded transition ${
-              showSessions ? "bg-sky-500/20 text-sky-300" : "text-slate-300 hover:text-white hover:bg-slate-700"
+            className={`w-7 h-7 rounded-md flex items-center justify-center transition ${
+              showSessions
+                ? "bg-[#fff4e2] text-[#a36313]"
+                : "text-[#646a73] hover:text-[#1f2329] hover:bg-[#f3f4f6]"
             }`}
           >
             <Icon name="history" /><span className="sr-only">历史会话</span>
           </button>
           <button
-            title="主面板" onClick={() => ipc.openMain().catch(() => {})}
-            className="px-2 py-1 text-xs rounded text-slate-300 hover:text-white hover:bg-slate-700 transition"
+            title="主面板"
+            onClick={() => ipc.openMain().catch(() => {})}
+            className="w-7 h-7 rounded-md flex items-center justify-center text-[#646a73] hover:text-[#1f2329] hover:bg-[#f3f4f6] transition"
           >
             <Icon name="settings" /><span className="sr-only">主面板</span>
           </button>
           <button
             onClick={() => ipc.hideChat().catch(() => {})}
-            className="w-7 h-7 rounded text-slate-400 hover:text-white hover:bg-slate-700 transition"
+            className="w-7 h-7 rounded-md flex items-center justify-center text-[#646a73] hover:text-[#1f2329] hover:bg-[#f3f4f6] transition text-xs"
             title="收起"
           >
             —
@@ -705,34 +837,70 @@ export default function ChatPanel() {
 
       <SessionProgressBar items={sessionTodos} />
 
-      <div ref={listRef} className="flex-1 overflow-y-auto scrollbar-thin px-3 py-3 space-y-2.5">
+      <div ref={listRef} className="flex-1 overflow-y-auto scrollbar-thin px-3 py-3 space-y-3">
         {messages.length === 0 && (
-          <div className="text-slate-500 text-xs text-center mt-10 leading-6">
+          <div className="text-[#646a73] text-xs text-center mt-14 leading-7 px-4">
+            <div className="text-sm font-medium text-[#1f2329] mb-1">有什么我可以帮你的？</div>
             试试对我说：
             <br />
-            「帮我整理一下桌面」
+            「帮我整理一下桌面」 · 「明天下午三点提醒我交周报」
             <br />
-            「明天下午三点提醒我交周报」
-            <br />
-            <span className="text-slate-600">输入 / 可快速运行工作流</span>
+            <span className="text-[#8c939d]">输入 / 可快速运行工作流，支持拖入或粘贴文件</span>
           </div>
         )}
         {messages.map((m) => (
           <MessageBubble
             key={m.id}
             m={m}
+            deepSeekEnabled={isDeepSeekMain}
+            isLastAssistant={m.id === lastAssistantId}
+            streaming={streaming}
             activePlanId={pendingPlan?.id ?? null}
             onConfirmPlan={confirmPlan}
             onCancelPlan={cancelPlan}
             onAnswerAsk={answerAsk}
             onSkipAsk={skipAsk}
             onRecall={recall}
+            onContinue={handleContinue}
+            onRegenerate={handleRegenerate}
           />
         ))}
         <div className="h-1" />
       </div>
 
-      <div className="shrink-0 p-2.5 border-t border-slate-700/60 bg-slate-800/50 relative z-20 overflow-visible">
+      {(streaming || transcribing) && (
+        <div className="shrink-0 mx-2.5 mb-1.5 px-3 py-2 rounded-xl border border-[#e8a23a]/50 bg-[#fffaf0] flex items-center justify-between gap-2 shadow-sm">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="relative flex h-2.5 w-2.5 shrink-0">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#e8a23a] opacity-75" />
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#c98428]" />
+            </span>
+            <span className="text-xs font-medium text-[#875318] truncate">
+              {transcribing
+                  ? "正在识别语音输入…"
+                  : cancelling
+                    ? "正在中断当前回复…"
+                    : runningToolLabel
+                      ? `正在执行：${runningToolLabel}`
+                      : "拾光正在思考与处理…"}
+            </span>
+          </div>
+          {streaming && (
+            <button
+              type="button"
+              onClick={stop}
+              disabled={cancelling}
+              className="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-rose-200 bg-white text-rose-600 hover:bg-rose-50 hover:border-rose-300 text-xs font-medium disabled:opacity-50 transition"
+              title="停止当前生成与任务"
+            >
+              <span className="inline-block w-2 h-2 rounded-[2px] bg-rose-500" />
+              {cancelling ? "中断中" : "停止"}
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="shrink-0 px-2.5 pb-2.5 pt-1 bg-white relative z-20 overflow-visible">
         {slashOpen && (
           <div className="absolute bottom-full left-2 right-2 z-30 mb-1">
             <ChatSlashMenu
@@ -743,8 +911,8 @@ export default function ChatPanel() {
           </div>
         )}
         {dragOver && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center rounded-b-2xl bg-sky-500/15 border-2 border-dashed border-sky-400 pointer-events-none">
-            <span className="text-sm text-sky-300 font-medium">松开以添加文件</span>
+          <div className="absolute inset-0 z-10 flex items-center justify-center rounded-b-2xl bg-[#fff4e2]/90 border-2 border-dashed border-[#e8a23a] pointer-events-none">
+            <span className="text-sm text-[#875318] font-medium">松开以添加文件</span>
           </div>
         )}
         {queued.length > 0 && (
@@ -753,26 +921,26 @@ export default function ChatPanel() {
               <div
                 key={`${i}-${q}`}
                 title="AI 做完当前这一步就会看到"
-                className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-sky-500/10 border border-sky-500/30 text-[11px] text-sky-200"
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#fff8ec] border border-[#e8a23a]/50 text-[11px] text-[#875318]"
               >
-                <span className="shrink-0 text-sky-400">排队中</span>
+                <span className="shrink-0 font-medium">排队中</span>
                 <span className="truncate">{q}</span>
               </div>
             ))}
           </div>
         )}
         {attachments.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-2">
+          <div className="flex flex-wrap items-center gap-1.5 mb-2">
             {attachments.map((p) => (
               <span
                 key={p}
-                className="inline-flex items-center gap-1 max-w-full px-2 py-1 rounded-md bg-slate-900/80 border border-slate-700 text-[11px] text-slate-300"
+                className="inline-flex items-center gap-1 max-w-full px-2 py-1 rounded-lg bg-[#f8f9fb] border border-[#e2e5e9] text-[11px] text-[#1f2329]"
                 title={p}
               >
                 <span className="truncate">📎 {fileName(p)}</span>
                 <button
                   onClick={() => setAttachments((prev) => prev.filter((x) => x !== p))}
-                  className="shrink-0 text-slate-500 hover:text-rose-400 leading-none"
+                  className="shrink-0 text-[#8c939d] hover:text-rose-600 leading-none"
                   title="移除"
                 >
                   ×
@@ -781,17 +949,7 @@ export default function ChatPanel() {
             ))}
           </div>
         )}
-        <div className="flex items-end gap-2">
-          <button
-            onClick={pickFiles}
-            title="添加文件（也可粘贴或拖入）"
-            className="shrink-0 w-9 h-9 rounded-lg bg-slate-900/80 border border-slate-700 text-slate-400 hover:text-sky-300 hover:border-sky-500/50 disabled:opacity-40 transition flex items-center justify-center"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-            </svg>
-          </button>
-          <div className="relative flex-1 min-w-0">
+        <div className="rounded-xl border border-[#dfe3e8] bg-[#f8f9fb] focus-within:border-[#c98428] focus-within:bg-white transition shadow-sm">
           <textarea
             ref={inputRef}
             value={input}
@@ -834,33 +992,86 @@ export default function ChatPanel() {
               }
             }}
             rows={1}
-            placeholder={streaming ? "可以继续补充，AI 下一步会看到" : "和 AI 说点什么… 输入 / 运行工作流"}
-            className={`w-full resize-none scrollbar-none bg-slate-900/80 text-slate-100 text-sm rounded-lg pl-3 py-2 outline-none border focus:border-sky-500 placeholder:text-slate-500 max-h-28 block ${streaming ? "pr-24 border-sky-500/40" : "pr-3 border-slate-700"}`}
+            placeholder={streaming ? "可以继续补充，AI 下一步会看到…" : "和拾光说点什么… 输入 / 运行工作流"}
+            className="chat-input w-full resize-none scrollbar-thin bg-transparent text-[#1f2329] text-sm px-3 pt-2.5 pb-1.5 outline-none border-0 placeholder:text-[#8c939d] min-h-[38px] max-h-28 block"
           />
-          {/* 回复中标识：在输入框内右侧，点方块停止 */}
-          {streaming && (
-            <div className="absolute right-1.5 top-1.5 flex items-center gap-1.5 h-6 pl-2 pr-1 rounded-md bg-sky-500/10 border border-sky-500/30 text-[11px] text-sky-300 select-none">
-              <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-pulse" />
-              <span>{cancelling ? "中断中" : "回复中"}</span>
+          <div className="flex items-center justify-between gap-2 px-2 pb-2 pt-1 border-t border-[#edf0f3]">
+            <div className="flex items-center gap-1 flex-wrap min-w-0">
               <button
-                onClick={stop}
-                disabled={cancelling}
-                title="停止回复"
-                className="w-4 h-4 rounded flex items-center justify-center hover:bg-rose-500/30 disabled:opacity-40 transition"
+                type="button"
+                onClick={pickFiles}
+                title="添加文件（也可粘贴或拖入）"
+                className="shrink-0 h-7 w-7 rounded-md text-[#646a73] hover:text-[#1f2329] hover:bg-[#edf0f3] transition flex items-center justify-center"
               >
-                <span className="inline-block w-2 h-2 rounded-[1px] bg-rose-400" />
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                </svg>
               </button>
+              {isDeepSeekMain && (
+                <button
+                  type="button"
+                  onClick={() => void toggleVoiceInput()}
+                  disabled={transcribing}
+                  title={
+                    recordingSec !== null
+                      ? "点击停止录音并转写文字（最长 120 秒）"
+                      : transcribing
+                        ? "正在识别语音…"
+                        : "DeepSeek 语音输入"
+                  }
+                  className={`shrink-0 h-7 rounded-md border transition flex items-center justify-center ${
+                    recordingSec !== null
+                      ? "px-2 gap-1 bg-rose-50 border-rose-300 text-rose-700"
+                      : "w-7 border-transparent text-[#646a73] hover:text-[#1f2329] hover:bg-[#edf0f3]"
+                  } disabled:opacity-40`}
+                >
+                  {transcribing ? (
+                    <span className="inline-block w-3.5 h-3.5 rounded-full border-2 border-[#c98428] border-t-transparent animate-spin" />
+                  ) : (
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                      <line x1="12" y1="19" x2="12" y2="23" />
+                      <line x1="8" y1="23" x2="16" y2="23" />
+                    </svg>
+                  )}
+                  {recordingSec !== null && (
+                    <span className="text-[11px] tabular-nums">
+                      {Math.floor(recordingSec / 60)}:{String(recordingSec % 60).padStart(2, "0")}
+                    </span>
+                  )}
+                </button>
+              )}
+              {isDeepSeekMain && chatSettings && (
+                <>
+                  <button
+                    type="button"
+                    disabled={streaming}
+                    onClick={() =>
+                      void patchChatOptions({ thinking_enabled: !chatSettings.thinking_enabled })
+                    }
+                    className={`h-7 px-2 rounded-md border text-[11px] transition ${
+                      chatSettings.thinking_enabled
+                        ? "border-[#e8a23a] bg-[#fff4e2] text-[#875318] font-medium"
+                        : "border-transparent text-[#646a73] hover:bg-[#edf0f3] hover:text-[#1f2329]"
+                    } disabled:opacity-50`}
+                    title="开启/关闭 DeepSeek 深度思考"
+                  >
+                    深度思考
+                  </button>
+                </>
+              )}
             </div>
-          )}
+            <button
+              type="button"
+              onClick={send}
+              disabled={!input.trim() && attachments.length === 0}
+              title={streaming ? "AI 会在下一步看到这条消息，先回应你再继续" : "发送 (Enter)"}
+              className="shrink-0 h-7 px-3 rounded-lg bg-[#b57520] hover:bg-[#9f651a] text-white text-xs font-medium disabled:opacity-35 transition"
+            >
+              发送
+            </button>
           </div>
-          <button
-            onClick={send}
-            disabled={!input.trim() && attachments.length === 0}
-            title={streaming ? "AI 会在下一步看到这条消息，先回应你再继续" : undefined}
-            className="px-3.5 py-2 rounded-lg bg-gradient-to-r from-sky-500 to-indigo-600 text-white text-sm font-medium disabled:opacity-40 hover:opacity-90 transition shrink-0"
-          >
-            发送
-          </button>
         </div>
       </div>
 
@@ -940,20 +1151,30 @@ function toolFailureSummary(result: unknown): string {
 
 function MessageBubble({
   m,
+  deepSeekEnabled,
+  isLastAssistant,
+  streaming,
   activePlanId,
   onConfirmPlan,
   onCancelPlan,
   onAnswerAsk,
   onSkipAsk,
   onRecall,
+  onContinue,
+  onRegenerate,
 }: {
   m: UiMessage;
+  deepSeekEnabled: boolean;
+  isLastAssistant: boolean;
+  streaming: boolean;
   activePlanId: number | null;
   onConfirmPlan: (p: Plan) => void;
   onCancelPlan: (p: Plan) => void;
   onAnswerAsk: (answers: AskAnswer[]) => void;
   onSkipAsk: () => void;
   onRecall: (m: UiMessage) => void;
+  onContinue: (dbId: number) => void;
+  onRegenerate: (m: UiMessage) => void;
 }) {
   const toolLabels = useToolLabels();
   const toolCards = usePluginToolCards();
@@ -1040,8 +1261,23 @@ function MessageBubble({
               </div>
             </details>
           ))}
-        {m.content && <Markdown content={m.content} />}
-        {m.content && !m.streaming && <ReplyActions content={m.content} />}
+        {m.refused ? (
+          <div className="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-2 text-xs text-amber-900 leading-5">
+            {m.content}
+          </div>
+        ) : (
+          m.content && <Markdown content={m.content} />
+        )}
+        {m.content && !m.streaming && (
+          <ReplyActions
+            content={m.content}
+            deepSeekEnabled={deepSeekEnabled}
+            disabled={streaming}
+            canContinue={Boolean(isLastAssistant && m.dbId != null && !m.refused)}
+            onContinue={m.dbId != null ? () => onContinue(m.dbId!) : undefined}
+            onRegenerate={isLastAssistant && m.dbId != null ? () => onRegenerate(m) : undefined}
+          />
+        )}
         {m.streaming && <span className="inline-block w-1.5 h-3.5 bg-sky-400 ml-0.5 animate-pulse" />}
         {m.plan && (
           <PlanCard

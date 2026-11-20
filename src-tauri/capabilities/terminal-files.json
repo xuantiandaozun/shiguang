@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "terminal-files",
   "description": "SSH terminal upload confirmations and window maximization",
-  "windows": ["terminal-*"],
+  "windows": ["terminal-*", "sftp-*"],
   "permissions": ["dialog:allow-message", "core:window:allow-toggle-maximize"]
 }

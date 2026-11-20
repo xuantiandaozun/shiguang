@@ -87,5 +87,47 @@
       "required": ["plugin_id"],
       "additionalProperties": false
     }
+  },
+  {
+    "name": "applet_list",
+    "label": "查看小程序入口",
+    "description": "列出所有可以独立弹窗打开和创建桌面快捷方式的功能（含内置功能如服务器/待办/录屏，以及用户自建插件小程序）和当前桌面快捷方式状态。",
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  },
+  {
+    "name": "applet_open",
+    "label": "打开小程序窗口",
+    "description": "把某个内置功能或插件页面以独立小程序窗口打开，支持同时打开多个不同工具；new_instance=true 时可对同一工具多开新窗口。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "plugin_id": {"type": "string", "description": "插件 id，如 servers、todos、recorder 或用户插件 id"},
+        "item_id": {"type": "string", "description": "入口 id 或 route，缺省与 plugin_id 同名"},
+        "slot": {"type": "string", "enum": ["applet", "tab", "window"], "description": "可选，指定挂载槽位"},
+        "query": {"type": "string", "description": "可选，传递给页面的查询参数（如 id=123）"},
+        "new_instance": {"type": "boolean", "description": "true 时强制多开一个新窗口"}
+      },
+      "required": ["plugin_id"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "applet_shortcut",
+    "label": "管理桌面快捷方式",
+    "description": "为某个内置功能或用户插件小程序在 Windows 桌面创建（或移除）带专属图标的快捷方式，双击直接打开该独立弹窗。执行前会自动弹确认卡片。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "action": {"type": "string", "enum": ["create", "remove"], "description": "create 创建/更新，remove 移除，默认 create"},
+        "plugin_id": {"type": "string", "description": "插件 id"},
+        "item_id": {"type": "string", "description": "入口 id 或 route，缺省与 plugin_id 同名"},
+        "slot": {"type": "string", "enum": ["applet", "tab", "window"]},
+        "name": {"type": "string", "description": "可选，桌面快捷方式名称（如「服务器管理」）"},
+        "query": {"type": "string", "description": "可选，启动附带参数"},
+        "new_instance": {"type": "boolean", "description": "true 时每次双击都会多开一个新窗口"}
+      },
+      "required": ["plugin_id"],
+      "additionalProperties": false
+    }
   }
 ]

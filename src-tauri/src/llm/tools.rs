@@ -97,6 +97,9 @@ fn tool_condition_met(db: &Db, name: &str) -> bool {
     let Some(when) = snapshot.tool(name).and_then(|t| t.when.clone()) else { return true };
     match when.as_str() {
         "setting:read_image_enabled" => crate::commands::load_settings(db).read_image_enabled,
+        "deepseek_available" => {
+            crate::llm::deepseek::resolve_deepseek_credentials(&crate::commands::load_settings(db)).is_some()
+        }
         other => {
             if let Some(key) = other.strip_prefix("setting:") {
                 db.get_setting(key).ok().flatten().is_some_and(|v| v == "true")
@@ -1132,6 +1135,22 @@ async fn execute_inner(
                 "result": recognized.content,
             }))
         }
+        "deepseek_parse_file" => {
+            let raw = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("缺少 path"))?;
+            let path = crate::reader::resolve_path(app, raw)?;
+            let layout = args.get("mode").and_then(|v| v.as_str()) != Some("text");
+            crate::llm::deepseek_chat::parse_document(
+                app,
+                &path,
+                args.get("question").and_then(|v| v.as_str()),
+                layout,
+                cancel,
+            )
+            .await
+        }
         "ocr_image" => {
             let raw = args
                 .get("path")
@@ -1323,7 +1342,15 @@ async fn execute_inner(
         "run_subagent" => crate::llm::subagent::execute_in_session(app, args, cancel, session_id).await,
         "await_subagent" => crate::llm::subagent::await_job(app, args, cancel).await,
         "reply_subagent" => crate::llm::subagent::reply_job(app, args).await,
-        "web_search" | "web_fetch" => crate::web::execute(name, args, cancel).await,
+        "web_search" | "web_fetch" => {
+            let settings = crate::commands::load_settings(db);
+            let creds = if settings.deepseek_search_for_agent {
+                crate::llm::deepseek::resolve_deepseek_credentials(&settings)
+            } else {
+                None
+            };
+            crate::web::execute_with_deepseek(creds, name, args, cancel).await
+        }
         n @ ("run_command"
         | "run_command_background"
         | "await_task"

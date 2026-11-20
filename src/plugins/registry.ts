@@ -43,7 +43,7 @@ function enabledPlugins(list: PluginManifestList | null): PluginInfo[] {
   return (list?.plugins ?? []).filter((p) => p.enabled);
 }
 
-function itemsOf(list: PluginManifestList | null, slot: "tabs" | "windows" | "tool_cards"): MountedItem[] {
+function itemsOf(list: PluginManifestList | null, slot: "applets" | "tabs" | "windows" | "tool_cards"): MountedItem[] {
   const out: MountedItem[] = [];
   for (const plugin of enabledPlugins(list)) {
     const items = plugin.ui?.[slot] as Array<PluginUiItem & { tool?: string }> | undefined;
@@ -54,6 +54,41 @@ function itemsOf(list: PluginManifestList | null, slot: "tabs" | "windows" | "to
     }
   }
   return out.sort((a, b) => (a.order ?? 1000) - (b.order ?? 1000) || a.key.localeCompare(b.key));
+}
+
+export function usePluginApplets(): MountedItem[] {
+  const list = usePluginStore((s) => s.list);
+  return itemsOf(list, "applets");
+}
+
+export function findPluginMount(
+  list: PluginManifestList | null,
+  pluginId: string,
+  slot: string,
+  itemId: string
+): MountedItem | null {
+  const plugin = enabledPlugins(list).find((p) => p.id === pluginId);
+  if (!plugin?.ui) return null;
+  const order: Array<"applets" | "tabs" | "windows"> =
+    slot === "applet"
+      ? ["applets", "tabs", "windows"]
+      : slot === "tab"
+        ? ["tabs", "applets", "windows"]
+        : slot === "window"
+          ? ["windows", "applets", "tabs"]
+          : ["applets", "tabs", "windows"];
+  for (const key of order) {
+    const arr = plugin.ui[key];
+    if (!Array.isArray(arr)) continue;
+    const hit = arr.find((it) => {
+      const id = key === "windows" ? (it.route ?? it.id) : (it.id ?? it.route);
+      return id === itemId;
+    });
+    if (hit) {
+      return { ...hit, plugin, key: `${plugin.id}:${itemId}` };
+    }
+  }
+  return null;
 }
 
 export function usePluginTabs(): MountedItem[] {

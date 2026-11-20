@@ -287,5 +287,35 @@
       ],
       "type": "object"
     }
+  },
+  {
+    "name": "deepseek_parse_file",
+    "label": "云端解析文档",
+    "when": "deepseek_available",
+    "description": "用 DeepSeek 云端解析文档（pdf/doc/docx/ppt/pptx/xlsx/图片/文本等），兜底工具：必须先用本地方式（read_file、office-docs、ocr_image）；仅当本地读不出内容（扫描件、版式复杂、图表多）或本地结果明显乱/缺时才用。较慢且会上传文件到 DeepSeek，涉及敏感文件先问用户。结果可能有遗漏，关键数据要交叉核对。",
+    "parameters": {
+      "properties": {
+        "path": {
+          "description": "文件路径：绝对路径或相对桌面",
+          "type": "string"
+        },
+        "question": {
+          "description": "想从文件里得到什么；留空则完整转写为 Markdown",
+          "type": "string"
+        },
+        "mode": {
+          "description": "layout（默认，图文混排含图表）或 text（只提取纯文字，更快更省）",
+          "enum": [
+            "layout",
+            "text"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
   }
 ]

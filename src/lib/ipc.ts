@@ -134,6 +134,31 @@ export interface Settings {
   profile_email: string;
   profile_city: string;
   temp_path: string;
+  deepseek_safety_check?: boolean;
+  deepseek_search_for_agent?: boolean;
+  deepseek_tts_voice?: "stella" | "tide";
+  deepseek_tts_filter_markdown?: boolean;
+}
+
+export interface DeepSeekFileObject {
+  id: string;
+  bytes: number;
+  created_at: number;
+  filename: string;
+  purpose: string;
+  expires_at?: number | null;
+}
+
+export interface DeepSeekAsrResult {
+  request_id: string;
+  text: string;
+  duration_ms: number;
+}
+
+export interface DeepSeekMessageMeta {
+  finish_reason?: string;
+  refused?: boolean;
+  reasoning_content?: string;
 }
 
 export interface TempInfo {
@@ -155,6 +180,7 @@ export interface ChatMsg {
   role: string;
   content: string;
   created_at: string;
+  meta_json?: string;
 }
 
 export interface SessionInfo {
@@ -436,6 +462,8 @@ export interface LlmUsageRequest {
 
 export const ipc = {
   serverTerminal: <T = unknown>(action: string, serverId: string, extra: Record<string, unknown> = {}) => invoke<T>("server_terminal", { action, serverId, ...extra }),
+  serverSftp: <T = unknown>(action: string, serverId: string, payload?: Record<string, unknown>) =>
+    invoke<T>("server_sftp", { action, serverId, payload: payload ?? null }),
   revealServerSecret: (serverId: string) => invoke<string>("reveal_server_secret", { serverId }),
   serverAction: <T = unknown>(name: string, args: Record<string, unknown> = {}) => invoke<T>("server_action", { name, args }),
   trustServerHost: (serverId: string, fingerprint: string) => invoke<ServerConnection>("trust_server_host", { serverId, fingerprint }),
@@ -556,6 +584,24 @@ export const ipc = {
 
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
+  setDeepSeekChatOptions: (patch: {
+    thinking_enabled?: boolean;
+    reasoning_effort?: string;
+    deepseek_safety_check?: boolean;
+    deepseek_tts_voice?: "stella" | "tide";
+  }) => invoke<Settings>("set_deepseek_chat_options", { patch }),
+  deepseekTts: (text: string, voiceId?: string) =>
+    invoke<string[]>("deepseek_tts", { text, voiceId: voiceId ?? null }),
+  deepseekAsr: (audioBase64: string, filename?: string) =>
+    invoke<DeepSeekAsrResult>("deepseek_asr", { audioBase64, filename: filename ?? null }),
+  deepseekListFiles: (purpose?: string) =>
+    invoke<DeepSeekFileObject[]>("deepseek_list_files", { purpose: purpose ?? null }),
+  deepseekDeleteFile: (fileId: string) =>
+    invoke<void>("deepseek_delete_file", { fileId }),
+  continueChatMessage: (messageId: number) =>
+    invoke<void>("continue_chat_message", { messageId }),
+  regenerateChatMessage: (messageId: number) =>
+    invoke<number>("regenerate_chat_message", { messageId }),
   getTempInfo: () => invoke<TempInfo>("get_temp_info"),
   clearTempDir: () => invoke<TempInfo>("clear_temp_dir"),
 
@@ -610,19 +656,80 @@ export const ipc = {
     invoke<T>("plugin_call_tool", { pluginId, tool, args }),
   openPluginWindow: (pluginId: string, route: string, query?: string) =>
     invoke<void>("open_plugin_window", { pluginId, route, query: query ?? null }),
+  listApplets: () => invoke<AppletEntry[]>("list_applets"),
+  openAppletWindow: (
+    pluginId: string,
+    itemId: string,
+    opts?: { slot?: string; query?: string; newInstance?: boolean }
+  ) =>
+    invoke<string>("open_applet_window", {
+      pluginId,
+      itemId,
+      slot: opts?.slot ?? null,
+      query: opts?.query ?? null,
+      newInstance: opts?.newInstance ?? false,
+    }),
+  createAppletShortcut: (
+    pluginId: string,
+    itemId: string,
+    opts?: { slot?: string; name?: string; query?: string; newInstance?: boolean }
+  ) =>
+    invoke<ShortcutRecord>("create_applet_shortcut", {
+      pluginId,
+      itemId,
+      slot: opts?.slot ?? null,
+      name: opts?.name ?? null,
+      query: opts?.query ?? null,
+      newInstance: opts?.newInstance ?? false,
+    }),
+  removeAppletShortcut: (key: string) => invoke<boolean>("remove_applet_shortcut", { key }),
 };
+
+export interface AppletEntry {
+  key: string;
+  plugin_id: string;
+  plugin_name: string;
+  builtin: boolean;
+  slot: "applet" | "tab" | "window" | string;
+  item_id: string;
+  title: string;
+  description: string;
+  icon: string | null;
+  width: number;
+  height: number;
+  multi: boolean;
+  shortcut_path: string | null;
+  shortcut_name: string | null;
+}
+
+export interface ShortcutRecord {
+  key: string;
+  plugin_id: string;
+  slot: string;
+  item_id: string;
+  query?: string | null;
+  name: string;
+  lnk_path: string;
+  icon_path: string;
+  new_instance: boolean;
+}
 
 /** 插件界面挂载项：component（仅内置）/ entry（iframe 页面）/ view（声明式 JSON）三选一。 */
 export interface PluginUiItem {
   id?: string;
   route?: string;
+  title?: string;
   label?: string;
+  description?: string;
   icon?: string;
   order?: number;
   group?: string;
   group_label?: string;
   nav?: boolean;
   lazy?: boolean;
+  width?: number;
+  height?: number;
+  multi?: boolean;
   component?: string;
   entry?: string;
   view?: string;
@@ -638,6 +745,7 @@ export interface PluginSlashCommand {
 }
 
 export interface PluginUi {
+  applets?: PluginUiItem[];
   tabs?: PluginUiItem[];
   windows?: PluginUiItem[];
   tool_labels?: Record<string, string>;
@@ -735,7 +843,7 @@ export function onEvent<T>(name: string, cb: (payload: T) => void): Promise<() =
 }
 
 export interface ServerConnection {
-  id: string; name: string; host: string; port: number; username: string; group: string; note: string; auth: "password" | "key" | "agent"; private_key: string; fingerprint: string | null;
+  id: string; name: string; host: string; port: number; username: string; group: string; tags?: string[]; note: string; auth: "password" | "key" | "agent"; private_key: string; fingerprint: string | null; last_used_at?: number | null;
 }
 export interface RemoteTask {
   id: string; server_id: string; server_name: string; kind: string; status: string; bytes: number; exit_code: number | null; error: string | null; started_at: string; finished_at: string | null; log_path: string;

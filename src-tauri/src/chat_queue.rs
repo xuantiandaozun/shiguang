@@ -114,6 +114,17 @@ impl ChatQueue {
         app.state::<crate::AppState>().chat_busy.store(false, Ordering::SeqCst);
     }
 
+    /// 尝试占用对话槽位（供续写/重新生成等操作使用）。
+    pub fn try_acquire(&self, app: &AppHandle) -> bool {
+        let mut inner = self.lock();
+        if inner.running {
+            return false;
+        }
+        inner.running = true;
+        app.state::<crate::AppState>().chat_busy.store(true, Ordering::SeqCst);
+        true
+    }
+
     /// 用户点停止：排队的消息不再自动处理，交给调用方入库。
     pub fn drain_all(&self) -> Vec<Pending> {
         std::mem::take(&mut self.lock().pending)
@@ -161,6 +172,7 @@ pub fn start_runner(app: AppHandle, session_id: i64, request_message_id: i64) {
                 *guard = Some(cancel.clone());
             }
             let _ = app.emit("chat-turn-started", json!({ "session_id": sid }));
+            // 统一走 agent：本地 skill / 工具优先，DeepSeek 能力只做兜底和特定场景。
             let result = crate::llm::agent::run_chat(app.clone(), sid, mid, cancel).await;
             if let Err(e) = result {
                 let _ = app.emit("llm-error", json!({ "message": e.to_string() }));

@@ -134,7 +134,12 @@ async fn terminal_action(
     rows: Option<u32>,
 ) -> Result<Value> {
     let label = format!("terminal-{id}");
-    if window.label() != "main" && window.label() != label {
+    let sftp_label = format!("sftp-{id}");
+    let is_servers_manager = window.label() == "main"
+        || window.label() == "applet-servers-servers"
+        || window.label().starts_with("applet-servers-servers-");
+    let allow_sftp_open = action == "open" && window.label() == sftp_label;
+    if !is_servers_manager && !allow_sftp_open && window.label() != label {
         bail!("无权访问此终端");
     }
     let state = app.state::<crate::AppState>();
@@ -228,6 +233,8 @@ async fn terminal_action(
     }
     if action == "open" {
         let server = hub.get(&id)?;
+        hub.touch_usage(&id);
+        let _ = app.emit("servers-changed", ());
         if let Some(w) = app.get_webview_window(&label) {
             w.show()?;
             w.set_focus()?;

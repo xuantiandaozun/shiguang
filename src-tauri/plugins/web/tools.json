@@ -2,12 +2,24 @@
   {
     "name": "web_search",
     "label": "搜索网页",
-    "description": "搜索公开网页，返回标题和链接。需要某条结果的全文时再 web_fetch。用户已经打开的标签页用 browser_*，不要用本工具去操作浏览器。",
+    "description": "搜索公开网页，返回标题和链接。优先级：browser_*（已打开页面/需登录/需交互）> 本工具本地搜索 > DeepSeek Search（本地失败时自动兜底）。需要某条结果全文时再 web_fetch。",
     "parameters": {
       "properties": {
         "query": {
           "description": "搜索词，尽量具体",
           "type": "string"
+        },
+        "engine": {
+          "description": "默认省略（本地优先，失败自动用 DeepSeek 兜底）。仅在确需 DeepSeek 时填 deepseek：本地被反爬/动态渲染拦住，或需要带正文摘要的检索",
+          "enum": [
+            "auto",
+            "deepseek"
+          ],
+          "type": "string"
+        },
+        "need_content": {
+          "description": "true 时返回带正文摘要的结果（走 DeepSeek Search，较慢，仅需要摘要时用）",
+          "type": "boolean"
         }
       },
       "required": [
@@ -19,11 +31,19 @@
   {
     "name": "web_fetch",
     "label": "抓取网页",
-    "description": "抓取一个 http/https 公开网页的正文。不要抓本机或带账号密码的网址。用户已经打开的页面用 browser_read / browser_snapshot。",
+    "description": "抓取 http/https 公开网页正文。优先级：browser_*（动态页面/需登录/用户已打开）> 本工具本地抓取 > DeepSeek Fetch（本地失败或正文过短时自动兜底）。不要抓本机或带账号密码的网址。",
     "parameters": {
       "properties": {
         "url": {
           "description": "完整 http/https 网址",
+          "type": "string"
+        },
+        "engine": {
+          "description": "默认省略（本地优先，失败自动用 DeepSeek 兜底）。仅在确需 DeepSeek 时填 deepseek：本地被反爬/动态渲染拦住，或需要带正文摘要的检索",
+          "enum": [
+            "auto",
+            "deepseek"
+          ],
           "type": "string"
         }
       },

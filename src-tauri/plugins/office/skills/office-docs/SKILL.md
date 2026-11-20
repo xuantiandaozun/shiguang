@@ -44,7 +44,7 @@ description: >
 
 ## PDF 要点
 
-- 扫描件（`office_read` 提示没有文字层）：先 `pdf_edit to_images`，再对图片用 `ocr_image`。
+- 扫描件（`office_read` 提示没有文字层）：先 `pdf_edit to_images`，再对图片用 `ocr_image`。本地 OCR 仍读不出或版式/图表太复杂、结果明显乱缺时，才用兜底工具 `deepseek_parse_file`（云端解析，会上传文件，敏感文件先问用户）。
 - 加密的 PDF 不能处理，需要请用户提供密码或解密后的版本。
 
 ## 专用工具做不到时

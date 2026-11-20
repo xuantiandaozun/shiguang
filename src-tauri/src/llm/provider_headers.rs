@@ -16,6 +16,26 @@ pub fn is_deepseek(base_url: &str) -> bool {
     base_url.to_ascii_lowercase().contains("api.deepseek.com")
 }
 
+/// 规范化 DeepSeek 根地址（去掉 `/v1`、`/beta`、`/anthropic` 等路径后缀）。
+pub fn deepseek_root_url(base_url: &str) -> String {
+    let mut s = base_url.trim().trim_end_matches('/').to_string();
+    for suffix in ["/anthropic/v1", "/anthropic", "/beta", "/v1"] {
+        if let Some(stripped) = s.strip_suffix(suffix) {
+            s = stripped.trim_end_matches('/').to_string();
+            break;
+        }
+    }
+    if s.is_empty() {
+        "https://api.deepseek.com".to_string()
+    } else {
+        s
+    }
+}
+
+pub fn deepseek_beta_base_url(base_url: &str) -> String {
+    format!("{}/beta", deepseek_root_url(base_url))
+}
+
 /// Google 直连不要带 OpenRouter 的 `google/` 前缀；2.5/2.0 对新账号已 404，改发 3.5 Flash。
 pub fn sanitize_model(base_url: &str, model: &str) -> String {
     let mut m = model.trim().to_string();

@@ -109,6 +109,7 @@ module.exports.add = (args, sg) => {
 
 ```json
 "ui": {
+  "applets": [ { "id": "expense-app", "title": "记账本", "icon": "usage", "width": 860, "height": 620, "view": "ui/view.json" } ],
   "tabs": [ { "id": "expense", "label": "记账", "icon": "usage", "order": 45, "view": "ui/view.json" } ],
   "windows": [ { "route": "expense-chart", "title": "开销图表", "width": 720, "height": 520, "entry": "ui/chart.html" } ],
   "tool_cards": [ { "tool": "expense_summary", "view": "ui/card.json" } ],
@@ -117,6 +118,7 @@ module.exports.add = (args, sg) => {
 }
 ```
 
+- `applets`：独立小程序入口（**新功能默认推荐**，完全独立弹窗运行、不占用主窗口/设置页标签栏，支持同时多开与生成带专属图标的 Windows 桌面快捷方式）。`tabs` 和用户插件的 `windows` 也自动支持独立弹窗与发送到桌面。`icon` 可填内置图标名或插件内相对图片路径（如 `assets/icon.png`）。
 - `tabs`：主窗口标签页。`icon` 可用 plug / todo / server / files / skill / usage / settings / ai / history。
 - `windows`：独立窗口，界面里用 `shiguang.openWindow("expense-chart")` 打开。
 - `tool_cards`：该工具成功后，在聊天里渲染卡片；界面收到 `params.result`。

@@ -9,7 +9,7 @@ body[data-window="terminal"] .remote-file-row:focus-within { background-color: #
 .server-list-row:hover > td:first-child, .server-list-row:focus-within > td:first-child { box-shadow: inset 3px 0 #e8a23a; }
 .server-list-row > td:first-child { padding-left: 8px; }
 /* Shared light surfaces. Terminal keeps its dedicated dark, high-contrast palette. */
-body:is([data-window="main"], [data-window="chat"], [data-window="reminder"], [data-window="delegation"]) {
+body:is([data-window="main"], [data-window="applet"], [data-window="sftp"], [data-window="chat"], [data-window="reminder"], [data-window="delegation"]) {
   --page: #ffffff;
   --surface: #ffffff;
   --ink: #1f2329;
@@ -29,14 +29,16 @@ body:not([data-window="terminal"]):not([data-window="floatball"]) [class*="borde
 body:not([data-window="terminal"]):not([data-window="floatball"]) [class*="bg-sky-500/"] { background-color: #fff3df; }
 body:not([data-window="terminal"]):not([data-window="floatball"]) [class*="from-sky-"] { background-image: none; background-color: #bc5228; color: #ffffff; }
 body[data-window="chat"] .items-end > [class*="from-sky-"] { background-color: #b57520; color: #fff8ef; }
-body[data-window="main"] header { background: #fff; }
-body[data-window="main"] main { background: #ffffff; }
+body:is([data-window="main"], [data-window="applet"]) header { background: #fff; }
+body:is([data-window="main"], [data-window="applet"]) main { background: #ffffff; }
 body[data-window="main"] nav { background: #ffffff; }
-body[data-window="main"] .settings-layout { background: #ffffff; }
-body[data-window="main"] .settings-layout :is(input, textarea, select) { background-color: #ffffff; border-color: #e8dfd8; }
-body[data-window="main"] .settings-layout [class*="bg-slate-"]:not(button):not(input):not(select):not(textarea) { background-color: #fffaf5; }
+body:is([data-window="main"], [data-window="applet"]) .settings-layout { background: #ffffff; }
+body:is([data-window="main"], [data-window="applet"]) .settings-layout :is(input, textarea, select) { background-color: #ffffff; border-color: #e8dfd8; }
+body:is([data-window="main"], [data-window="applet"]) .settings-layout [class*="bg-slate-"]:not(button):not(input):not(select):not(textarea) { background-color: #fffaf5; }
 body:not([data-window="terminal"]) :is(input, textarea, select) { accent-color: #c98428; }
 body:not([data-window="terminal"]) :is(button, input, textarea, select):focus-visible { outline: 2px solid #c98428; outline-offset: 2px; }
+/* 聊天输入框：焦点样式由外层容器的 focus-within 边框表示，不再出现四角描边 */
+body:not([data-window="terminal"]) textarea.chat-input:focus-visible { outline: none; }
 .organize-links { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
 .organize-links button { padding: 7px 12px; border-radius: 8px; border: 1px solid #e4d2b5; background: #fff8ec; color: #875318; font-size: 12px; }
 .settings-group { padding: 16px; background: white; border: 1px solid #e2e5e9; border-radius: 12px; }
@@ -52,3 +54,14 @@ body:not([data-window="terminal"]) :is(button, input, textarea, select):focus-vi
 .terminal-toolbar button:hover:not(:disabled) { background: #ffffff10; color: #f0c57a; }
 .terminal-toolbar button:focus-visible { outline: 2px solid #e8a23a; }
 .terminal-toolbar button[aria-pressed="true"], .terminal-toolbar button[aria-expanded="true"] { background: #e8a23a20; color: #f0c57a; }
+/* XFTP dual-pane file manager & redesigned server cards */
+.sftp-row { transition: background-color 90ms; user-select: none; }
+.sftp-row:hover { background-color: #faf6f0; }
+.sftp-row.is-selected { background-color: #fff3df; }
+.sftp-row.is-selected > td:first-child { box-shadow: inset 3px 0 #d97706; }
+.server-card { background: #ffffff; border: 1px solid #e6e8ec; transition: border-color 140ms, box-shadow 140ms, transform 140ms; }
+.server-card:hover { border-color: #e8a23a; box-shadow: 0 6px 20px -12px rgba(31, 35, 41, 0.22); }
+.server-card.is-connected { border-left: 3px solid #10b981; }
+.server-group-btn { transition: background-color 120ms, color 120ms; }
+.server-group-btn:hover { background: #f8f5f0; }
+.server-group-btn.is-active { background: #fff3df; color: #92400e; font-weight: 600; }

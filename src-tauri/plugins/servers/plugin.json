@@ -30,12 +30,14 @@
     }
   },
   "ui": {
-    "tabs": [
+    "applets": [
       {
         "id": "servers",
         "label": "服务器",
+        "title": "服务器管理",
         "icon": "server",
-        "order": 20,
+        "width": 1060,
+        "height": 700,
         "component": "builtin:ServersTab"
       }
     ],
@@ -43,6 +45,11 @@
       {
         "route": "terminal",
         "component": "builtin:ServerTerminal",
+        "lazy": true
+      },
+      {
+        "route": "sftp",
+        "component": "builtin:ServerSftp",
         "lazy": true
       }
     ]

@@ -107,6 +107,36 @@ fn json_i64(v: Option<&Value>) -> i64 {
         .unwrap_or(0)
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DeepSeekUsageDetails {
+    pub thinking_tokens: i64,
+    pub safety_tokens: i64,
+    pub tool_search: i64,
+    pub tool_fetch: i64,
+    pub tool_image_search: i64,
+}
+
+impl DeepSeekUsageDetails {
+    pub fn from_response(v: &Value) -> Self {
+        let Some(usage) = v.get("usage").filter(|u| u.is_object()) else {
+            return Self::default();
+        };
+        let details = usage
+            .get("completion_tokens_details")
+            .or_else(|| usage.get("output_tokens_details"));
+        let thinking_tokens = json_i64(details.and_then(|d| d.get("thinking_tokens")));
+        let safety_tokens = json_i64(details.and_then(|d| d.get("safety_tokens")));
+        let stu = usage.get("server_tool_use");
+        Self {
+            thinking_tokens,
+            safety_tokens,
+            tool_search: json_i64(stu.and_then(|s| s.get("tool_search"))),
+            tool_fetch: json_i64(stu.and_then(|s| s.get("tool_fetch"))),
+            tool_image_search: json_i64(stu.and_then(|s| s.get("tool_image_search"))),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct AssistantResp {
     pub content: String,
@@ -116,6 +146,12 @@ pub struct AssistantResp {
     /// 用户中断时为 true；content 保留已流出的部分内容
     pub interrupted: bool,
     pub usage: TokenUsage,
+    pub finish_reason: String,
+    pub refusal: Option<String>,
+    pub title: Option<String>,
+    pub server_tool_calls: Vec<Value>,
+    pub annotations: Vec<Value>,
+    pub deepseek_usage: DeepSeekUsageDetails,
 }
 
 /// 以 SSE 流式方式调用 OpenAI 兼容的 /chat/completions，文本增量经 on_text 回调透出，
@@ -129,6 +165,20 @@ pub async fn stream_chat(
     cancel: &tokio_util::sync::CancellationToken,
     on_text: impl Fn(&str),
     on_reasoning: impl Fn(&str),
+) -> Result<AssistantResp> {
+    stream_chat_with_events(client, cfg, body, cancel, on_text, on_reasoning, |_| {}).await
+}
+
+/// 支持接收 DeepSeek 扩展流事件（`server_tool_event`、完整 `server_tool_calls`、`annotations`、
+/// `title`、`finish_reason`、`refusal` 与流中 `error`）的流式调用。
+pub async fn stream_chat_with_events(
+    client: &reqwest::Client,
+    cfg: &LlmConfig,
+    body: &Value,
+    cancel: &tokio_util::sync::CancellationToken,
+    on_text: impl Fn(&str),
+    on_reasoning: impl Fn(&str),
+    on_server_event: impl Fn(&Value),
 ) -> Result<AssistantResp> {
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
     let request = crate::llm::provider_headers::apply_llm_headers(
@@ -193,12 +243,27 @@ pub async fn stream_chat(
             let parsed = TokenUsage::from_response(&v);
             if !parsed.is_empty() {
                 out.usage = parsed;
+                out.deepseek_usage = DeepSeekUsageDetails::from_response(&v);
             }
-            let Some(delta) = v
-                .get("choices")
-                .and_then(|c| c.get(0))
-                .and_then(|c| c.get("delta"))
-            else {
+            if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
+                let msg = err
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("模型生成中断");
+                return Err(anyhow!("DeepSeek 生成失败: {}", msg));
+            }
+            let Some(choice) = v.get("choices").and_then(|c| c.get(0)) else {
+                continue;
+            };
+            if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+                if !reason.is_empty() {
+                    out.finish_reason = reason.to_string();
+                }
+            }
+            if let Some(ev) = choice.get("server_tool_event").filter(|e| e.is_object()) {
+                on_server_event(ev);
+            }
+            let Some(delta) = choice.get("delta") else {
                 continue;
             };
             if let Some(rc) = delta
@@ -214,6 +279,25 @@ pub async fn stream_chat(
             if let Some(content) = delta_content_text(delta) {
                 out.content.push_str(&content);
                 on_text(&content);
+            }
+            if let Some(refusal) = delta.get("refusal").and_then(Value::as_str) {
+                if !refusal.is_empty() {
+                    out.refusal
+                        .get_or_insert_with(String::new)
+                        .push_str(refusal);
+                }
+            }
+            if let Some(title) = delta.get("title").and_then(Value::as_str) {
+                let t = title.trim();
+                if !t.is_empty() {
+                    out.title = Some(t.to_string());
+                }
+            }
+            if let Some(stc) = delta.get("server_tool_calls").and_then(Value::as_array) {
+                out.server_tool_calls = stc.clone();
+            }
+            if let Some(ann) = delta.get("annotations").and_then(Value::as_array) {
+                out.annotations = ann.clone();
             }
             if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                 for tc in tcs {
@@ -395,5 +479,51 @@ mod tests {
             "google/gemini-2.5-flash",
         );
         assert_eq!(cfg.model, "gemini-3.5-flash");
+    }
+
+    #[tokio::test]
+    async fn stream_chat_parses_deepseek_server_events_citations_and_title() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 4096];
+            let _ = socket.read(&mut buf).await.unwrap();
+            let sse = concat!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"先搜一下\"}}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"server_tool_event\":{\"type\":\"call_started\",\"step\":0,\"call\":{\"id\":\"c1\",\"type\":\"deepseek_web_search\",\"action\":{\"type\":\"search\",\"queries\":[\"DeepSeek\"]}}}}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"你好\"}},{\"index\":99}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"世界\",\"title\":\"测试标题\",\"server_tool_calls\":[{\"index\":0,\"reasoning_content\":\"先搜一下\",\"calls\":[{\"id\":\"c1\",\"type\":\"deepseek_web_search\",\"status\":\"completed\"}]}],\"annotations\":[{\"type\":\"url_citation\",\"url_citation\":{\"url\":\"https://example.com\",\"title\":\"Example\",\"start_index\":0,\"end_index\":4}}]},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20,\"total_tokens\":120,\"prompt_cache_hit_tokens\":80,\"completion_tokens_details\":{\"thinking_tokens\":10},\"server_tool_use\":{\"tool_search\":1}}}\n\n",
+                "data: [DONE]\n\n"
+            );
+            socket.write_all(sse.as_bytes()).await.unwrap();
+        });
+
+        let events = std::sync::Mutex::new(Vec::<Value>::new());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let resp = stream_chat_with_events(
+            &reqwest::Client::builder().no_proxy().build().unwrap(),
+            &LlmConfig::new(&format!("http://{addr}"), "k", "deepseek-flash"),
+            &json!({}),
+            &cancel,
+            |_| {},
+            |_| {},
+            |ev| events.lock().unwrap().push(ev.clone()),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(resp.reasoning_content, "先搜一下");
+        assert_eq!(resp.content, "你好世界");
+        assert_eq!(resp.title.as_deref(), Some("测试标题"));
+        assert_eq!(resp.finish_reason, "stop");
+        assert_eq!(resp.server_tool_calls.len(), 1);
+        assert_eq!(resp.annotations.len(), 1);
+        assert_eq!(resp.deepseek_usage.thinking_tokens, 10);
+        assert_eq!(resp.deepseek_usage.tool_search, 1);
+        assert_eq!(events.lock().unwrap().len(), 1);
     }
 }

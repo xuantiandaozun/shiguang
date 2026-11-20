@@ -13,7 +13,7 @@ and when you need a new feature, it can write a plugin for itself.
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app)
 [![Rust](https://img.shields.io/badge/Rust-backend-CE422B?logo=rust&logoColor=white)](src-tauri)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](src)
-[![Version](https://img.shields.io/badge/version-0.1.6-8B5CF6)](https://github.com/xuantiandaozun/shiguang/releases)
+[![Version](https://img.shields.io/badge/version-0.1.9-8B5CF6)](https://github.com/xuantiandaozun/shiguang/releases)
 [![License](https://img.shields.io/badge/license-MIT-22C55E)](LICENSE)
 
 **English** · [简体中文](README.zh-CN.md) · [Download](https://github.com/xuantiandaozun/shiguang/releases) · [Plugins](docs/PLUGINS.md) · [LINUX DO](https://linux.do)
@@ -32,31 +32,36 @@ and when you need a new feature, it can write a plugin for itself.
 - 📸 **Screenshots**: drag a region, or click any app window to capture all of it (even when covered); global hotkey, copied to the clipboard automatically.
 - 🎬 **Screen recording**: record web or desktop-app workflows; on export it zooms in on clicks and draws a smooth cursor. Sensitive data on web pages is blurred at the source, and you can cut clips, write narration, add a voiceover, background music and subtitles.
 - 🧑‍💻 **Workspaces & code agents**: it remembers how your projects are verified and deployed, and can hand code changes to Claude Code / Codex, then review the result and commit with your consent.
-- 🖥️ **Server ops**: SSH / SFTP, interactive terminals and conversational operations, with each action confirmed according to its risk.
-- 🧩 **Plugins all the way down**: tools, prompts, skills and UI all come from plugins and take effect as soon as you edit the files. ShiGuang can also author plugins itself.
+- 🖥️ **Server ops (standalone applet + XFTP dual-pane)**: dedicated Server Manager applet with groups, custom tags, and recent activity; SSH terminal and an XFTP-style dual-pane SFTP file manager run as separate windows.
+- 🧩 **Plugins & standalone applets**: tools, prompts, skills and UI all come from plugins and hot-reload on edit. ShiGuang can author standalone applets (`ui.applets`), open multiple instances at once, and pin them to your Windows desktop with custom `.ico` shortcuts.
 
-## 🆕 What's New
+## 🆕 What's New (v0.1.9)
 
-> Built after v0.1.6; ships with the next release.
+- **🚀 Standalone Applets & Desktop Shortcuts**
+  - **Independent multi-window applets**: built-in tools and user/AI-authored plugins (`ui.applets`) run in their own standalone windows without cluttering the main settings window; supports opening multiple tools simultaneously or multi-opening the same tool.
+  - **Windows desktop `.lnk` shortcuts + custom icons**: one-click "Send to Desktop" generates a multi-size `.ico` icon and `--open` shortcut that jumps straight to the target window (both cold start and single-instance hot wake).
+  - **AI applet tools**: `applet_list`, `applet_open`, and `applet_shortcut` let ShiGuang build standalone mini-apps and pin shortcuts to your desktop after confirmation.
+- **🖥️ Redesigned Server Manager & XFTP-Style Dual-Pane SFTP**
+  - **Standalone Server Manager**: moved out of the main tab bar into its own applet with a group sidebar, **Recent** view (top 10 by last operation), custom **tags** (`#tag`) + tag search, card/list toggle, and one-click SSH command copy.
+  - **Separate SSH Terminal & SFTP File Manager**: SSH terminal is now a clean full-width command + AI ops window; file management opens in a separate **XFTP-style dual-pane window** (left local Windows drives/folders + center bidirectional transfer controls & splitter + right remote SFTP browser/preview + bottom live transfer queue with folder support).
+- **🎙️ DeepSeek Native Enhancements**: voice input (ASR), reply speech playback (TTS), long-reply continuation, cloud document parsing, and DeepSeek web search/fetch fallback.
 
-- **🎬 Screen recording (new)**
-  - **Capture**: records the current browser tab. It saves the raw frames plus an input-event track and applies effects at export time, so you can adjust them as often as you like.
-  - **Auto-zoom**: zooms in on clicks and typing and follows smoothly; it redraws a larger cursor with click ripples. A "padded" style adds a gradient background and rounded corners for promo videos.
-  - **Source-side masking**: passwords, phone numbers, ID cards, emails, bank cards and keys are blurred on the page itself, so the recorded frames never contain them. You can add your own selectors and regexes.
-  - **Timeline editor**: cut clips, box extra masks, edit zoom segments and write narration, with a quick preview.
-  - **Voiceover & subtitles**: ShiGuang calls a TTS CLI installed on your machine (for example Volcengine's) to generate the voiceover. If a line runs longer than the footage, the video freezes until it finishes. Subtitles are written as `.srt` and can also be drawn onto the video.
-  - **Recorded by ShiGuang**: it can operate the page while recording and mark each step, and those marks become the narration draft.
-- **🧩 Plugin architecture**: a thin Rust core plus plugins. Tools, prompts, skills and UI are all plugin files, so changes need no rebuild. A new Plugins tab lets you enable, disable and roll back plugins, or have ShiGuang write one.
-- **🧑‍💻 Workspaces & code agents**: register your projects so you can refer to them by name; hand code changes to the Claude Code / Codex CLIs.
-- **🖱️ Trusted browser input**: clicks, typing and uploads are sent as real input through the debugger protocol; after each action it waits for the page to settle, then reports what changed and any new tabs.
+<details>
+<summary>v0.1.7 – v0.1.8</summary>
+
+- **Floating ball & single instance**: launching the app again wakes the running instance; hit-testable floating ball remembers its docked position and fixes transparent window artifacts.
+- **Screenshots & desktop recording**: capture ShiGuang's own windows or specific UI controls/regions; desktop recording with variety subtitles, code-generated scenes, and a standalone timeline editor.
+- **Desktop UI Automation & Office docs**: automate Windows desktop apps via UIA; read/write/convert docx, xlsx and PDF; follow-up message queue and background notifications.
+- **More code agents**: delegates coding tasks to Claude Code, Codex, Cursor CLI and Pi.
+
+</details>
 
 <details>
 <summary>v0.1.4 – v0.1.6</summary>
 
-- **Servers & AI ops**: SSH/SFTP connection manager, standalone terminals and conversational operations; remote browsing, text previews, multi-file uploads, transfer progress and Tab completion.
-- **Task delegation**: Codex / Cursor can delegate work to ShiGuang over a local MCP server, with review checkpoints, multi-round corrections and resume.
-- **Models & agents**: per-provider model catalogs and plan expiry dates; research, file and browser subagents are called automatically.
-- **UI & releases**: refreshed main window, chat and floating ball; releases are built locally by default, with GitHub signing them and generating the update metadata.
+- **Screen recording & plugin architecture**: auto-zoom, source-side masking, timeline editor, voiceover and subtitles; thin Rust core + hot-reloading plugin host.
+- **Workspaces & trusted browser input**: register fixed project workspaces; send real browser input via debugger protocol.
+- **Servers & delegation MCP**: SSH/SFTP manager, interactive terminals, conversational ops, and Codex/Cursor MCP delegation.
 
 See the [v0.1.5 release notes (Chinese)](docs/releases/0.1.5.md).
 
@@ -87,7 +92,7 @@ See the [v0.1.5 release notes (Chinese)](docs/releases/0.1.5.md).
 | Feature | Description |
 | --- | --- |
 | 🧑‍💻 Workspaces & agents | Remembers each project's path, verify commands, deploy steps and rules; delegates code changes to Claude Code / Codex, reviews the result and commits with your consent. [Docs (Chinese)](docs/WORKSPACES_AGENTS.md) |
-| 🖥️ Servers | SSH/SFTP connections, remote commands, browsing and transfers; an interactive terminal with Tab completion that can switch to conversational ops. [Docs (Chinese)](docs/SERVERS_MCP.md) |
+| 🖥️ Servers | Standalone Server Manager applet (groups, tags, recent list); separate SSH interactive terminal (Tab completion + AI ops) and XFTP-style dual-pane SFTP file manager. [Docs (Chinese)](docs/SERVERS_MCP.md) |
 | ⚙️ Background commands | Runs PowerShell, cmd or AI-written scripts; long jobs run in the background and the chat resumes when they finish; JSON output is parsed automatically |
 | 🤝 Delegation MCP | Codex / Cursor can hand tasks to ShiGuang, with review, follow-ups and interruption. [Docs (Chinese)](docs/DELEGATION_MCP.md) |
 
@@ -95,7 +100,7 @@ See the [v0.1.5 release notes (Chinese)](docs/releases/0.1.5.md).
 
 | Feature | Description |
 | --- | --- |
-| 🧩 Plugins | Tools, prompts, skills and UI all come from plugins; script, HTTP, command and MCP executors, plus declarative views and iframe pages. [Plugin guide](docs/PLUGINS.md) |
+| 🧩 Plugins & Applets | Tools, prompts, skills, UI and standalone applets (`ui.applets`) all come from plugins; supports multi-window launch and Windows desktop shortcuts with custom icons. [Plugin guide](docs/PLUGINS.md) |
 | 📚 Skills | Read-only built-in skills plus external skills the AI can create and refine; syncs with Claude / Codex / Cursor skill folders |
 | 🤖 Models & usage | Save several model profiles (DeepSeek, Qwen, Volcengine Agent Plan, OpenAI, …) and switch between them; shows token usage and cache-hit rate |
 
@@ -200,9 +205,9 @@ docs/                       design and usage docs
 
 ## 🧭 Roadmap
 
-- [x] Web screen recording: auto-zoom, source-side masking, cuts, voiceover, subtitles
-- [ ] Desktop app recording: per-window capture, global mouse tracking, OCR masking, optional exclusion of ShiGuang's own windows
-- [ ] Background music and keystroke overlays for recordings
+- [x] Web & desktop screen recording: auto-zoom, source-side masking, cuts, voiceover, background music, subtitles
+- [x] Standalone applets & Windows desktop shortcuts (custom icons & multi-window)
+- [x] Standalone Server Manager + XFTP-style dual-pane SFTP file manager
 - [ ] WeChat desktop chat-history monitoring (UIA / OCR approach and compliance risks under evaluation)
 
 ## 📄 License

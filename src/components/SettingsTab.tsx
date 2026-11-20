@@ -3,11 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { ipc, onEvent } from "../lib/ipc";
-import type { LlmProfile, ProfileEntry, Settings } from "../lib/ipc";
+import type { DeepSeekFileObject, LlmProfile, ProfileEntry, Settings } from "../lib/ipc";
 import {
   CUSTOM_CATALOG_MODEL,
   PROVIDER_GROUPS,
   PROVIDER_PRESETS,
+  isDeepSeekBaseUrl,
   listedProviderPresets,
   applyProviderPreset,
   bindingSummary,
@@ -239,30 +240,36 @@ export default function SettingsTab() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    ipc
-      .getSettings()
-      .then((s) => {
-        const profiles = migrateSettingsProfiles(s.llm_profiles ?? []);
-        const active = profiles.find((p) => p.id === s.active_llm_profile_id);
-        const automaticWindow = active
-          ? active.models?.find((m) => m.model === active.model)?.context_window ?? catalogContextWindow(profileCatalogModel(active), active.model)
-          : undefined;
-        setSettings({
-          ...s,
-          llm_profiles: profiles,
-          active_llm_profile_id: s.active_llm_profile_id ?? "",
-          context_window: automaticWindow ?? s.context_window,
-          vision_catalog_model:
-            s.vision_catalog_model ||
-            (s.vision_model
-              ? inferCatalogModel(s.vision_model, s.vision_base_url)
-              : ""),
-          subagent_catalog_model:
-            s.subagent_catalog_model ||
-            (s.subagent_model ? inferCatalogModel(s.subagent_model, s.base_url) : ""),
-        });
-      })
-      .catch((e) => setError(String(e)));
+    const load = () => {
+      ipc
+        .getSettings()
+        .then((s) => {
+          const profiles = migrateSettingsProfiles(s.llm_profiles ?? []);
+          const active = profiles.find((p) => p.id === s.active_llm_profile_id);
+          const automaticWindow = active
+            ? active.models?.find((m) => m.model === active.model)?.context_window ?? catalogContextWindow(profileCatalogModel(active), active.model)
+            : undefined;
+          setSettings({
+            ...s,
+            llm_profiles: profiles,
+            active_llm_profile_id: s.active_llm_profile_id ?? "",
+            context_window: automaticWindow ?? s.context_window,
+            vision_catalog_model:
+              s.vision_catalog_model ||
+              (s.vision_model
+                ? inferCatalogModel(s.vision_model, s.vision_base_url)
+                : ""),
+            subagent_catalog_model:
+              s.subagent_catalog_model ||
+              (s.subagent_model ? inferCatalogModel(s.subagent_model, s.base_url) : ""),
+          });
+        })
+        .catch((e) => setError(String(e)));
+    };
+    load();
+    let stop: (() => void) | undefined;
+    void onEvent("settings-changed", load).then((u) => { stop = u; });
+    return () => stop?.();
   }, []);
 
   if (!settings) {
@@ -319,6 +326,10 @@ export default function SettingsTab() {
           }
         }}
       />
+
+      {isDeepSeekBaseUrl(settings.base_url) && (
+        <DeepSeekCapabilitiesSection settings={settings} update={update} />
+      )}
 
       <details className="settings-group">
         <summary>高级 · 智能加速与上下文压缩</summary>
@@ -602,6 +613,145 @@ export default function SettingsTab() {
         {error && <span className="text-xs text-rose-400">{error}</span>}
       </div>
     </div>
+  );
+}
+
+function DeepSeekCapabilitiesSection({
+  settings,
+  update,
+}: {
+  settings: Settings;
+  update: (patch: Partial<Settings>) => void;
+}) {
+  const [files, setFiles] = useState<DeepSeekFileObject[]>([]);
+  const [filesLoaded, setFilesLoaded] = useState(false);
+  const [loadingFiles, setLoadingFiles] = useState(false);
+  const [filesError, setFilesError] = useState("");
+  const hasDeepSeekKey =
+    isDeepSeekBaseUrl(settings.base_url) && settings.api_key.trim().length > 0;
+
+  const loadFiles = async () => {
+    setLoadingFiles(true);
+    setFilesError("");
+    try {
+      const list = await ipc.deepseekListFiles();
+      setFiles(list);
+      setFilesLoaded(true);
+    } catch (e) {
+      setFilesError(String(e));
+    } finally {
+      setLoadingFiles(false);
+    }
+  };
+
+  const removeFile = async (id: string) => {
+    try {
+      await ipc.deepseekDeleteFile(id);
+      setFiles((prev) => prev.filter((f) => f.id !== id));
+    } catch (e) {
+      setFilesError(String(e));
+    }
+  };
+
+  return (
+    <details className="settings-group">
+      <summary>DeepSeek 补充能力（兜底 / 语音 / 安全）</summary>
+      <section className="space-y-3 pt-2">
+        <div className="text-xs text-slate-400 leading-5">
+          {hasDeepSeekKey
+            ? "主对话统一走本地 Skill 与工具；DeepSeek 只做兜底和特定场景（朗读、语音输入、续写）。"
+            : "请先在上方填写当前 DeepSeek 配置的 API Key。"}
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          <label className="block">
+            <div className="text-xs text-slate-400 mb-1">朗读音色（TTS）</div>
+            <select
+              value={settings.deepseek_tts_voice ?? "stella"}
+              onChange={(e) =>
+                update({ deepseek_tts_voice: e.target.value === "tide" ? "tide" : "stella" })
+              }
+              className={SELECT_CLASS}
+            >
+              <option value="stella">stella（海星 · 女声，默认）</option>
+              <option value="tide">tide（暗潮 · 男声）</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-slate-300">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={settings.deepseek_safety_check ?? false}
+              onChange={(e) => update({ deepseek_safety_check: e.target.checked })}
+              className="w-4 h-4 accent-sky-500"
+            />
+            续写时开启内容安全校验（high）
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={settings.deepseek_search_for_agent ?? true}
+              onChange={(e) => update({ deepseek_search_for_agent: e.target.checked })}
+              className="w-4 h-4 accent-sky-500"
+            />
+            本地搜索/抓取失败时用 DeepSeek 兜底
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={settings.deepseek_tts_filter_markdown ?? true}
+              onChange={(e) => update({ deepseek_tts_filter_markdown: e.target.checked })}
+              className="w-4 h-4 accent-sky-500"
+            />
+            朗读时自动过滤 Markdown 标记
+          </label>
+        </div>
+
+        <div className="pt-2 border-t border-slate-700/50 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-slate-400">DeepSeek 云端文件（Files API）</span>
+            <button
+              type="button"
+              onClick={() => void loadFiles()}
+              disabled={loadingFiles || !hasDeepSeekKey}
+              className="px-2.5 py-1 rounded text-xs bg-slate-700 text-slate-200 hover:bg-slate-600 disabled:opacity-40 transition"
+            >
+              {loadingFiles ? "加载中…" : filesLoaded ? "刷新列表" : "查看云端文件"}
+            </button>
+          </div>
+          {filesError && <div className="text-xs text-rose-400">{filesError}</div>}
+          {filesLoaded && files.length === 0 && (
+            <div className="text-xs text-slate-500">暂无已上传的 DeepSeek 文件</div>
+          )}
+          {files.length > 0 && (
+            <div className="max-h-44 overflow-y-auto space-y-1 pr-1">
+              {files.map((f) => (
+                <div
+                  key={f.id}
+                  className="flex items-center justify-between gap-2 rounded bg-slate-800/60 px-2.5 py-1.5 text-xs"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="text-slate-200 truncate">{f.filename || f.id}</div>
+                    <div className="text-[11px] text-slate-500">
+                      {f.purpose} · {(f.bytes / 1024).toFixed(1)} KB
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void removeFile(f.id)}
+                    className="shrink-0 text-xs text-slate-400 hover:text-rose-400 transition"
+                  >
+                    删除
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+    </details>
   );
 }
 

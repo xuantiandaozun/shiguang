@@ -6,7 +6,9 @@
     "linux"
   ],
   "windows": [
-    "main"
+    "main",
+    "applet-*",
+    "sftp-*"
   ],
   "permissions": [
     "updater:default",

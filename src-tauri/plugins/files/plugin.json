@@ -19,7 +19,8 @@
         "clear_temp_files",
         "edit_file",
         "read_image",
-        "ocr_image"
+        "ocr_image",
+        "deepseek_parse_file"
       ]
     }
   }
